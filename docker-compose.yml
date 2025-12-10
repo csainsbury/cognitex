@@ -1,0 +1,155 @@
+services:
+  # Main application
+  cognitex-core:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cognitex-core
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://cognitex:${POSTGRES_PASSWORD}@postgres:5432/cognitex
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - REDIS_URL=redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./src:/app/src:ro
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - cognitex-network
+
+  # Background worker for task processing
+  cognitex-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cognitex-worker
+    restart: unless-stopped
+    command: python -m cognitex.worker
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://cognitex:${POSTGRES_PASSWORD}@postgres:5432/cognitex
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./src:/app/src:ro
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - cognitex-network
+
+  # Discord bot (separate container for gateway connection)
+  discord-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cognitex-discord
+    restart: unless-stopped
+    command: python -m cognitex.discord_bot
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://cognitex:${POSTGRES_PASSWORD}@postgres:5432/cognitex
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./src:/app/src:ro
+    depends_on:
+      - cognitex-core
+    networks:
+      - cognitex-network
+
+  # PostgreSQL with pgvector for relational data and embeddings
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: cognitex-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=cognitex
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=cognitex
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cognitex -d cognitex"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cognitex-network
+
+  # Neo4j for graph database
+  neo4j:
+    image: neo4j:5-community
+    container_name: cognitex-neo4j
+    restart: unless-stopped
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD}
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    ports:
+      - "7474:7474"  # HTTP
+      - "7687:7687"  # Bolt
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:7474"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cognitex-network
+
+  # Redis for queues, caching, and pub/sub
+  redis:
+    image: redis:7-alpine
+    container_name: cognitex-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cognitex-network
+
+networks:
+  cognitex-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  neo4j_data:
+  neo4j_logs:
+  redis_data:
