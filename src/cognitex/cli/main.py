@@ -900,5 +900,337 @@ def doc_search(
     asyncio.run(run_search())
 
 
+# =============================================================================
+# Agent Commands
+# =============================================================================
+
+@app.command()
+def agent_chat(
+    message: str = typer.Argument(None, help="Message to send to the agent"),
+) -> None:
+    """Chat with the Cognitex agent."""
+    from cognitex.config import get_settings
+
+    settings = get_settings()
+    if not settings.together_api_key.get_secret_value():
+        console.print("[red]TOGETHER_API_KEY not configured in .env[/red]")
+        raise typer.Exit(1)
+
+    async def run_chat():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.db.postgres import init_postgres, close_postgres
+        from cognitex.db.redis import init_redis, close_redis
+        from cognitex.agent import get_agent
+
+        await init_neo4j()
+        await init_postgres()
+        await init_redis()
+
+        try:
+            agent = await get_agent()
+
+            if message:
+                # Single message mode
+                console.print(f"[dim]You:[/dim] {message}\n")
+                response = await agent.chat(message)
+                console.print(f"[bold cyan]Cognitex:[/bold cyan] {response}")
+            else:
+                # Interactive mode
+                console.print("[bold]Cognitex Agent Chat[/bold]")
+                console.print("[dim]Type 'quit' or 'exit' to leave, 'approvals' to see pending actions[/dim]\n")
+
+                while True:
+                    try:
+                        user_input = console.input("[green]You:[/green] ")
+                    except (KeyboardInterrupt, EOFError):
+                        break
+
+                    if user_input.lower() in ("quit", "exit", "q"):
+                        break
+
+                    if user_input.lower() == "approvals":
+                        approvals = await agent.get_pending_approvals()
+                        if not approvals:
+                            console.print("[dim]No pending approvals[/dim]\n")
+                        else:
+                            for apr in approvals:
+                                console.print(f"[yellow]{apr['id']}[/yellow]: {apr['action_type']}")
+                                console.print(f"  [dim]{apr['reasoning'][:100]}...[/dim]\n")
+                        continue
+
+                    if user_input.lower().startswith("approve "):
+                        approval_id = user_input.split(" ", 1)[1].strip()
+                        result = await agent.handle_approval(approval_id, approved=True)
+                        if result.get("success"):
+                            console.print(f"[green]Approved and executed: {result.get('action')}[/green]\n")
+                        else:
+                            console.print(f"[red]Failed: {result.get('error')}[/red]\n")
+                        continue
+
+                    if user_input.lower().startswith("reject "):
+                        approval_id = user_input.split(" ", 1)[1].strip()
+                        result = await agent.handle_approval(approval_id, approved=False)
+                        console.print(f"[yellow]Rejected: {result.get('action')}[/yellow]\n")
+                        continue
+
+                    if not user_input.strip():
+                        continue
+
+                    response = await agent.chat(user_input)
+                    console.print(f"\n[bold cyan]Cognitex:[/bold cyan] {response}\n")
+
+        finally:
+            await close_redis()
+            await close_neo4j()
+            await close_postgres()
+
+    asyncio.run(run_chat())
+
+
+@app.command()
+def briefing() -> None:
+    """Get a briefing from the agent (morning summary)."""
+    from cognitex.config import get_settings
+
+    settings = get_settings()
+    if not settings.together_api_key.get_secret_value():
+        console.print("[red]TOGETHER_API_KEY not configured in .env[/red]")
+        raise typer.Exit(1)
+
+    console.print("[bold]Generating briefing...[/bold]\n")
+
+    async def run_briefing():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.db.postgres import init_postgres, close_postgres
+        from cognitex.db.redis import init_redis, close_redis
+        from cognitex.agent import get_agent
+
+        await init_neo4j()
+        await init_postgres()
+        await init_redis()
+
+        try:
+            agent = await get_agent()
+            briefing = await agent.morning_briefing()
+            console.print(briefing)
+        finally:
+            await close_redis()
+            await close_neo4j()
+            await close_postgres()
+
+    asyncio.run(run_briefing())
+
+
+@app.command()
+def approvals(
+    action: str = typer.Argument(None, help="Action: 'list', 'approve <id>', or 'reject <id>'"),
+    approval_id: str = typer.Argument(None, help="Approval ID for approve/reject actions"),
+) -> None:
+    """Manage pending agent approvals."""
+    async def manage_approvals():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.db.postgres import init_postgres, close_postgres
+        from cognitex.db.redis import init_redis, close_redis
+        from cognitex.agent import get_agent
+
+        await init_neo4j()
+        await init_postgres()
+        await init_redis()
+
+        try:
+            agent = await get_agent()
+            pending = await agent.get_pending_approvals()
+
+            if not action or action == "list":
+                if not pending:
+                    console.print("[dim]No pending approvals[/dim]")
+                    return
+
+                console.print(f"[bold]Pending Approvals ({len(pending)})[/bold]\n")
+
+                for apr in pending:
+                    action_type = apr["action_type"]
+                    params = apr["params"]
+
+                    console.print(f"[bold yellow]{apr['id']}[/bold yellow]")
+                    console.print(f"  Action: [cyan]{action_type}[/cyan]")
+
+                    if action_type == "send_email":
+                        console.print(f"  To: {params.get('to')}")
+                        console.print(f"  Subject: {params.get('subject')}")
+                        console.print(f"  [dim]Body preview: {params.get('body', '')[:100]}...[/dim]")
+                    elif action_type == "create_event":
+                        console.print(f"  Title: {params.get('title')}")
+                        console.print(f"  Start: {params.get('start')}")
+
+                    console.print(f"  [dim]Reasoning: {apr['reasoning'][:150]}...[/dim]")
+                    console.print()
+
+                console.print("[dim]Use 'cognitex approvals approve <id>' or 'cognitex approvals reject <id>'[/dim]")
+
+            elif action == "approve" and approval_id:
+                result = await agent.handle_approval(approval_id, approved=True)
+                if result.get("success"):
+                    console.print(f"[green]Approved and executed: {result.get('action')}[/green]")
+                else:
+                    console.print(f"[red]Failed: {result.get('error')}[/red]")
+
+            elif action == "reject" and approval_id:
+                result = await agent.handle_approval(approval_id, approved=False)
+                console.print(f"[yellow]Rejected: {result.get('action')}[/yellow]")
+
+            else:
+                console.print("[red]Invalid action. Use 'list', 'approve <id>', or 'reject <id>'[/red]")
+
+        finally:
+            await close_redis()
+            await close_neo4j()
+            await close_postgres()
+
+    asyncio.run(manage_approvals())
+
+
+@app.command("agent-run")
+def agent_run(
+    mode: str = typer.Argument(..., help="Mode: briefing, review, monitor, escalate"),
+    trigger: str = typer.Option("Manual CLI trigger", "--trigger", "-t", help="Trigger description"),
+) -> None:
+    """Run the agent in a specific mode."""
+    from cognitex.config import get_settings
+
+    settings = get_settings()
+    if not settings.together_api_key.get_secret_value():
+        console.print("[red]TOGETHER_API_KEY not configured in .env[/red]")
+        raise typer.Exit(1)
+
+    mode_map = {
+        "briefing": "BRIEFING",
+        "review": "REVIEW",
+        "monitor": "MONITOR",
+        "escalate": "ESCALATE",
+    }
+
+    if mode.lower() not in mode_map:
+        console.print(f"[red]Invalid mode. Choose from: {', '.join(mode_map.keys())}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold]Running agent in {mode} mode...[/bold]\n")
+
+    async def run_agent():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.db.postgres import init_postgres, close_postgres
+        from cognitex.db.redis import init_redis, close_redis
+        from cognitex.agent import get_agent, AgentMode
+
+        await init_neo4j()
+        await init_postgres()
+        await init_redis()
+
+        try:
+            agent = await get_agent()
+            agent_mode = AgentMode[mode_map[mode.lower()]]
+
+            result = await agent.run(
+                mode=agent_mode,
+                trigger=trigger,
+            )
+
+            console.print(f"[bold]Execution Result[/bold]")
+            console.print(f"  Success: {'[green]Yes[/green]' if result.success else '[red]No[/red]'}")
+            console.print(f"  Steps: {result.steps_executed}/{result.steps_total}")
+
+            if result.pending_approvals:
+                console.print(f"  Pending approvals: [yellow]{len(result.pending_approvals)}[/yellow]")
+
+            if result.errors:
+                console.print(f"  [red]Errors:[/red]")
+                for err in result.errors:
+                    console.print(f"    - {err}")
+
+            if result.user_notification:
+                console.print(f"\n[bold cyan]Agent says:[/bold cyan]")
+                console.print(result.user_notification)
+
+        finally:
+            await close_redis()
+            await close_neo4j()
+            await close_postgres()
+
+    asyncio.run(run_agent())
+
+
+@app.command("agent-status")
+def agent_status() -> None:
+    """Show agent system status."""
+    from cognitex.config import get_settings
+
+    settings = get_settings()
+
+    console.print("[bold]Agent Configuration[/bold]\n")
+
+    table = Table()
+    table.add_column("Setting", style="cyan")
+    table.add_column("Value", style="white")
+
+    table.add_row("Planner Model", settings.together_model_planner)
+    table.add_row("Executor Model", settings.together_model_executor)
+    table.add_row("Embedding Model", settings.together_model_embedding)
+    table.add_row(
+        "Together API",
+        "[green]Configured[/green]" if settings.together_api_key.get_secret_value() else "[red]Missing[/red]"
+    )
+
+    console.print(table)
+
+    # Check memory stats if possible
+    async def check_memory():
+        from cognitex.db.redis import init_redis, close_redis, get_redis
+        from cognitex.db.postgres import init_postgres, close_postgres, get_session
+        from sqlalchemy import text
+
+        try:
+            await init_redis()
+            await init_postgres()
+
+            redis = await get_redis()
+
+            # Count working memory items
+            context_exists = await redis.exists("cognitex:memory:working:context")
+            pending_count = await redis.scard("cognitex:memory:working:approvals:pending")
+
+            console.print("\n[bold]Working Memory (Redis)[/bold]")
+            console.print(f"  Context: {'[green]Active[/green]' if context_exists else '[dim]Empty[/dim]'}")
+            console.print(f"  Pending approvals: {pending_count}")
+
+            # Count episodic memories
+            async for session in get_session():
+                try:
+                    result = await session.execute(text(
+                        "SELECT memory_type, COUNT(*) FROM agent_memory GROUP BY memory_type"
+                    ))
+                    rows = result.fetchall()
+
+                    console.print("\n[bold]Episodic Memory (Postgres)[/bold]")
+                    if rows:
+                        for row in rows:
+                            console.print(f"  {row[0]}: {row[1]}")
+                    else:
+                        console.print("  [dim]No memories stored yet[/dim]")
+                except Exception:
+                    console.print("\n[bold]Episodic Memory (Postgres)[/bold]")
+                    console.print("  [dim]Table not initialized yet[/dim]")
+
+        except Exception as e:
+            console.print(f"\n[yellow]Could not check memory status: {e}[/yellow]")
+        finally:
+            try:
+                await close_redis()
+                await close_postgres()
+            except Exception:
+                pass
+
+    asyncio.run(check_memory())
+
+
 if __name__ == "__main__":
     app()

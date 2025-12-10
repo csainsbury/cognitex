@@ -37,18 +37,21 @@ class Settings(BaseSettings):
 
     # Together.ai
     together_api_key: SecretStr = Field(default=SecretStr(""))
-    together_model_primary: str = Field(
-        default="meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
-        description="Primary model for complex reasoning",
+    together_model_planner: str = Field(
+        default="Qwen/Qwen3-30B-A3B",
+        description="Planner model for reasoning and decision making (MoE, 3B active)",
     )
-    together_model_fast: str = Field(
-        default="meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
-        description="Fast model for simple classification",
+    together_model_executor: str = Field(
+        default="deepseek-ai/DeepSeek-V3",
+        description="Executor model for structured tasks (email drafting, etc)",
     )
     together_model_embedding: str = Field(
         default="togethercomputer/m2-bert-80M-8k-retrieval",
         description="Model for generating embeddings",
     )
+    # Legacy aliases for backward compatibility
+    together_model_primary: str = Field(default="")
+    together_model_fast: str = Field(default="")
 
     # Discord
     discord_bot_token: SecretStr = Field(default=SecretStr(""))

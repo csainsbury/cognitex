@@ -19,6 +19,7 @@ dependencies = [
 
     # Background tasks
     "arq>=0.26.1",
+    "apscheduler>=3.10.0",
 
     # LLM
     "together>=1.3.0",
