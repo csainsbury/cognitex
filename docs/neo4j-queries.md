@@ -440,3 +440,34 @@ cognitex doc-search "grant proposal"
 # System status
 cognitex status
 ```
+
+---
+
+## Agent Commands
+
+The agent system provides intelligent interaction with your data:
+
+```bash
+# Chat with the agent
+cognitex agent-chat                    # Interactive mode
+cognitex agent-chat "What's urgent?"   # Single query
+
+# Morning briefing
+cognitex briefing
+
+# Manage pending approvals (emails, events the agent wants to create)
+cognitex approvals                     # List pending
+cognitex approvals approve apr_xxx     # Approve an action
+cognitex approvals reject apr_xxx      # Reject an action
+
+# Run agent in specific mode
+cognitex agent-run briefing            # Morning summary
+cognitex agent-run review              # Evening review
+cognitex agent-run monitor             # Check for urgent
+cognitex agent-run escalate            # Handle overdue
+
+# Agent status
+cognitex agent-status                  # Config + memory stats
+```
+
+See `docs/agent-architecture.md` for full agent documentation.
