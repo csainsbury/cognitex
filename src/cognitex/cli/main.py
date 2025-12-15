@@ -1912,17 +1912,6 @@ def project_new() -> None:
             except (ValueError, IndexError):
                 status = "active"
 
-            # Priority
-            console.print("\n[bold]Priority:[/bold]")
-            priorities = [("low", "Low"), ("medium", "Medium"), ("high", "High")]
-            for i, (_, label) in enumerate(priorities, 1):
-                console.print(f"  [cyan]{i}[/cyan]. {label}")
-            priority_choice = Prompt.ask("Select priority", default="2")
-            try:
-                priority = priorities[int(priority_choice) - 1][0]
-            except (ValueError, IndexError):
-                priority = "medium"
-
             # Target date
             console.print("\n[bold]Target completion:[/bold]")
             console.print("  [cyan]1[/cyan]. End of this month")
@@ -1960,13 +1949,17 @@ def project_new() -> None:
                 goal_id = prompt_with_options("Select goal", goals)
 
             # Create the project
+            import uuid
+            project_id = f"proj_{uuid.uuid4().hex[:12]}"
+
             async for session in get_neo4j_session():
                 project = await create_project(
                     session,
+                    project_id=project_id,
                     title=title,
                     description=description or None,
                     status=status,
-                    priority=priority,
+                    target_date=target_date,
                 )
 
                 # Link to goal if selected
@@ -1977,7 +1970,6 @@ def project_new() -> None:
                 console.print(f"\n[green]✓ Created project:[/green] {project['title']}")
                 console.print(f"  ID: [dim]{project['id']}[/dim]")
                 console.print(f"  Status: {status}")
-                console.print(f"  Priority: {priority}")
                 if target_date:
                     console.print(f"  Target: {target_date}")
                 if goal_id:
