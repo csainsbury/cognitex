@@ -707,7 +707,7 @@ class CreateProjectTool(BaseTool):
     """Create a new project."""
 
     name = "create_project"
-    description = "Create a new project. Can optionally link to a goal."
+    description = "Create a new project. Can link to goal and assign owner/stakeholders."
     risk = ToolRisk.AUTO
     parameters = {
         "title": {"type": "string", "description": "Project title"},
@@ -715,6 +715,8 @@ class CreateProjectTool(BaseTool):
         "status": {"type": "string", "description": "Status: planning, active, paused", "default": "active"},
         "target_date": {"type": "string", "description": "Target completion date (ISO)", "optional": True},
         "goal_id": {"type": "string", "description": "Goal ID to link to", "optional": True},
+        "owner_email": {"type": "string", "description": "Email of project owner", "optional": True},
+        "stakeholder_emails": {"type": "array", "description": "List of stakeholder emails", "optional": True},
     }
 
     async def execute(
@@ -724,7 +726,11 @@ class CreateProjectTool(BaseTool):
         status: str = "active",
         target_date: str | None = None,
         goal_id: str | None = None,
+        owner_email: str | None = None,
+        stakeholder_emails: list[str] | None = None,
     ) -> ToolResult:
+        from cognitex.db.neo4j import get_neo4j_session
+        from cognitex.db.graph_schema import link_project_to_person
         from cognitex.services.tasks import get_project_service
 
         try:
@@ -737,10 +743,52 @@ class CreateProjectTool(BaseTool):
                 goal_id=goal_id,
             )
 
+            # Link to people
+            async for session in get_neo4j_session():
+                if owner_email:
+                    await link_project_to_person(session, project["id"], owner_email, role="owner")
+                if stakeholder_emails:
+                    for email in stakeholder_emails:
+                        await link_project_to_person(session, project["id"], email, role="stakeholder")
+                break
+
             logger.info("Created project", project_id=project["id"], title=title[:50])
             return ToolResult(success=True, data={"project_id": project["id"], "project": project})
         except Exception as e:
             logger.warning("Project creation failed", title=title[:50], error=str(e))
+            return ToolResult(success=False, error=str(e))
+
+
+class LinkProjectToPersonTool(BaseTool):
+    """Link a project to a person."""
+
+    name = "link_project_to_person"
+    description = "Link a project to a person as owner or stakeholder."
+    risk = ToolRisk.AUTO
+    parameters = {
+        "project_id": {"type": "string", "description": "Project ID"},
+        "person_email": {"type": "string", "description": "Person's email address"},
+        "role": {"type": "string", "description": "Role: owner or stakeholder", "default": "stakeholder"},
+    }
+
+    async def execute(
+        self,
+        project_id: str,
+        person_email: str,
+        role: str = "stakeholder",
+    ) -> ToolResult:
+        from cognitex.db.neo4j import get_neo4j_session
+        from cognitex.db.graph_schema import link_project_to_person
+
+        try:
+            async for session in get_neo4j_session():
+                await link_project_to_person(session, project_id, person_email, role=role)
+                break
+
+            logger.info("Linked project to person", project_id=project_id, person=person_email, role=role)
+            return ToolResult(success=True, data={"linked": True, "role": role})
+        except Exception as e:
+            logger.warning("Project-person link failed", error=str(e))
             return ToolResult(success=False, error=str(e))
 
 
@@ -1069,6 +1117,7 @@ class ToolRegistry:
             LinkTaskTool(),
             CreateProjectTool(),
             UpdateProjectTool(),
+            LinkProjectToPersonTool(),
             CreateGoalTool(),
             UpdateGoalTool(),
             SendNotificationTool(),
