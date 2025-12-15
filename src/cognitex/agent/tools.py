@@ -296,13 +296,17 @@ class CreateTaskTool(BaseTool):
     """Create a new task in the graph."""
 
     name = "create_task"
-    description = "Create a new task. Automatically links to source email/event if provided."
+    description = "Create a new task. Can link to projects, goals, emails, or events."
     risk = ToolRisk.AUTO
     parameters = {
         "title": {"type": "string", "description": "Task title"},
         "description": {"type": "string", "description": "Task description", "optional": True},
-        "energy_cost": {"type": "integer", "description": "Energy cost 1-10", "default": 3},
+        "priority": {"type": "string", "description": "Priority: low, medium, high, critical", "default": "medium"},
         "due_date": {"type": "string", "description": "ISO date string", "optional": True},
+        "effort_estimate": {"type": "number", "description": "Estimated hours", "optional": True},
+        "energy_cost": {"type": "string", "description": "Energy: low, medium, high", "optional": True},
+        "project_id": {"type": "string", "description": "Project ID to link to", "optional": True},
+        "goal_id": {"type": "string", "description": "Goal ID to link to", "optional": True},
         "source_email_id": {"type": "string", "description": "Gmail ID if from email", "optional": True},
         "source_event_id": {"type": "string", "description": "GCal ID if from event", "optional": True},
     }
@@ -311,37 +315,37 @@ class CreateTaskTool(BaseTool):
         self,
         title: str,
         description: str | None = None,
-        energy_cost: int = 3,
+        priority: str = "medium",
         due_date: str | None = None,
+        effort_estimate: float | None = None,
+        energy_cost: str | None = None,
+        project_id: str | None = None,
+        goal_id: str | None = None,
         source_email_id: str | None = None,
         source_event_id: str | None = None,
     ) -> ToolResult:
-        from cognitex.db.neo4j import get_neo4j_session
-        from cognitex.db.graph_schema import create_task, link_task_to_email
-        import uuid
+        from cognitex.services.tasks import get_task_service
 
         try:
-            task_id = f"task_{uuid.uuid4().hex[:12]}"
+            task_service = get_task_service()
             source_type = "email" if source_email_id else "event" if source_event_id else "agent"
             source_id = source_email_id or source_event_id
 
-            async for session in get_neo4j_session():
-                await create_task(
-                    session,
-                    task_id=task_id,
-                    title=title,
-                    description=description,
-                    energy_cost=energy_cost,
-                    due_date=due_date,
-                    source_type=source_type,
-                    source_id=source_id,
-                )
+            task = await task_service.create(
+                title=title,
+                description=description,
+                priority=priority,
+                due_date=due_date,
+                effort_estimate=effort_estimate,
+                energy_cost=energy_cost,
+                project_id=project_id,
+                goal_id=goal_id,
+                source_type=source_type,
+                source_id=source_id,
+            )
 
-                if source_email_id:
-                    await link_task_to_email(session, task_id, source_email_id)
-
-                logger.info("Created task", task_id=task_id, title=title[:50])
-                return ToolResult(success=True, data={"task_id": task_id})
+            logger.info("Created task", task_id=task["id"], title=title[:50])
+            return ToolResult(success=True, data={"task_id": task["id"], "task": task})
         except Exception as e:
             logger.warning("Task creation failed", title=title[:50], error=str(e))
             return ToolResult(success=False, error=str(e))
@@ -407,55 +411,49 @@ class UpdateTaskTool(BaseTool):
     """Update an existing task."""
 
     name = "update_task"
-    description = "Update task status, due date, or other properties. Use find_task first to get the task_id if you only have the title."
+    description = "Update task status, due date, priority, or other properties. Use find_task first to get the task_id if you only have the title."
     risk = ToolRisk.AUTO
     parameters = {
         "task_id": {"type": "string", "description": "Task ID to update (use find_task to get this from title)"},
+        "title": {"type": "string", "description": "New title", "optional": True},
         "status": {"type": "string", "description": "New status: pending, in_progress, done", "optional": True},
+        "priority": {"type": "string", "description": "New priority: low, medium, high, critical", "optional": True},
         "due_date": {"type": "string", "description": "New due date (ISO)", "optional": True},
-        "energy_cost": {"type": "integer", "description": "Updated energy cost", "optional": True},
+        "effort_estimate": {"type": "number", "description": "Updated effort estimate in hours", "optional": True},
+        "energy_cost": {"type": "string", "description": "Updated energy cost: low, medium, high", "optional": True},
     }
 
     async def execute(
         self,
         task_id: str,
+        title: str | None = None,
         status: str | None = None,
+        priority: str | None = None,
         due_date: str | None = None,
-        energy_cost: int | None = None,
+        effort_estimate: float | None = None,
+        energy_cost: str | None = None,
     ) -> ToolResult:
-        from cognitex.db.neo4j import get_neo4j_session
+        from cognitex.services.tasks import get_task_service
 
         try:
-            updates = []
-            params = {"task_id": task_id}
-
-            if status:
-                updates.append("t.status = $status")
-                params["status"] = status
-            if due_date:
-                updates.append("t.due = datetime($due_date)")
-                params["due_date"] = due_date
-            if energy_cost:
-                updates.append("t.energy_cost = $energy_cost")
-                params["energy_cost"] = energy_cost
-
-            if not updates:
+            if not any([title, status, priority, due_date, effort_estimate, energy_cost]):
                 return ToolResult(success=False, error="No updates provided")
 
-            query = f"""
-            MATCH (t:Task {{id: $task_id}})
-            SET {', '.join(updates)}, t.updated_at = datetime()
-            RETURN t
-            """
+            task_service = get_task_service()
+            task = await task_service.update(
+                task_id=task_id,
+                title=title,
+                status=status,
+                priority=priority,
+                due_date=due_date,
+                effort_estimate=effort_estimate,
+                energy_cost=energy_cost,
+            )
 
-            async for session in get_neo4j_session():
-                result = await session.run(query, params)
-                record = await result.single()
-
-                if record:
-                    logger.info("Updated task", task_id=task_id)
-                    return ToolResult(success=True, data=dict(record["t"]))
-                return ToolResult(success=False, error=f"Task not found: {task_id}")
+            if task:
+                logger.info("Updated task", task_id=task_id)
+                return ToolResult(success=True, data=task)
+            return ToolResult(success=False, error=f"Task not found: {task_id}")
         except Exception as e:
             logger.warning("Task update failed", task_id=task_id, error=str(e))
             return ToolResult(success=False, error=str(e))
@@ -644,6 +642,356 @@ class CreateEventTool(BaseTool):
 
 
 # =============================================================================
+# PROJECT AND GOAL TOOLS
+# =============================================================================
+
+class GetProjectsTool(BaseTool):
+    """List projects with optional filters."""
+
+    name = "get_projects"
+    description = "Get a list of projects. Can filter by status."
+    risk = ToolRisk.READONLY
+    parameters = {
+        "status": {"type": "string", "description": "Filter by status: planning, active, paused, completed, archived", "optional": True},
+        "include_archived": {"type": "boolean", "description": "Include archived projects", "default": False},
+        "limit": {"type": "integer", "description": "Max results", "default": 20},
+    }
+
+    async def execute(
+        self,
+        status: str | None = None,
+        include_archived: bool = False,
+        limit: int = 20,
+    ) -> ToolResult:
+        from cognitex.services.tasks import get_project_service
+
+        try:
+            project_service = get_project_service()
+            projects = await project_service.list(
+                status=status,
+                include_archived=include_archived,
+                limit=limit,
+            )
+            return ToolResult(success=True, data=projects)
+        except Exception as e:
+            logger.warning("Project fetch failed", error=str(e))
+            return ToolResult(success=False, error=str(e))
+
+
+class GetProjectTool(BaseTool):
+    """Get detailed information about a specific project."""
+
+    name = "get_project"
+    description = "Get detailed project info including tasks, repos, and related projects."
+    risk = ToolRisk.READONLY
+    parameters = {
+        "project_id": {"type": "string", "description": "Project ID to fetch"},
+    }
+
+    async def execute(self, project_id: str) -> ToolResult:
+        from cognitex.services.tasks import get_project_service
+
+        try:
+            project_service = get_project_service()
+            project = await project_service.get(project_id)
+
+            if project:
+                return ToolResult(success=True, data=project)
+            return ToolResult(success=False, error=f"Project not found: {project_id}")
+        except Exception as e:
+            logger.warning("Project fetch failed", project_id=project_id, error=str(e))
+            return ToolResult(success=False, error=str(e))
+
+
+class CreateProjectTool(BaseTool):
+    """Create a new project."""
+
+    name = "create_project"
+    description = "Create a new project. Can optionally link to a goal."
+    risk = ToolRisk.AUTO
+    parameters = {
+        "title": {"type": "string", "description": "Project title"},
+        "description": {"type": "string", "description": "Project description", "optional": True},
+        "status": {"type": "string", "description": "Status: planning, active, paused", "default": "active"},
+        "target_date": {"type": "string", "description": "Target completion date (ISO)", "optional": True},
+        "goal_id": {"type": "string", "description": "Goal ID to link to", "optional": True},
+    }
+
+    async def execute(
+        self,
+        title: str,
+        description: str | None = None,
+        status: str = "active",
+        target_date: str | None = None,
+        goal_id: str | None = None,
+    ) -> ToolResult:
+        from cognitex.services.tasks import get_project_service
+
+        try:
+            project_service = get_project_service()
+            project = await project_service.create(
+                title=title,
+                description=description,
+                status=status,
+                target_date=target_date,
+                goal_id=goal_id,
+            )
+
+            logger.info("Created project", project_id=project["id"], title=title[:50])
+            return ToolResult(success=True, data={"project_id": project["id"], "project": project})
+        except Exception as e:
+            logger.warning("Project creation failed", title=title[:50], error=str(e))
+            return ToolResult(success=False, error=str(e))
+
+
+class UpdateProjectTool(BaseTool):
+    """Update an existing project."""
+
+    name = "update_project"
+    description = "Update project status, title, or other properties."
+    risk = ToolRisk.AUTO
+    parameters = {
+        "project_id": {"type": "string", "description": "Project ID to update"},
+        "title": {"type": "string", "description": "New title", "optional": True},
+        "description": {"type": "string", "description": "New description", "optional": True},
+        "status": {"type": "string", "description": "New status: planning, active, paused, completed, archived", "optional": True},
+        "target_date": {"type": "string", "description": "New target date (ISO)", "optional": True},
+    }
+
+    async def execute(
+        self,
+        project_id: str,
+        title: str | None = None,
+        description: str | None = None,
+        status: str | None = None,
+        target_date: str | None = None,
+    ) -> ToolResult:
+        from cognitex.services.tasks import get_project_service
+
+        try:
+            if not any([title, description, status, target_date]):
+                return ToolResult(success=False, error="No updates provided")
+
+            project_service = get_project_service()
+            project = await project_service.update(
+                project_id=project_id,
+                title=title,
+                description=description,
+                status=status,
+                target_date=target_date,
+            )
+
+            if project:
+                logger.info("Updated project", project_id=project_id)
+                return ToolResult(success=True, data=project)
+            return ToolResult(success=False, error=f"Project not found: {project_id}")
+        except Exception as e:
+            logger.warning("Project update failed", project_id=project_id, error=str(e))
+            return ToolResult(success=False, error=str(e))
+
+
+class GetGoalsTool(BaseTool):
+    """List goals with optional filters."""
+
+    name = "get_goals"
+    description = "Get a list of goals. Can filter by status and timeframe."
+    risk = ToolRisk.READONLY
+    parameters = {
+        "status": {"type": "string", "description": "Filter by status: active, achieved, abandoned", "optional": True},
+        "timeframe": {"type": "string", "description": "Filter by timeframe: quarterly, yearly, multi_year", "optional": True},
+        "include_achieved": {"type": "boolean", "description": "Include achieved goals", "default": False},
+        "limit": {"type": "integer", "description": "Max results", "default": 20},
+    }
+
+    async def execute(
+        self,
+        status: str | None = None,
+        timeframe: str | None = None,
+        include_achieved: bool = False,
+        limit: int = 20,
+    ) -> ToolResult:
+        from cognitex.services.tasks import get_goal_service
+
+        try:
+            goal_service = get_goal_service()
+            goals = await goal_service.list(
+                status=status,
+                timeframe=timeframe,
+                include_achieved=include_achieved,
+                limit=limit,
+            )
+            return ToolResult(success=True, data=goals)
+        except Exception as e:
+            logger.warning("Goal fetch failed", error=str(e))
+            return ToolResult(success=False, error=str(e))
+
+
+class GetGoalTool(BaseTool):
+    """Get detailed information about a specific goal."""
+
+    name = "get_goal"
+    description = "Get detailed goal info including child goals and linked projects."
+    risk = ToolRisk.READONLY
+    parameters = {
+        "goal_id": {"type": "string", "description": "Goal ID to fetch"},
+    }
+
+    async def execute(self, goal_id: str) -> ToolResult:
+        from cognitex.services.tasks import get_goal_service
+
+        try:
+            goal_service = get_goal_service()
+            goal = await goal_service.get(goal_id)
+
+            if goal:
+                return ToolResult(success=True, data=goal)
+            return ToolResult(success=False, error=f"Goal not found: {goal_id}")
+        except Exception as e:
+            logger.warning("Goal fetch failed", goal_id=goal_id, error=str(e))
+            return ToolResult(success=False, error=str(e))
+
+
+class CreateGoalTool(BaseTool):
+    """Create a new goal."""
+
+    name = "create_goal"
+    description = "Create a new high-level goal. Can be linked to parent goals."
+    risk = ToolRisk.AUTO
+    parameters = {
+        "title": {"type": "string", "description": "Goal title"},
+        "description": {"type": "string", "description": "Goal description", "optional": True},
+        "timeframe": {"type": "string", "description": "Timeframe: quarterly, yearly, multi_year", "optional": True},
+        "parent_goal_id": {"type": "string", "description": "Parent goal ID for hierarchy", "optional": True},
+    }
+
+    async def execute(
+        self,
+        title: str,
+        description: str | None = None,
+        timeframe: str | None = None,
+        parent_goal_id: str | None = None,
+    ) -> ToolResult:
+        from cognitex.services.tasks import get_goal_service
+
+        try:
+            goal_service = get_goal_service()
+            goal = await goal_service.create(
+                title=title,
+                description=description,
+                timeframe=timeframe,
+                parent_goal_id=parent_goal_id,
+            )
+
+            logger.info("Created goal", goal_id=goal["id"], title=title[:50])
+            return ToolResult(success=True, data={"goal_id": goal["id"], "goal": goal})
+        except Exception as e:
+            logger.warning("Goal creation failed", title=title[:50], error=str(e))
+            return ToolResult(success=False, error=str(e))
+
+
+class UpdateGoalTool(BaseTool):
+    """Update an existing goal."""
+
+    name = "update_goal"
+    description = "Update goal status, title, or other properties."
+    risk = ToolRisk.AUTO
+    parameters = {
+        "goal_id": {"type": "string", "description": "Goal ID to update"},
+        "title": {"type": "string", "description": "New title", "optional": True},
+        "description": {"type": "string", "description": "New description", "optional": True},
+        "status": {"type": "string", "description": "New status: active, achieved, abandoned", "optional": True},
+        "timeframe": {"type": "string", "description": "New timeframe", "optional": True},
+    }
+
+    async def execute(
+        self,
+        goal_id: str,
+        title: str | None = None,
+        description: str | None = None,
+        status: str | None = None,
+        timeframe: str | None = None,
+    ) -> ToolResult:
+        from cognitex.services.tasks import get_goal_service
+
+        try:
+            if not any([title, description, status, timeframe]):
+                return ToolResult(success=False, error="No updates provided")
+
+            goal_service = get_goal_service()
+            goal = await goal_service.update(
+                goal_id=goal_id,
+                title=title,
+                description=description,
+                status=status,
+                timeframe=timeframe,
+            )
+
+            if goal:
+                logger.info("Updated goal", goal_id=goal_id)
+                return ToolResult(success=True, data=goal)
+            return ToolResult(success=False, error=f"Goal not found: {goal_id}")
+        except Exception as e:
+            logger.warning("Goal update failed", goal_id=goal_id, error=str(e))
+            return ToolResult(success=False, error=str(e))
+
+
+class LinkTaskTool(BaseTool):
+    """Link a task to projects, goals, documents, or other tasks."""
+
+    name = "link_task"
+    description = "Link a task to a project, goal, document, or set it as blocked by another task."
+    risk = ToolRisk.AUTO
+    parameters = {
+        "task_id": {"type": "string", "description": "Task ID to link"},
+        "project_id": {"type": "string", "description": "Project ID to link to", "optional": True},
+        "goal_id": {"type": "string", "description": "Goal ID to link to", "optional": True},
+        "document_id": {"type": "string", "description": "Drive document ID to link", "optional": True},
+        "blocked_by_task_id": {"type": "string", "description": "Task ID that blocks this task", "optional": True},
+    }
+
+    async def execute(
+        self,
+        task_id: str,
+        project_id: str | None = None,
+        goal_id: str | None = None,
+        document_id: str | None = None,
+        blocked_by_task_id: str | None = None,
+    ) -> ToolResult:
+        from cognitex.services.tasks import get_task_service
+
+        try:
+            if not any([project_id, goal_id, document_id, blocked_by_task_id]):
+                return ToolResult(success=False, error="No link target provided")
+
+            task_service = get_task_service()
+            linked = []
+
+            if project_id:
+                if await task_service.link_to_project(task_id, project_id):
+                    linked.append(f"project:{project_id}")
+
+            if goal_id:
+                if await task_service.link_to_goal(task_id, goal_id):
+                    linked.append(f"goal:{goal_id}")
+
+            if document_id:
+                if await task_service.link_to_document(task_id, document_id):
+                    linked.append(f"document:{document_id}")
+
+            if blocked_by_task_id:
+                if await task_service.set_blocked_by(task_id, blocked_by_task_id):
+                    linked.append(f"blocked_by:{blocked_by_task_id}")
+
+            if linked:
+                logger.info("Linked task", task_id=task_id, links=linked)
+                return ToolResult(success=True, data={"task_id": task_id, "linked": linked})
+            return ToolResult(success=False, error="No links were created")
+        except Exception as e:
+            logger.warning("Task linking failed", task_id=task_id, error=str(e))
+            return ToolResult(success=False, error=str(e))
+
+
+# =============================================================================
 # TOOL REGISTRY
 # =============================================================================
 
@@ -711,9 +1059,18 @@ class ToolRegistry:
             FindTaskTool(),
             GetContactTool(),
             RecallMemoryTool(),
+            GetProjectsTool(),
+            GetProjectTool(),
+            GetGoalsTool(),
+            GetGoalTool(),
             # Auto-execute
             CreateTaskTool(),
             UpdateTaskTool(),
+            LinkTaskTool(),
+            CreateProjectTool(),
+            UpdateProjectTool(),
+            CreateGoalTool(),
+            UpdateGoalTool(),
             SendNotificationTool(),
             AddMemoryTool(),
             # Approval required

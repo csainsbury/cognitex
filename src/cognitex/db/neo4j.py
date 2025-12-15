@@ -3,7 +3,7 @@
 from typing import AsyncGenerator
 
 import structlog
-from neo4j import AsyncGraphDatabase, AsyncDriver, AsyncSession
+from neo4j import AsyncGraphDatabase, AsyncDriver, AsyncSession, NotificationDisabledCategory
 
 from cognitex.config import get_settings
 
@@ -21,6 +21,10 @@ async def init_neo4j() -> None:
     _driver = AsyncGraphDatabase.driver(
         settings.neo4j_uri,
         auth=(settings.neo4j_user, settings.neo4j_password.get_secret_value()),
+        # Disable noisy warnings about non-existent relationship types/properties
+        notifications_disabled_categories=[
+            NotificationDisabledCategory.UNRECOGNIZED,
+        ],
     )
     # Verify connectivity
     await _driver.verify_connectivity()

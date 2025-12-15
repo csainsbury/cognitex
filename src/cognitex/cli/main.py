@@ -1,7 +1,9 @@
 """CLI entry point using Typer."""
 
 import asyncio
+import logging
 
+import structlog
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -12,6 +14,18 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+
+@app.callback()
+def main_callback(
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show debug output"),
+) -> None:
+    """Configure logging for CLI commands."""
+    log_level = logging.DEBUG if verbose else logging.WARNING
+
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(log_level),
+    )
 
 
 @app.command()
@@ -335,8 +349,9 @@ def energy(level: int = typer.Argument(..., min=1, max=10)) -> None:
 def tasks(
     status: str = typer.Option(None, "--status", "-s", help="Filter by status (pending, in_progress, done)"),
     limit: int = typer.Option(20, "--limit", "-l", help="Number of tasks to show"),
+    project: str = typer.Option(None, "--project", "-p", help="Filter by project ID or short ID"),
 ) -> None:
-    """List tasks from the graph."""
+    """List tasks from the graph. Use short IDs (e.g., 1, 2, 3) with other task commands."""
     from cognitex.services.google_auth import check_credentials_status
 
     creds_status = check_credentials_status()
@@ -347,8 +362,12 @@ def tasks(
     async def show_tasks():
         from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
         from cognitex.db.graph_schema import get_tasks
+        from cognitex.db.redis import init_redis, get_redis, close_redis
+        from cognitex.cli.task_ids import store_task_ids
 
         await init_neo4j()
+        await init_redis()
+        redis = get_redis()
 
         try:
             async for session in get_neo4j_session():
@@ -358,37 +377,52 @@ def tasks(
                     console.print("[yellow]No tasks found.[/yellow]")
                     return
 
+                # Store short ID mapping
+                task_ids = [t.get("id") for t in task_list if t.get("id")]
+                await store_task_ids(redis, task_ids)
+
                 table = Table(title=f"Tasks ({len(task_list)})")
-                table.add_column("Status", style="cyan", width=10)
-                table.add_column("Energy", style="yellow", width=6)
-                table.add_column("Title", style="white")
-                table.add_column("From", style="dim", width=25)
+                table.add_column("#", style="bold cyan", width=4)
+                table.add_column("", width=2)  # Status icon
+                table.add_column("Pri", style="yellow", width=4)
+                table.add_column("Title", style="white", width=35)
+                table.add_column("Project", style="dim", width=20)
                 table.add_column("Due", style="magenta", width=12)
 
-                for task in task_list:
+                for idx, task in enumerate(task_list, 1):
                     status_icon = {
                         "pending": "[yellow]○[/yellow]",
                         "in_progress": "[blue]◐[/blue]",
                         "done": "[green]●[/green]",
                     }.get(task.get("status", "pending"), "○")
 
-                    energy = task.get("energy_cost", 3)
-                    energy_color = "green" if energy <= 3 else "yellow" if energy <= 6 else "red"
+                    priority = task.get("priority", "medium")
+                    pri_display = {
+                        "critical": "[red bold]!![/red bold]",
+                        "high": "[red]![/red]",
+                        "medium": "[yellow]-[/yellow]",
+                        "low": "[dim]·[/dim]",
+                    }.get(priority, "-")
 
                     due = task.get("due")
                     due_str = str(due)[:10] if due else "-"
 
+                    project_name = task.get("project_name") or task.get("project") or "-"
+
                     table.add_row(
+                        str(idx),
                         status_icon,
-                        f"[{energy_color}]{energy}/10[/{energy_color}]",
-                        task.get("title", "Untitled")[:50],
-                        (task.get("from_email") or "-")[:25],
+                        pri_display,
+                        task.get("title", "Untitled")[:35],
+                        project_name[:20],
                         due_str,
                     )
 
                 console.print(table)
+                console.print("\n[dim]Use short IDs with commands: task-show 1, task-done 2, task-link 3 --project ...[/dim]")
 
         finally:
+            await close_redis()
             await close_neo4j()
 
     asyncio.run(show_tasks())
@@ -1489,6 +1523,684 @@ def watch_stop(
         console.print("[green]Done.[/green]")
 
     asyncio.run(stop_watches())
+
+
+# =============================================================================
+# Task/Project/Goal Management Commands
+# =============================================================================
+
+@app.command("task-add")
+def task_add(
+    title: str = typer.Argument(..., help="Task title"),
+    description: str = typer.Option(None, "--desc", "-d", help="Task description"),
+    priority: str = typer.Option("medium", "--priority", "-p", help="Priority: low, medium, high, critical"),
+    due: str = typer.Option(None, "--due", help="Due date (ISO format, e.g. 2024-01-15)"),
+    project: str = typer.Option(None, "--project", help="Project ID to link to"),
+    goal: str = typer.Option(None, "--goal", help="Goal ID to link to"),
+    effort: float = typer.Option(None, "--effort", "-e", help="Effort estimate in hours"),
+    energy: str = typer.Option(None, "--energy", help="Energy cost: low, medium, high"),
+) -> None:
+    """Create a new task."""
+    async def create_task():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.db.graph_schema import init_graph_schema
+        from cognitex.services.tasks import get_task_service
+
+        await init_neo4j()
+        await init_graph_schema()
+
+        try:
+            task_service = get_task_service()
+            task = await task_service.create(
+                title=title,
+                description=description,
+                priority=priority,
+                due_date=due,
+                project_id=project,
+                goal_id=goal,
+                effort_estimate=effort,
+                energy_cost=energy,
+            )
+
+            console.print(f"[green]Created task:[/green] {task['id']}")
+            console.print(f"  Title: {task['title']}")
+            console.print(f"  Priority: {task['priority']}")
+            if due:
+                console.print(f"  Due: {due}")
+            if project:
+                console.print(f"  Project: {project}")
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(create_task())
+
+
+@app.command("task-done")
+def task_done(
+    task_id: str = typer.Argument(..., help="Task ID (short # or full ID) to mark as done"),
+) -> None:
+    """Mark a task as completed. Accepts short IDs from 'tasks' list (e.g., 1, 2, 3)."""
+    async def complete_task():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.db.redis import init_redis, get_redis, close_redis
+        from cognitex.services.tasks import get_task_service
+        from cognitex.cli.task_ids import resolve_task_id
+
+        await init_neo4j()
+        await init_redis()
+        redis = get_redis()
+
+        try:
+            # Resolve short ID to full UUID
+            resolved_id = await resolve_task_id(redis, task_id)
+            if not resolved_id:
+                console.print(f"[red]Task not found:[/red] {task_id}")
+                console.print("[dim]Run 'cognitex tasks' first to see available tasks.[/dim]")
+                return
+
+            task_service = get_task_service()
+            task = await task_service.complete(resolved_id)
+
+            if task:
+                console.print(f"[green]✓[/green] Completed: {task['title']}")
+            else:
+                console.print(f"[red]Task not found:[/red] {resolved_id}")
+
+        finally:
+            await close_redis()
+            await close_neo4j()
+
+    asyncio.run(complete_task())
+
+
+@app.command("task-update")
+def task_update(
+    task_id: str = typer.Argument(..., help="Task ID (short # or full ID) to update"),
+    title: str = typer.Option(None, "--title", "-t", help="New title"),
+    status: str = typer.Option(None, "--status", "-s", help="New status: pending, in_progress, done"),
+    priority: str = typer.Option(None, "--priority", "-p", help="New priority: low, medium, high, critical"),
+    due: str = typer.Option(None, "--due", help="New due date (ISO format)"),
+    effort: float = typer.Option(None, "--effort", "-e", help="Effort estimate in hours"),
+    energy: str = typer.Option(None, "--energy", help="Energy cost: low, medium, high"),
+) -> None:
+    """Update an existing task. Accepts short IDs from 'tasks' list."""
+    async def update_task():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.db.redis import init_redis, get_redis, close_redis
+        from cognitex.services.tasks import get_task_service
+        from cognitex.cli.task_ids import resolve_task_id
+
+        await init_neo4j()
+        await init_redis()
+        redis = get_redis()
+
+        try:
+            # Resolve short ID to full UUID
+            resolved_id = await resolve_task_id(redis, task_id)
+            if not resolved_id:
+                console.print(f"[red]Task not found:[/red] {task_id}")
+                console.print("[dim]Run 'cognitex tasks' first to see available tasks.[/dim]")
+                return
+
+            task_service = get_task_service()
+            task = await task_service.update(
+                task_id=resolved_id,
+                title=title,
+                status=status,
+                priority=priority,
+                due_date=due,
+                effort_estimate=effort,
+                energy_cost=energy,
+            )
+
+            if task:
+                console.print(f"[green]Updated task:[/green] {task['title']}")
+                console.print(f"  Status: {task['status']}")
+                console.print(f"  Priority: {task.get('priority', 'medium')}")
+            else:
+                console.print(f"[red]Task not found:[/red] {resolved_id}")
+
+        finally:
+            await close_redis()
+            await close_neo4j()
+
+    asyncio.run(update_task())
+
+
+@app.command("task-show")
+def task_show(
+    task_id: str = typer.Argument(..., help="Task ID (short #, full ID, or title search)"),
+) -> None:
+    """Show detailed task information. Accepts short IDs, full IDs, or title search."""
+    async def show_task():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
+        from cognitex.db.redis import init_redis, get_redis, close_redis
+        from cognitex.services.tasks import get_task_service
+        from cognitex.cli.task_ids import resolve_task_id_or_search
+
+        await init_neo4j()
+        await init_redis()
+        redis = get_redis()
+
+        try:
+            # Resolve short ID, full ID, or search by title
+            async for session in get_neo4j_session():
+                resolved_id = await resolve_task_id_or_search(redis, task_id, session)
+                break
+
+            if not resolved_id:
+                console.print(f"[red]Task not found:[/red] {task_id}")
+                console.print("[dim]Try: short ID (1, 2), full ID (task_xxx), or title search.[/dim]")
+                return
+
+            task_service = get_task_service()
+            task = await task_service.get(resolved_id)
+
+            if not task:
+                console.print(f"[red]Task not found:[/red] {resolved_id}")
+                return
+
+            # Header
+            console.print(f"\n[bold]{task['title']}[/bold]")
+            console.print(f"[dim]ID: {task['id']}[/dim]")
+
+            # Status row
+            status = task.get('status', 'pending')
+            priority = task.get('priority', 'medium')
+            status_color = {"pending": "yellow", "in_progress": "blue", "done": "green"}.get(status, "white")
+            priority_color = {"critical": "red bold", "high": "red", "medium": "yellow", "low": "dim"}.get(priority, "white")
+            console.print(f"Status: [{status_color}]{status}[/{status_color}]  |  Priority: [{priority_color}]{priority}[/{priority_color}]")
+
+            # Dates and estimates
+            date_info = []
+            if task.get('due'):
+                date_info.append(f"Due: {str(task['due'])[:10]}")
+            if task.get('created_at'):
+                date_info.append(f"Created: {str(task['created_at'])[:10]}")
+            if date_info:
+                console.print("  ".join(date_info))
+
+            effort_info = []
+            if task.get('effort_estimate'):
+                effort_info.append(f"Effort: {task['effort_estimate']}h")
+            if task.get('energy_cost'):
+                effort_info.append(f"Energy: {task['energy_cost']}")
+            if effort_info:
+                console.print("  ".join(effort_info))
+
+            # Description
+            if task.get('description'):
+                console.print(f"\n[bold]Description:[/bold]\n{task['description']}")
+
+            # Source context - this is key for understanding where the task came from
+            source_email = task.get('source_email')
+            source_event = task.get('source_event')
+
+            if source_email:
+                console.print(f"\n[bold cyan]Origin: Email[/bold cyan]")
+                sender = source_email.get('sender_name') or source_email.get('sender_email') or 'Unknown'
+                console.print(f"  From: {sender}")
+                console.print(f"  Subject: {source_email.get('subject', '(no subject)')}")
+                if source_email.get('date'):
+                    console.print(f"  Date: {str(source_email['date'])[:16]}")
+                if source_email.get('snippet'):
+                    snippet = source_email['snippet'][:200]
+                    console.print(f"  [dim]{snippet}{'...' if len(source_email.get('snippet', '')) > 200 else ''}[/dim]")
+
+            if source_event:
+                console.print(f"\n[bold cyan]Origin: Calendar Event[/bold cyan]")
+                console.print(f"  Event: {source_event.get('title', 'Untitled')}")
+                if source_event.get('start_time'):
+                    console.print(f"  When: {str(source_event['start_time'])[:16]}")
+
+            # Project and Goal context
+            if task.get('projects'):
+                console.print(f"\n[bold]Project{'s' if len(task['projects']) > 1 else ''}:[/bold]")
+                for proj in task['projects']:
+                    status_icon = {"active": "●", "paused": "◐", "completed": "✓"}.get(proj.get('status'), "○")
+                    console.print(f"  {status_icon} {proj['title']} [dim]({proj['id']})[/dim]")
+
+            if task.get('goals'):
+                console.print(f"\n[bold]Goal{'s' if len(task['goals']) > 1 else ''}:[/bold]")
+                for goal in task['goals']:
+                    timeframe = f" [{goal['timeframe']}]" if goal.get('timeframe') else ""
+                    console.print(f"  → {goal['title']}{timeframe} [dim]({goal['id']})[/dim]")
+
+            # People
+            if task.get('people'):
+                console.print(f"\n[bold]People:[/bold]")
+                for person in task['people']:
+                    name = person.get('name') or person.get('email')
+                    role = person.get('role') or 'assignee'
+                    console.print(f"  - {name} ({role})")
+
+            # Linked documents
+            if task.get('documents'):
+                console.print(f"\n[bold]Documents:[/bold]")
+                for doc in task['documents'][:5]:
+                    name = doc.get('name', doc.get('drive_id'))
+                    console.print(f"  📄 {name}")
+
+            # Linked code
+            if task.get('codefiles'):
+                console.print(f"\n[bold]Code Files:[/bold]")
+                for cf in task['codefiles'][:5]:
+                    repo = f" ({cf['repo']})" if cf.get('repo') else ""
+                    lang = f" [{cf['language']}]" if cf.get('language') else ""
+                    console.print(f"  📝 {cf.get('path', cf.get('name'))}{lang}{repo}")
+
+            # Blockers
+            if task.get('blocked_by'):
+                console.print(f"\n[yellow bold]⚠ Blocked by:[/yellow bold]")
+                for blocker in task['blocked_by']:
+                    status_icon = {"done": "✓", "in_progress": "◐"}.get(blocker.get('status'), "○")
+                    console.print(f"  [{status_icon}] {blocker['title']} [dim]({blocker['id']})[/dim]")
+
+        finally:
+            await close_redis()
+            await close_neo4j()
+
+    asyncio.run(show_task())
+
+
+@app.command("task-link")
+def task_link(
+    task_id: str = typer.Argument(..., help="Task ID (short # or full ID)"),
+    project: str = typer.Option(None, "--project", "-p", help="Project ID to link"),
+    goal: str = typer.Option(None, "--goal", "-g", help="Goal ID to link"),
+    document: str = typer.Option(None, "--doc", "-d", help="Drive document ID to link"),
+    blocked_by: str = typer.Option(None, "--blocked-by", "-b", help="Task ID that blocks this task"),
+    person: str = typer.Option(None, "--person", help="Email of person to assign"),
+) -> None:
+    """Link a task to projects, goals, documents, people, or other tasks."""
+    async def link_task():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
+        from cognitex.db.redis import init_redis, get_redis, close_redis
+        from cognitex.db import graph_schema as gs
+        from cognitex.services.tasks import get_task_service
+        from cognitex.cli.task_ids import resolve_task_id
+
+        await init_neo4j()
+        await init_redis()
+        redis = get_redis()
+
+        try:
+            # Resolve task short ID
+            resolved_task_id = await resolve_task_id(redis, task_id)
+            if not resolved_task_id:
+                console.print(f"[red]Task not found:[/red] {task_id}")
+                console.print("[dim]Run 'cognitex tasks' first to see available tasks.[/dim]")
+                return
+
+            # Resolve blocked_by short ID if provided
+            resolved_blocked_by = None
+            if blocked_by:
+                resolved_blocked_by = await resolve_task_id(redis, blocked_by)
+                if not resolved_blocked_by:
+                    console.print(f"[yellow]Warning: Blocking task not found:[/yellow] {blocked_by}")
+
+            task_service = get_task_service()
+            linked = []
+
+            if project:
+                if await task_service.link_to_project(resolved_task_id, project):
+                    linked.append(f"Project: {project}")
+
+            if goal:
+                if await task_service.link_to_goal(resolved_task_id, goal):
+                    linked.append(f"Goal: {goal}")
+
+            if document:
+                if await task_service.link_to_document(resolved_task_id, document):
+                    linked.append(f"Document: {document}")
+
+            if resolved_blocked_by:
+                if await task_service.set_blocked_by(resolved_task_id, resolved_blocked_by):
+                    linked.append(f"Blocked by: {resolved_blocked_by}")
+
+            if person:
+                async for session in get_neo4j_session():
+                    if await gs.link_task_to_person(session, resolved_task_id, person, relationship_type="ASSIGNED_TO"):
+                        linked.append(f"Person: {person}")
+                    break
+
+            if linked:
+                console.print(f"[green]Linked task:[/green]")
+                for link in linked:
+                    console.print(f"  → {link}")
+            else:
+                console.print("[yellow]No links specified. Use --project, --goal, --doc, --blocked-by, or --person[/yellow]")
+
+        finally:
+            await close_redis()
+            await close_neo4j()
+
+    asyncio.run(link_task())
+
+
+@app.command("project-add")
+def project_add(
+    title: str = typer.Argument(..., help="Project title"),
+    description: str = typer.Option(None, "--desc", "-d", help="Project description"),
+    status: str = typer.Option("active", "--status", "-s", help="Status: planning, active, paused, completed"),
+    target: str = typer.Option(None, "--target", help="Target completion date (ISO format)"),
+    goal: str = typer.Option(None, "--goal", help="Goal ID to link to"),
+) -> None:
+    """Create a new project."""
+    async def create_project():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.db.graph_schema import init_graph_schema
+        from cognitex.services.tasks import get_project_service
+
+        await init_neo4j()
+        await init_graph_schema()
+
+        try:
+            project_service = get_project_service()
+            project = await project_service.create(
+                title=title,
+                description=description,
+                status=status,
+                target_date=target,
+                goal_id=goal,
+            )
+
+            console.print(f"[green]Created project:[/green] {project['id']}")
+            console.print(f"  Title: {project['title']}")
+            console.print(f"  Status: {project['status']}")
+            if target:
+                console.print(f"  Target: {target}")
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(create_project())
+
+
+@app.command()
+def projects(
+    status: str = typer.Option(None, "--status", "-s", help="Filter by status"),
+    archived: bool = typer.Option(False, "--archived", "-a", help="Include archived projects"),
+    limit: int = typer.Option(20, "--limit", "-l", help="Maximum results"),
+) -> None:
+    """List projects."""
+    async def list_projects():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.services.tasks import get_project_service
+
+        await init_neo4j()
+
+        try:
+            project_service = get_project_service()
+            project_list = await project_service.list(
+                status=status,
+                include_archived=archived,
+                limit=limit,
+            )
+
+            if not project_list:
+                console.print("[yellow]No projects found.[/yellow]")
+                return
+
+            table = Table(title=f"Projects ({len(project_list)})")
+            table.add_column("ID", style="cyan", width=16)
+            table.add_column("Title", style="white", width=30)
+            table.add_column("Status", style="green", width=10)
+            table.add_column("Tasks", style="yellow", width=10)
+            table.add_column("Target", style="magenta", width=12)
+
+            for project in project_list:
+                task_count = project.get('task_count', 0)
+                done_count = project.get('done_count', 0)
+                task_str = f"{done_count}/{task_count}"
+
+                target = project.get('target_date')
+                target_str = str(target)[:10] if target else "-"
+
+                table.add_row(
+                    project['id'],
+                    project['title'][:30],
+                    project.get('status', 'active'),
+                    task_str,
+                    target_str,
+                )
+
+            console.print(table)
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(list_projects())
+
+
+@app.command("project-show")
+def project_show(
+    project_id: str = typer.Argument(..., help="Project ID to show"),
+    with_tasks: bool = typer.Option(False, "--tasks", "-t", help="Show project tasks"),
+) -> None:
+    """Show detailed project information."""
+    async def show_project():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.services.tasks import get_project_service
+
+        await init_neo4j()
+
+        try:
+            project_service = get_project_service()
+            project = await project_service.get(project_id)
+
+            if not project:
+                console.print(f"[red]Project not found:[/red] {project_id}")
+                return
+
+            console.print(f"\n[bold]{project['title']}[/bold]")
+            console.print(f"ID: [cyan]{project['id']}[/cyan]")
+            console.print(f"Status: {project.get('status', 'active')}")
+
+            if project.get('description'):
+                console.print(f"\n{project['description']}")
+
+            if project.get('target_date'):
+                console.print(f"\nTarget: {project['target_date']}")
+
+            console.print(f"\nTasks: {project.get('task_count', 0)} ({project.get('done_count', 0)} done)")
+
+            if project.get('goal'):
+                console.print(f"Goal: {project['goal']}")
+
+            if project.get('repositories'):
+                console.print(f"\nRepositories: {len(project['repositories'])}")
+                for repo in project['repositories'][:5]:
+                    console.print(f"  - {repo['full_name']}")
+
+            if project.get('related_projects'):
+                console.print(f"\nRelated projects: {len(project['related_projects'])}")
+                for rp in project['related_projects'][:5]:
+                    console.print(f"  - {rp['title']} ({rp['id']})")
+
+            if with_tasks:
+                tasks = await project_service.get_tasks(project_id, include_done=True)
+                if tasks:
+                    console.print(f"\n[bold]Tasks:[/bold]")
+                    for task in tasks:
+                        status_icon = {
+                            "pending": "[yellow]○[/yellow]",
+                            "in_progress": "[blue]◐[/blue]",
+                            "done": "[green]●[/green]",
+                        }.get(task.get("status", "pending"), "○")
+                        console.print(f"  {status_icon} {task['title'][:50]} ({task['id']})")
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(show_project())
+
+
+@app.command("goal-add")
+def goal_add(
+    title: str = typer.Argument(..., help="Goal title"),
+    description: str = typer.Option(None, "--desc", "-d", help="Goal description"),
+    timeframe: str = typer.Option(None, "--timeframe", "-t", help="Timeframe: quarterly, yearly, multi_year"),
+    parent: str = typer.Option(None, "--parent", help="Parent goal ID"),
+) -> None:
+    """Create a new goal."""
+    async def create_goal():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.db.graph_schema import init_graph_schema
+        from cognitex.services.tasks import get_goal_service
+
+        await init_neo4j()
+        await init_graph_schema()
+
+        try:
+            goal_service = get_goal_service()
+            goal = await goal_service.create(
+                title=title,
+                description=description,
+                timeframe=timeframe,
+                parent_goal_id=parent,
+            )
+
+            console.print(f"[green]Created goal:[/green] {goal['id']}")
+            console.print(f"  Title: {goal['title']}")
+            if timeframe:
+                console.print(f"  Timeframe: {timeframe}")
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(create_goal())
+
+
+@app.command()
+def goals(
+    status: str = typer.Option(None, "--status", "-s", help="Filter by status: active, achieved, abandoned"),
+    timeframe: str = typer.Option(None, "--timeframe", "-t", help="Filter by timeframe"),
+    achieved: bool = typer.Option(False, "--achieved", "-a", help="Include achieved goals"),
+    limit: int = typer.Option(20, "--limit", "-l", help="Maximum results"),
+) -> None:
+    """List goals."""
+    async def list_goals():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.services.tasks import get_goal_service
+
+        await init_neo4j()
+
+        try:
+            goal_service = get_goal_service()
+            goal_list = await goal_service.list(
+                status=status,
+                timeframe=timeframe,
+                include_achieved=achieved,
+                limit=limit,
+            )
+
+            if not goal_list:
+                console.print("[yellow]No goals found.[/yellow]")
+                return
+
+            table = Table(title=f"Goals ({len(goal_list)})")
+            table.add_column("ID", style="cyan", width=16)
+            table.add_column("Title", style="white", width=35)
+            table.add_column("Timeframe", style="green", width=10)
+            table.add_column("Status", style="yellow", width=10)
+            table.add_column("Projects", style="magenta", width=8)
+
+            for goal in goal_list:
+                table.add_row(
+                    goal['id'],
+                    goal['title'][:35],
+                    goal.get('timeframe') or "-",
+                    goal.get('status', 'active'),
+                    str(goal.get('project_count', 0)),
+                )
+
+            console.print(table)
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(list_goals())
+
+
+@app.command("goal-show")
+def goal_show(
+    goal_id: str = typer.Argument(..., help="Goal ID to show"),
+    with_projects: bool = typer.Option(False, "--projects", "-p", help="Show linked projects"),
+) -> None:
+    """Show detailed goal information."""
+    async def show_goal():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.services.tasks import get_goal_service
+
+        await init_neo4j()
+
+        try:
+            goal_service = get_goal_service()
+            goal = await goal_service.get(goal_id)
+
+            if not goal:
+                console.print(f"[red]Goal not found:[/red] {goal_id}")
+                return
+
+            console.print(f"\n[bold]{goal['title']}[/bold]")
+            console.print(f"ID: [cyan]{goal['id']}[/cyan]")
+            console.print(f"Status: {goal.get('status', 'active')}")
+
+            if goal.get('timeframe'):
+                console.print(f"Timeframe: {goal['timeframe']}")
+
+            if goal.get('description'):
+                console.print(f"\n{goal['description']}")
+
+            if goal.get('parent_goal'):
+                console.print(f"\nParent: {goal['parent_goal']['title']} ({goal['parent_goal']['id']})")
+
+            if goal.get('child_goals'):
+                console.print(f"\nChild goals: {len(goal['child_goals'])}")
+                for child in goal['child_goals'][:5]:
+                    console.print(f"  - {child['title']} ({child['id']})")
+
+            if with_projects:
+                projects = await goal_service.get_projects(goal_id)
+                if projects:
+                    console.print(f"\n[bold]Projects:[/bold]")
+                    for project in projects:
+                        done = project.get('done_count', 0)
+                        total = project.get('task_count', 0)
+                        console.print(f"  - {project['title']} ({done}/{total} tasks)")
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(show_goal())
+
+
+@app.command("goal-achieve")
+def goal_achieve(
+    goal_id: str = typer.Argument(..., help="Goal ID to mark as achieved"),
+) -> None:
+    """Mark a goal as achieved."""
+    async def achieve_goal():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.services.tasks import get_goal_service
+
+        await init_neo4j()
+
+        try:
+            goal_service = get_goal_service()
+            goal = await goal_service.achieve(goal_id)
+
+            if goal:
+                console.print(f"[green]✓[/green] Achieved: {goal['title']}")
+            else:
+                console.print(f"[red]Goal not found:[/red] {goal_id}")
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(achieve_goal())
 
 
 @app.command("agent-status")

@@ -17,6 +17,9 @@ SCHEMA_STATEMENTS = [
     "CREATE CONSTRAINT goal_id IF NOT EXISTS FOR (g:Goal) REQUIRE g.id IS UNIQUE",
     "CREATE CONSTRAINT task_id IF NOT EXISTS FOR (t:Task) REQUIRE t.id IS UNIQUE",
     "CREATE CONSTRAINT document_drive_id IF NOT EXISTS FOR (d:Document) REQUIRE d.drive_id IS UNIQUE",
+    "CREATE CONSTRAINT repository_id IF NOT EXISTS FOR (r:Repository) REQUIRE r.id IS UNIQUE",
+    "CREATE CONSTRAINT repository_full_name IF NOT EXISTS FOR (r:Repository) REQUIRE r.full_name IS UNIQUE",
+    "CREATE CONSTRAINT codefile_id IF NOT EXISTS FOR (cf:CodeFile) REQUIRE cf.id IS UNIQUE",
 
     # Additional indexes for common queries
     "CREATE INDEX person_name IF NOT EXISTS FOR (p:Person) ON (p.name)",
@@ -26,13 +29,18 @@ SCHEMA_STATEMENTS = [
     "CREATE INDEX email_action_required IF NOT EXISTS FOR (e:Email) ON (e.action_required)",
     "CREATE INDEX event_start IF NOT EXISTS FOR (ev:Event) ON (ev.start)",
     "CREATE INDEX task_status IF NOT EXISTS FOR (t:Task) ON (t.status)",
-    "CREATE INDEX task_due IF NOT EXISTS FOR (t:Task) ON (t.due)",
+    "CREATE INDEX task_due IF NOT EXISTS FOR (t:Task) ON (t.due_date)",
+    "CREATE INDEX task_priority IF NOT EXISTS FOR (t:Task) ON (t.priority)",
     "CREATE INDEX project_status IF NOT EXISTS FOR (p:Project) ON (p.status)",
     "CREATE INDEX goal_timeframe IF NOT EXISTS FOR (g:Goal) ON (g.timeframe)",
+    "CREATE INDEX goal_status IF NOT EXISTS FOR (g:Goal) ON (g.status)",
     "CREATE INDEX document_name IF NOT EXISTS FOR (d:Document) ON (d.name)",
     "CREATE INDEX document_modified IF NOT EXISTS FOR (d:Document) ON (d.modified_at)",
     "CREATE INDEX document_folder IF NOT EXISTS FOR (d:Document) ON (d.folder_path)",
     "CREATE INDEX document_indexed IF NOT EXISTS FOR (d:Document) ON (d.indexed)",
+    "CREATE INDEX repository_name IF NOT EXISTS FOR (r:Repository) ON (r.name)",
+    "CREATE INDEX codefile_path IF NOT EXISTS FOR (cf:CodeFile) ON (cf.path)",
+    "CREATE INDEX codefile_language IF NOT EXISTS FOR (cf:CodeFile) ON (cf.language)",
 ]
 
 
@@ -443,26 +451,50 @@ async def create_task(
     title: str,
     description: str | None = None,
     status: str = "pending",
-    energy_cost: int = 3,
+    priority: str = "medium",
     due_date: str | None = None,
+    effort_estimate: float | None = None,
+    energy_cost: str | None = None,
     source_type: str | None = None,
     source_id: str | None = None,
 ) -> dict:
-    """Create a Task node in the graph."""
+    """
+    Create a Task node in the graph.
+
+    Args:
+        task_id: Unique identifier (UUID)
+        title: Task title
+        description: Optional detailed description
+        status: pending, in_progress, completed, cancelled
+        priority: high, medium, low
+        due_date: Optional deadline (ISO date string)
+        effort_estimate: Estimated hours to complete
+        energy_cost: high, medium, low - cognitive load
+        source_type: Where task originated (email, meeting, manual)
+        source_id: ID of source entity
+    """
     query = """
     MERGE (t:Task {id: $task_id})
     ON CREATE SET
         t.title = $title,
         t.description = $description,
         t.status = $status,
+        t.priority = $priority,
+        t.due_date = CASE WHEN $due_date IS NOT NULL THEN datetime($due_date) ELSE null END,
+        t.effort_estimate = $effort_estimate,
         t.energy_cost = $energy_cost,
-        t.due = CASE WHEN $due_date IS NOT NULL THEN date($due_date) ELSE null END,
         t.source_type = $source_type,
         t.source_id = $source_id,
-        t.created_at = datetime()
+        t.created_at = datetime(),
+        t.updated_at = datetime()
     ON MATCH SET
         t.title = $title,
         t.description = COALESCE($description, t.description),
+        t.status = COALESCE($status, t.status),
+        t.priority = COALESCE($priority, t.priority),
+        t.due_date = CASE WHEN $due_date IS NOT NULL THEN datetime($due_date) ELSE t.due_date END,
+        t.effort_estimate = COALESCE($effort_estimate, t.effort_estimate),
+        t.energy_cost = COALESCE($energy_cost, t.energy_cost),
         t.updated_at = datetime()
     RETURN t
     """
@@ -472,11 +504,61 @@ async def create_task(
         title=title,
         description=description,
         status=status,
-        energy_cost=energy_cost,
+        priority=priority,
         due_date=due_date,
+        effort_estimate=effort_estimate,
+        energy_cost=energy_cost,
         source_type=source_type,
         source_id=source_id,
     )
+    record = await result.single()
+    return dict(record["t"]) if record else {}
+
+
+async def update_task(
+    session: AsyncSession,
+    task_id: str,
+    title: str | None = None,
+    description: str | None = None,
+    status: str | None = None,
+    priority: str | None = None,
+    due_date: str | None = None,
+    effort_estimate: float | None = None,
+    energy_cost: str | None = None,
+) -> dict:
+    """Update specific fields of a task."""
+    # Build SET clause dynamically for non-None values
+    set_parts = ["t.updated_at = datetime()"]
+    params = {"task_id": task_id}
+
+    if title is not None:
+        set_parts.append("t.title = $title")
+        params["title"] = title
+    if description is not None:
+        set_parts.append("t.description = $description")
+        params["description"] = description
+    if status is not None:
+        set_parts.append("t.status = $status")
+        params["status"] = status
+    if priority is not None:
+        set_parts.append("t.priority = $priority")
+        params["priority"] = priority
+    if due_date is not None:
+        set_parts.append("t.due_date = datetime($due_date)")
+        params["due_date"] = due_date
+    if effort_estimate is not None:
+        set_parts.append("t.effort_estimate = $effort_estimate")
+        params["effort_estimate"] = effort_estimate
+    if energy_cost is not None:
+        set_parts.append("t.energy_cost = $energy_cost")
+        params["energy_cost"] = energy_cost
+
+    query = f"""
+    MATCH (t:Task {{id: $task_id}})
+    SET {', '.join(set_parts)}
+    RETURN t
+    """
+    result = await session.run(query, **params)
     record = await result.single()
     return dict(record["t"]) if record else {}
 
@@ -486,11 +568,11 @@ async def link_task_to_email(
     task_id: str,
     gmail_id: str,
 ) -> None:
-    """Create DERIVED_FROM relationship between Task and Email."""
+    """Create ORIGINATED_FROM relationship between Task and Email."""
     query = """
     MATCH (t:Task {id: $task_id})
     MATCH (e:Email {gmail_id: $gmail_id})
-    MERGE (t)-[:DERIVED_FROM]->(e)
+    MERGE (t)-[:ORIGINATED_FROM]->(e)
     """
     await session.run(query, task_id=task_id, gmail_id=gmail_id)
 
@@ -500,14 +582,119 @@ async def link_task_to_person(
     task_id: str,
     person_email: str,
     relationship_type: str = "ASSIGNED_TO",
-) -> None:
-    """Create relationship between Task and Person."""
+) -> bool:
+    """Create relationship between Task and Person (ASSIGNED_TO, INVOLVES)."""
     query = f"""
     MATCH (t:Task {{id: $task_id}})
     MATCH (p:Person {{email: $person_email}})
     MERGE (t)-[:{relationship_type}]->(p)
+    RETURN t.id as id
     """
-    await session.run(query, task_id=task_id, person_email=person_email)
+    result = await session.run(query, task_id=task_id, person_email=person_email)
+    record = await result.single()
+    return record is not None
+
+
+async def link_task_to_project(
+    session: AsyncSession,
+    task_id: str,
+    project_id: str,
+) -> bool:
+    """Create PART_OF relationship between Task and Project."""
+    query = """
+    MATCH (t:Task {id: $task_id})
+    MATCH (p:Project {id: $project_id})
+    MERGE (t)-[:PART_OF]->(p)
+    RETURN t.id as id
+    """
+    result = await session.run(query, task_id=task_id, project_id=project_id)
+    record = await result.single()
+    return record is not None
+
+
+async def link_task_to_goal(
+    session: AsyncSession,
+    task_id: str,
+    goal_id: str,
+) -> bool:
+    """Create CONTRIBUTES_TO relationship between Task and Goal."""
+    query = """
+    MATCH (t:Task {id: $task_id})
+    MATCH (g:Goal {id: $goal_id})
+    MERGE (t)-[:CONTRIBUTES_TO]->(g)
+    RETURN t.id as id
+    """
+    result = await session.run(query, task_id=task_id, goal_id=goal_id)
+    record = await result.single()
+    return record is not None
+
+
+async def link_task_to_event(
+    session: AsyncSession,
+    task_id: str,
+    gcal_id: str,
+) -> bool:
+    """Create DISCUSSED_IN relationship between Task and Event."""
+    query = """
+    MATCH (t:Task {id: $task_id})
+    MATCH (e:Event {gcal_id: $gcal_id})
+    MERGE (t)-[:DISCUSSED_IN]->(e)
+    RETURN t.id as id
+    """
+    result = await session.run(query, task_id=task_id, gcal_id=gcal_id)
+    record = await result.single()
+    return record is not None
+
+
+async def link_task_to_document(
+    session: AsyncSession,
+    task_id: str,
+    drive_id: str,
+) -> bool:
+    """Create REFERENCES relationship between Task and Document."""
+    query = """
+    MATCH (t:Task {id: $task_id})
+    MATCH (d:Document {drive_id: $drive_id})
+    MERGE (t)-[:REFERENCES]->(d)
+    RETURN t.id as id
+    """
+    result = await session.run(query, task_id=task_id, drive_id=drive_id)
+    record = await result.single()
+    return record is not None
+
+
+async def link_task_to_codefile(
+    session: AsyncSession,
+    task_id: str,
+    codefile_id: str,
+) -> bool:
+    """Create INVOLVES_CODE relationship between Task and CodeFile."""
+    query = """
+    MATCH (t:Task {id: $task_id})
+    MATCH (cf:CodeFile {id: $codefile_id})
+    MERGE (t)-[:INVOLVES_CODE]->(cf)
+    RETURN t.id as id
+    """
+    result = await session.run(query, task_id=task_id, codefile_id=codefile_id)
+    record = await result.single()
+    return record is not None
+
+
+async def link_task_blocked_by(
+    session: AsyncSession,
+    task_id: str,
+    blocking_task_id: str,
+) -> bool:
+    """Create BLOCKED_BY relationship between Tasks."""
+    query = """
+    MATCH (t:Task {id: $task_id})
+    MATCH (blocker:Task {id: $blocking_task_id})
+    MERGE (t)-[:BLOCKED_BY]->(blocker)
+    RETURN t.id as id
+    """
+    result = await session.run(query, task_id=task_id, blocking_task_id=blocking_task_id)
+    record = await result.single()
+    return record is not None
 
 
 async def get_actionable_emails(
@@ -537,32 +724,162 @@ async def get_actionable_emails(
     ]
 
 
+async def get_task(
+    session: AsyncSession,
+    task_id: str,
+) -> dict | None:
+    """Get a single task by ID with all its relationships and full context."""
+    query = """
+    MATCH (t:Task {id: $task_id})
+    // Try relationship first, then fall back to source_id property
+    OPTIONAL MATCH (t)-[:ORIGINATED_FROM]->(e_rel:Email)
+    OPTIONAL MATCH (e_prop:Email {gmail_id: t.source_id})
+    WHERE t.source_type = 'email'
+    WITH t, COALESCE(e_rel, e_prop) as e
+    OPTIONAL MATCH (e)-[:SENT_BY]->(sender:Person)
+    // Event source (relationship or property)
+    OPTIONAL MATCH (t)-[:DISCUSSED_IN]->(ev_rel:Event)
+    OPTIONAL MATCH (ev_prop:Event {gcal_id: t.source_id})
+    WHERE t.source_type = 'event'
+    WITH t, e, sender, COALESCE(ev_rel, ev_prop) as ev
+    // Other relationships
+    OPTIONAL MATCH (t)-[:PART_OF]->(p:Project)
+    OPTIONAL MATCH (t)-[:CONTRIBUTES_TO]->(g:Goal)
+    OPTIONAL MATCH (t)-[assigned:ASSIGNED_TO]->(assignee:Person)
+    OPTIONAL MATCH (t)-[:REFERENCES]->(d:Document)
+    OPTIONAL MATCH (t)-[:INVOLVES_CODE]->(cf:CodeFile)
+    OPTIONAL MATCH (cf)-[:CONTAINED_IN]->(repo:Repository)
+    OPTIONAL MATCH (t)-[:BLOCKED_BY]->(blocker:Task)
+    RETURN t,
+           e {
+               .gmail_id, .subject, .snippet, .date,
+               sender_email: sender.email,
+               sender_name: sender.name
+           } as source_email,
+           ev {.gcal_id, .title, .start_time, .end_time} as source_event,
+           collect(DISTINCT p {.id, .title, .status}) as projects,
+           collect(DISTINCT g {.id, .title, .timeframe}) as goals,
+           collect(DISTINCT {
+               email: assignee.email,
+               name: assignee.name,
+               role: assigned.role
+           }) as people,
+           collect(DISTINCT d {.drive_id, .name, .mime_type}) as documents,
+           collect(DISTINCT {
+               id: cf.id,
+               path: cf.path,
+               name: cf.name,
+               language: cf.language,
+               repo: repo.full_name
+           }) as codefiles,
+           collect(DISTINCT blocker {.id, .title, .status}) as blocked_by
+    """
+    result = await session.run(query, task_id=task_id)
+    record = await result.single()
+    if not record:
+        return None
+
+    task_data = dict(record["t"])
+
+    # Clean up the collected data (remove empty entries)
+    projects = [p for p in record["projects"] if p.get("id")]
+    goals = [g for g in record["goals"] if g.get("id")]
+    people = [p for p in record["people"] if p.get("email")]
+    documents = [d for d in record["documents"] if d.get("drive_id")]
+    codefiles = [c for c in record["codefiles"] if c.get("id")]
+    blocked_by = [b for b in record["blocked_by"] if b.get("id")]
+
+    return {
+        **task_data,
+        "source_email": record["source_email"] if record["source_email"] and record["source_email"].get("gmail_id") else None,
+        "source_event": record["source_event"] if record["source_event"] and record["source_event"].get("gcal_id") else None,
+        "projects": projects,
+        "goals": goals,
+        "people": people,
+        "documents": documents,
+        "codefiles": codefiles,
+        "blocked_by": blocked_by,
+        # Convenience fields for single project/goal
+        "project": projects[0]["title"] if projects else None,
+        "project_id": projects[0]["id"] if projects else None,
+        "goal": goals[0]["title"] if goals else None,
+        "goal_id": goals[0]["id"] if goals else None,
+    }
+
+
 async def get_tasks(
     session: AsyncSession,
     status: str | None = None,
+    priority: str | None = None,
+    project_id: str | None = None,
+    include_completed: bool = False,
     limit: int = 50,
 ) -> list[dict]:
-    """Get tasks, optionally filtered by status."""
-    status_filter = "WHERE t.status = $status" if status else ""
+    """Get tasks with optional filters."""
+    filters = []
+    params = {"limit": limit}
+
+    if status:
+        filters.append("t.status = $status")
+        params["status"] = status
+    elif not include_completed:
+        filters.append("t.status <> 'completed' AND t.status <> 'cancelled'")
+
+    if priority:
+        filters.append("t.priority = $priority")
+        params["priority"] = priority
+
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+
+    # Add project filter via relationship if needed
+    project_match = ""
+    if project_id:
+        project_match = "MATCH (t)-[:PART_OF]->(proj:Project {id: $project_id})"
+        params["project_id"] = project_id
+
     query = f"""
     MATCH (t:Task)
-    {status_filter}
-    OPTIONAL MATCH (t)-[:DERIVED_FROM]->(e:Email)
-    OPTIONAL MATCH (e)-[:SENT_BY]->(sender:Person)
-    RETURN t, e.subject as source_subject, sender.email as from_email
-    ORDER BY t.due ASC, t.energy_cost DESC
+    {project_match}
+    {where_clause}
+    OPTIONAL MATCH (t)-[:ORIGINATED_FROM]->(e:Email)
+    OPTIONAL MATCH (t)-[:PART_OF]->(p:Project)
+    OPTIONAL MATCH (t)-[:ASSIGNED_TO]->(assignee:Person)
+    RETURN t,
+           e.subject as source_subject,
+           collect(DISTINCT p.title)[0] as project_name,
+           collect(DISTINCT assignee.email) as assignees
+    ORDER BY
+        CASE t.priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+        t.due_date ASC,
+        t.created_at DESC
     LIMIT $limit
     """
-    result = await session.run(query, status=status, limit=limit)
+    result = await session.run(query, **params)
     records = await result.data()
     return [
         {
             **dict(r["t"]),
             "source_subject": r["source_subject"],
-            "from_email": r["from_email"],
+            "project_name": r["project_name"],
+            "assignees": [a for a in r["assignees"] if a],
         }
         for r in records
     ]
+
+
+async def delete_task(
+    session: AsyncSession,
+    task_id: str,
+) -> bool:
+    """Delete a task and all its relationships."""
+    query = """
+    MATCH (t:Task {id: $task_id})
+    DETACH DELETE t
+    RETURN count(t) as deleted
+    """
+    result = await session.run(query, task_id=task_id)
+    record = await result.single()
+    return record["deleted"] > 0 if record else False
 
 
 async def update_task_status(
@@ -924,3 +1241,731 @@ async def get_document_stats(session: AsyncSession) -> dict:
         "shared": record["shared_count"] if record else 0,
         "by_folder": folder_counts,
     }
+
+
+# ============================================================================
+# Project operations
+# ============================================================================
+
+async def create_project(
+    session: AsyncSession,
+    project_id: str,
+    title: str,
+    description: str | None = None,
+    status: str = "active",
+    target_date: str | None = None,
+) -> dict:
+    """
+    Create a Project node in the graph.
+
+    Args:
+        project_id: Unique identifier (UUID)
+        title: Project title
+        description: Detailed description
+        status: active, paused, completed, archived
+        target_date: Target completion date (ISO datetime string)
+    """
+    query = """
+    MERGE (p:Project {id: $project_id})
+    ON CREATE SET
+        p.title = $title,
+        p.description = $description,
+        p.status = $status,
+        p.target_date = CASE WHEN $target_date IS NOT NULL THEN datetime($target_date) ELSE null END,
+        p.created_at = datetime(),
+        p.updated_at = datetime()
+    ON MATCH SET
+        p.title = $title,
+        p.description = COALESCE($description, p.description),
+        p.status = COALESCE($status, p.status),
+        p.target_date = CASE WHEN $target_date IS NOT NULL THEN datetime($target_date) ELSE p.target_date END,
+        p.updated_at = datetime()
+    RETURN p
+    """
+    result = await session.run(
+        query,
+        project_id=project_id,
+        title=title,
+        description=description,
+        status=status,
+        target_date=target_date,
+    )
+    record = await result.single()
+    return dict(record["p"]) if record else {}
+
+
+async def update_project(
+    session: AsyncSession,
+    project_id: str,
+    title: str | None = None,
+    description: str | None = None,
+    status: str | None = None,
+    target_date: str | None = None,
+) -> dict:
+    """Update specific fields of a project."""
+    set_parts = ["p.updated_at = datetime()"]
+    params = {"project_id": project_id}
+
+    if title is not None:
+        set_parts.append("p.title = $title")
+        params["title"] = title
+    if description is not None:
+        set_parts.append("p.description = $description")
+        params["description"] = description
+    if status is not None:
+        set_parts.append("p.status = $status")
+        params["status"] = status
+    if target_date is not None:
+        set_parts.append("p.target_date = datetime($target_date)")
+        params["target_date"] = target_date
+
+    query = f"""
+    MATCH (p:Project {{id: $project_id}})
+    SET {', '.join(set_parts)}
+    RETURN p
+    """
+    result = await session.run(query, **params)
+    record = await result.single()
+    return dict(record["p"]) if record else {}
+
+
+async def get_project(
+    session: AsyncSession,
+    project_id: str,
+) -> dict | None:
+    """Get a single project by ID with all its relationships."""
+    query = """
+    MATCH (p:Project {id: $project_id})
+    OPTIONAL MATCH (p)-[:ACHIEVES]->(g:Goal)
+    OPTIONAL MATCH (p)-[:OWNED_BY]->(owner:Person)
+    OPTIONAL MATCH (p)<-[:STAKEHOLDER]-(stakeholder:Person)
+    OPTIONAL MATCH (p)-[:USES_REPO]->(r:Repository)
+    OPTIONAL MATCH (p)-[:DOCUMENTED_IN]->(d:Document)
+    OPTIONAL MATCH (p)-[:RELATED_TO]-(related:Project)
+    OPTIONAL MATCH (t:Task)-[:PART_OF]->(p)
+    RETURN p,
+           collect(DISTINCT g.id) as goal_ids,
+           owner.email as owner_email,
+           collect(DISTINCT stakeholder.email) as stakeholders,
+           collect(DISTINCT r.full_name) as repositories,
+           collect(DISTINCT d.drive_id) as document_ids,
+           collect(DISTINCT related.id) as related_project_ids,
+           count(DISTINCT t) as task_count,
+           sum(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) as completed_tasks
+    """
+    result = await session.run(query, project_id=project_id)
+    record = await result.single()
+    if not record:
+        return None
+    return {
+        **dict(record["p"]),
+        "goal_ids": [g for g in record["goal_ids"] if g],
+        "owner_email": record["owner_email"],
+        "stakeholders": [s for s in record["stakeholders"] if s],
+        "repositories": [r for r in record["repositories"] if r],
+        "document_ids": [d for d in record["document_ids"] if d],
+        "related_project_ids": [r for r in record["related_project_ids"] if r],
+        "task_count": record["task_count"],
+        "completed_tasks": record["completed_tasks"],
+    }
+
+
+async def get_projects(
+    session: AsyncSession,
+    status: str | None = None,
+    include_archived: bool = False,
+    limit: int = 50,
+) -> list[dict]:
+    """Get projects with optional filters."""
+    filters = []
+    params = {"limit": limit}
+
+    if status:
+        filters.append("p.status = $status")
+        params["status"] = status
+    elif not include_archived:
+        filters.append("p.status <> 'archived'")
+
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+
+    query = f"""
+    MATCH (p:Project)
+    {where_clause}
+    OPTIONAL MATCH (t:Task)-[:PART_OF]->(p)
+    OPTIONAL MATCH (p)-[:ACHIEVES]->(g:Goal)
+    RETURN p,
+           count(DISTINCT t) as task_count,
+           sum(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) as completed_tasks,
+           collect(DISTINCT g.title)[0] as goal_name
+    ORDER BY
+        CASE p.status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,
+        p.target_date ASC,
+        p.created_at DESC
+    LIMIT $limit
+    """
+    result = await session.run(query, **params)
+    records = await result.data()
+    return [
+        {
+            **dict(r["p"]),
+            "task_count": r["task_count"],
+            "completed_tasks": r["completed_tasks"],
+            "goal_name": r["goal_name"],
+        }
+        for r in records
+    ]
+
+
+async def link_project_to_goal(
+    session: AsyncSession,
+    project_id: str,
+    goal_id: str,
+) -> None:
+    """Create ACHIEVES relationship between Project and Goal."""
+    query = """
+    MATCH (p:Project {id: $project_id})
+    MATCH (g:Goal {id: $goal_id})
+    MERGE (p)-[:ACHIEVES]->(g)
+    """
+    await session.run(query, project_id=project_id, goal_id=goal_id)
+
+
+async def link_project_to_person(
+    session: AsyncSession,
+    project_id: str,
+    person_email: str,
+    role: str = "stakeholder",
+) -> None:
+    """Create relationship between Project and Person (OWNED_BY or STAKEHOLDER)."""
+    if role == "owner":
+        query = """
+        MATCH (p:Project {id: $project_id})
+        MATCH (person:Person {email: $person_email})
+        MERGE (p)-[:OWNED_BY]->(person)
+        """
+    else:
+        query = """
+        MATCH (p:Project {id: $project_id})
+        MATCH (person:Person {email: $person_email})
+        MERGE (p)<-[:STAKEHOLDER {role: $role}]-(person)
+        """
+    await session.run(query, project_id=project_id, person_email=person_email, role=role)
+
+
+async def link_project_to_repository(
+    session: AsyncSession,
+    project_id: str,
+    repository_id: str,
+) -> None:
+    """Create USES_REPO relationship between Project and Repository."""
+    query = """
+    MATCH (p:Project {id: $project_id})
+    MATCH (r:Repository {id: $repository_id})
+    MERGE (p)-[:USES_REPO]->(r)
+    """
+    await session.run(query, project_id=project_id, repository_id=repository_id)
+
+
+async def link_project_to_document(
+    session: AsyncSession,
+    project_id: str,
+    drive_id: str,
+) -> None:
+    """Create DOCUMENTED_IN relationship between Project and Document."""
+    query = """
+    MATCH (p:Project {id: $project_id})
+    MATCH (d:Document {drive_id: $drive_id})
+    MERGE (p)-[:DOCUMENTED_IN]->(d)
+    """
+    await session.run(query, project_id=project_id, drive_id=drive_id)
+
+
+async def link_projects_related(
+    session: AsyncSession,
+    project_id_1: str,
+    project_id_2: str,
+) -> None:
+    """Create RELATED_TO relationship between two Projects."""
+    query = """
+    MATCH (p1:Project {id: $project_id_1})
+    MATCH (p2:Project {id: $project_id_2})
+    MERGE (p1)-[:RELATED_TO]-(p2)
+    """
+    await session.run(query, project_id_1=project_id_1, project_id_2=project_id_2)
+
+
+async def delete_project(
+    session: AsyncSession,
+    project_id: str,
+) -> bool:
+    """Delete a project and all its relationships (tasks remain orphaned)."""
+    query = """
+    MATCH (p:Project {id: $project_id})
+    DETACH DELETE p
+    RETURN count(p) as deleted
+    """
+    result = await session.run(query, project_id=project_id)
+    record = await result.single()
+    return record["deleted"] > 0 if record else False
+
+
+# ============================================================================
+# Goal operations
+# ============================================================================
+
+async def create_goal(
+    session: AsyncSession,
+    goal_id: str,
+    title: str,
+    description: str | None = None,
+    timeframe: str = "ongoing",
+    status: str = "active",
+) -> dict:
+    """
+    Create a Goal node in the graph.
+
+    Args:
+        goal_id: Unique identifier (UUID)
+        title: Goal title
+        description: Detailed description
+        timeframe: Q1_2025, Q2_2025, 2025, ongoing, etc.
+        status: active, achieved, abandoned
+    """
+    query = """
+    MERGE (g:Goal {id: $goal_id})
+    ON CREATE SET
+        g.title = $title,
+        g.description = $description,
+        g.timeframe = $timeframe,
+        g.status = $status,
+        g.created_at = datetime(),
+        g.updated_at = datetime()
+    ON MATCH SET
+        g.title = $title,
+        g.description = COALESCE($description, g.description),
+        g.timeframe = COALESCE($timeframe, g.timeframe),
+        g.status = COALESCE($status, g.status),
+        g.updated_at = datetime()
+    RETURN g
+    """
+    result = await session.run(
+        query,
+        goal_id=goal_id,
+        title=title,
+        description=description,
+        timeframe=timeframe,
+        status=status,
+    )
+    record = await result.single()
+    return dict(record["g"]) if record else {}
+
+
+async def update_goal(
+    session: AsyncSession,
+    goal_id: str,
+    title: str | None = None,
+    description: str | None = None,
+    timeframe: str | None = None,
+    status: str | None = None,
+) -> dict:
+    """Update specific fields of a goal."""
+    set_parts = ["g.updated_at = datetime()"]
+    params = {"goal_id": goal_id}
+
+    if title is not None:
+        set_parts.append("g.title = $title")
+        params["title"] = title
+    if description is not None:
+        set_parts.append("g.description = $description")
+        params["description"] = description
+    if timeframe is not None:
+        set_parts.append("g.timeframe = $timeframe")
+        params["timeframe"] = timeframe
+    if status is not None:
+        set_parts.append("g.status = $status")
+        params["status"] = status
+
+    query = f"""
+    MATCH (g:Goal {{id: $goal_id}})
+    SET {', '.join(set_parts)}
+    RETURN g
+    """
+    result = await session.run(query, **params)
+    record = await result.single()
+    return dict(record["g"]) if record else {}
+
+
+async def get_goal(
+    session: AsyncSession,
+    goal_id: str,
+) -> dict | None:
+    """Get a single goal by ID with all its relationships."""
+    query = """
+    MATCH (g:Goal {id: $goal_id})
+    OPTIONAL MATCH (p:Project)-[:ACHIEVES]->(g)
+    OPTIONAL MATCH (t:Task)-[:CONTRIBUTES_TO]->(g)
+    OPTIONAL MATCH (g)-[:PARENT_OF]->(child:Goal)
+    OPTIONAL MATCH (parent:Goal)-[:PARENT_OF]->(g)
+    RETURN g,
+           collect(DISTINCT p.id) as project_ids,
+           count(DISTINCT t) as task_count,
+           sum(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) as completed_tasks,
+           collect(DISTINCT child.id) as child_goal_ids,
+           parent.id as parent_goal_id
+    """
+    result = await session.run(query, goal_id=goal_id)
+    record = await result.single()
+    if not record:
+        return None
+    return {
+        **dict(record["g"]),
+        "project_ids": [p for p in record["project_ids"] if p],
+        "task_count": record["task_count"],
+        "completed_tasks": record["completed_tasks"],
+        "child_goal_ids": [c for c in record["child_goal_ids"] if c],
+        "parent_goal_id": record["parent_goal_id"],
+    }
+
+
+async def get_goals(
+    session: AsyncSession,
+    status: str | None = None,
+    timeframe: str | None = None,
+    include_achieved: bool = False,
+    limit: int = 50,
+) -> list[dict]:
+    """Get goals with optional filters."""
+    filters = []
+    params = {"limit": limit}
+
+    if status:
+        filters.append("g.status = $status")
+        params["status"] = status
+    elif not include_achieved:
+        filters.append("g.status = 'active'")
+
+    if timeframe:
+        filters.append("g.timeframe = $timeframe")
+        params["timeframe"] = timeframe
+
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+
+    query = f"""
+    MATCH (g:Goal)
+    {where_clause}
+    OPTIONAL MATCH (p:Project)-[:ACHIEVES]->(g)
+    OPTIONAL MATCH (t:Task)-[:CONTRIBUTES_TO]->(g)
+    RETURN g,
+           count(DISTINCT p) as project_count,
+           count(DISTINCT t) as task_count,
+           sum(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) as completed_tasks
+    ORDER BY
+        CASE g.status WHEN 'active' THEN 0 ELSE 1 END,
+        g.timeframe ASC,
+        g.created_at DESC
+    LIMIT $limit
+    """
+    result = await session.run(query, **params)
+    records = await result.data()
+    return [
+        {
+            **dict(r["g"]),
+            "project_count": r["project_count"],
+            "task_count": r["task_count"],
+            "completed_tasks": r["completed_tasks"],
+        }
+        for r in records
+    ]
+
+
+async def link_goal_parent(
+    session: AsyncSession,
+    child_goal_id: str,
+    parent_goal_id: str,
+) -> None:
+    """Create PARENT_OF relationship for goal hierarchy."""
+    query = """
+    MATCH (parent:Goal {id: $parent_goal_id})
+    MATCH (child:Goal {id: $child_goal_id})
+    MERGE (parent)-[:PARENT_OF]->(child)
+    """
+    await session.run(query, parent_goal_id=parent_goal_id, child_goal_id=child_goal_id)
+
+
+async def delete_goal(
+    session: AsyncSession,
+    goal_id: str,
+) -> bool:
+    """Delete a goal and all its relationships."""
+    query = """
+    MATCH (g:Goal {id: $goal_id})
+    DETACH DELETE g
+    RETURN count(g) as deleted
+    """
+    result = await session.run(query, goal_id=goal_id)
+    record = await result.single()
+    return record["deleted"] > 0 if record else False
+
+
+# ============================================================================
+# Repository operations (GitHub integration)
+# ============================================================================
+
+async def create_repository(
+    session: AsyncSession,
+    repo_id: str,
+    name: str,
+    full_name: str,
+    url: str,
+    description: str | None = None,
+    primary_language: str | None = None,
+    default_branch: str = "main",
+) -> dict:
+    """
+    Create a Repository node in the graph.
+
+    Args:
+        repo_id: Unique identifier (UUID or GitHub ID)
+        name: Repository name
+        full_name: owner/repo format
+        url: GitHub URL
+        description: Repository description
+        primary_language: Main programming language
+        default_branch: Default branch name
+    """
+    query = """
+    MERGE (r:Repository {id: $repo_id})
+    ON CREATE SET
+        r.name = $name,
+        r.full_name = $full_name,
+        r.url = $url,
+        r.description = $description,
+        r.primary_language = $primary_language,
+        r.default_branch = $default_branch,
+        r.created_at = datetime(),
+        r.last_synced = datetime()
+    ON MATCH SET
+        r.name = $name,
+        r.full_name = $full_name,
+        r.url = $url,
+        r.description = COALESCE($description, r.description),
+        r.primary_language = COALESCE($primary_language, r.primary_language),
+        r.default_branch = COALESCE($default_branch, r.default_branch),
+        r.last_synced = datetime()
+    RETURN r
+    """
+    result = await session.run(
+        query,
+        repo_id=repo_id,
+        name=name,
+        full_name=full_name,
+        url=url,
+        description=description,
+        primary_language=primary_language,
+        default_branch=default_branch,
+    )
+    record = await result.single()
+    return dict(record["r"]) if record else {}
+
+
+async def get_repository(
+    session: AsyncSession,
+    repo_id: str | None = None,
+    full_name: str | None = None,
+) -> dict | None:
+    """Get a repository by ID or full_name."""
+    if repo_id:
+        query = """
+        MATCH (r:Repository {id: $repo_id})
+        OPTIONAL MATCH (r)<-[:USES_REPO]-(p:Project)
+        OPTIONAL MATCH (r)-[:CONTAINS]->(cf:CodeFile)
+        RETURN r,
+               collect(DISTINCT p.id) as project_ids,
+               count(DISTINCT cf) as file_count
+        """
+        result = await session.run(query, repo_id=repo_id)
+    elif full_name:
+        query = """
+        MATCH (r:Repository {full_name: $full_name})
+        OPTIONAL MATCH (r)<-[:USES_REPO]-(p:Project)
+        OPTIONAL MATCH (r)-[:CONTAINS]->(cf:CodeFile)
+        RETURN r,
+               collect(DISTINCT p.id) as project_ids,
+               count(DISTINCT cf) as file_count
+        """
+        result = await session.run(query, full_name=full_name)
+    else:
+        return None
+
+    record = await result.single()
+    if not record:
+        return None
+    return {
+        **dict(record["r"]),
+        "project_ids": [p for p in record["project_ids"] if p],
+        "file_count": record["file_count"],
+    }
+
+
+async def get_repositories(
+    session: AsyncSession,
+    limit: int = 50,
+) -> list[dict]:
+    """Get all repositories."""
+    query = """
+    MATCH (r:Repository)
+    OPTIONAL MATCH (r)<-[:USES_REPO]-(p:Project)
+    OPTIONAL MATCH (r)-[:CONTAINS]->(cf:CodeFile)
+    RETURN r,
+           collect(DISTINCT p.title) as project_names,
+           count(DISTINCT cf) as file_count
+    ORDER BY r.last_synced DESC
+    LIMIT $limit
+    """
+    result = await session.run(query, limit=limit)
+    records = await result.data()
+    return [
+        {
+            **dict(r["r"]),
+            "project_names": [p for p in r["project_names"] if p],
+            "file_count": r["file_count"],
+        }
+        for r in records
+    ]
+
+
+async def delete_repository(
+    session: AsyncSession,
+    repo_id: str,
+) -> bool:
+    """Delete a repository and all its code files."""
+    query = """
+    MATCH (r:Repository {id: $repo_id})
+    OPTIONAL MATCH (r)-[:CONTAINS]->(cf:CodeFile)
+    DETACH DELETE r, cf
+    RETURN count(r) as deleted
+    """
+    result = await session.run(query, repo_id=repo_id)
+    record = await result.single()
+    return record["deleted"] > 0 if record else False
+
+
+# ============================================================================
+# CodeFile operations
+# ============================================================================
+
+async def create_codefile(
+    session: AsyncSession,
+    codefile_id: str,
+    path: str,
+    name: str,
+    repository_id: str,
+    language: str | None = None,
+    summary: str | None = None,
+    last_modified: str | None = None,
+) -> dict:
+    """
+    Create a CodeFile node in the graph.
+
+    Args:
+        codefile_id: Unique identifier (UUID)
+        path: Full path in repository
+        name: File name
+        repository_id: Parent repository ID
+        language: Programming language
+        summary: LLM-generated description
+        last_modified: Last modification date
+    """
+    query = """
+    MERGE (cf:CodeFile {id: $codefile_id})
+    ON CREATE SET
+        cf.path = $path,
+        cf.name = $name,
+        cf.language = $language,
+        cf.summary = $summary,
+        cf.last_modified = CASE WHEN $last_modified IS NOT NULL THEN datetime($last_modified) ELSE null END,
+        cf.created_at = datetime()
+    ON MATCH SET
+        cf.path = $path,
+        cf.name = $name,
+        cf.language = COALESCE($language, cf.language),
+        cf.summary = COALESCE($summary, cf.summary),
+        cf.last_modified = CASE WHEN $last_modified IS NOT NULL THEN datetime($last_modified) ELSE cf.last_modified END,
+        cf.updated_at = datetime()
+    RETURN cf
+    """
+    result = await session.run(
+        query,
+        codefile_id=codefile_id,
+        path=path,
+        name=name,
+        language=language,
+        summary=summary,
+        last_modified=last_modified,
+    )
+    record = await result.single()
+
+    # Link to repository
+    if record:
+        link_query = """
+        MATCH (r:Repository {id: $repository_id})
+        MATCH (cf:CodeFile {id: $codefile_id})
+        MERGE (r)-[:CONTAINS]->(cf)
+        """
+        await session.run(link_query, repository_id=repository_id, codefile_id=codefile_id)
+
+    return dict(record["cf"]) if record else {}
+
+
+async def get_codefiles(
+    session: AsyncSession,
+    repository_id: str | None = None,
+    language: str | None = None,
+    limit: int = 100,
+) -> list[dict]:
+    """Get code files with optional filters."""
+    filters = []
+    params = {"limit": limit}
+
+    if repository_id:
+        filters.append("r.id = $repository_id")
+        params["repository_id"] = repository_id
+
+    if language:
+        filters.append("cf.language = $language")
+        params["language"] = language
+
+    repo_match = "MATCH (r:Repository)-[:CONTAINS]->(cf:CodeFile)" if repository_id else "MATCH (cf:CodeFile)"
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+
+    query = f"""
+    {repo_match}
+    {where_clause}
+    OPTIONAL MATCH (r:Repository)-[:CONTAINS]->(cf)
+    RETURN cf, r.full_name as repository
+    ORDER BY cf.path ASC
+    LIMIT $limit
+    """
+    result = await session.run(query, **params)
+    records = await result.data()
+    return [
+        {
+            **dict(r["cf"]),
+            "repository": r["repository"],
+        }
+        for r in records
+    ]
+
+
+async def link_codefiles_import(
+    session: AsyncSession,
+    importer_id: str,
+    imported_id: str,
+) -> None:
+    """Create IMPORTS relationship between CodeFiles."""
+    query = """
+    MATCH (importer:CodeFile {id: $importer_id})
+    MATCH (imported:CodeFile {id: $imported_id})
+    MERGE (importer)-[:IMPORTS]->(imported)
+    """
+    await session.run(query, importer_id=importer_id, imported_id=imported_id)
