@@ -28,6 +28,65 @@ def main_callback(
     )
 
 
+@app.command("cheatsheet")
+def cheatsheet() -> None:
+    """Show quick reference for common commands."""
+    console.print("\n[bold cyan]Cognitex Quick Reference[/bold cyan]\n")
+
+    # Daily workflow
+    console.print("[bold]Daily Workflow[/bold]")
+    console.print("  cognitex today          Morning briefing")
+    console.print("  cognitex tasks          List all tasks (with short IDs)")
+    console.print("  cognitex calendar       Today's events")
+    console.print()
+
+    # Task management
+    console.print("[bold]Task Management[/bold]")
+    console.print("  cognitex task-show 1    Show task #1 with full context")
+    console.print("  cognitex task-done 1    Mark task #1 complete")
+    console.print("  cognitex task-update 1 --priority high")
+    console.print("  cognitex task-add \"Title\" --priority medium")
+    console.print("  cognitex task-link 1 --project proj_xxx --person email@example.com")
+    console.print()
+
+    # Projects & Goals
+    console.print("[bold]Projects & Goals[/bold]")
+    console.print("  cognitex projects       List all projects")
+    console.print("  cognitex goals          List all goals")
+    console.print("  cognitex project-add \"Name\" --desc \"Description\"")
+    console.print("  cognitex goal-add \"Name\" --timeframe \"Q1 2025\"")
+    console.print()
+
+    # Data sync
+    console.print("[bold]Data Sync[/bold]")
+    console.print("  cognitex sync           Sync Gmail (historical)")
+    console.print("  cognitex calendar --sync   Sync calendar events")
+    console.print("  cognitex drive-sync     Sync Drive metadata")
+    console.print("  cognitex watch-setup    Enable real-time notifications")
+    console.print()
+
+    # Contacts & Search
+    console.print("[bold]Contacts & Search[/bold]")
+    console.print("  cognitex contacts       List enriched contacts")
+    console.print("  cognitex doc-search \"query\"   Search documents")
+    console.print("  cognitex graph \"cypher query\" Run graph query")
+    console.print()
+
+    # Agent
+    console.print("[bold]Agent[/bold]")
+    console.print("  cognitex agent-chat     Interactive agent conversation")
+    console.print("  cognitex briefing       Generate morning summary")
+    console.print("  cognitex approvals      Review pending agent actions")
+    console.print()
+
+    # System
+    console.print("[bold]System[/bold]")
+    console.print("  cognitex status         Check service status")
+    console.print("  cognitex auth           Authenticate with Google")
+    console.print("  cognitex -v <cmd>       Verbose output for debugging")
+    console.print()
+
+
 @app.command()
 def dashboard() -> None:
     """Launch the interactive TUI dashboard."""
