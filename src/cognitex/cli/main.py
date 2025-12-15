@@ -2,10 +2,12 @@
 
 import asyncio
 import logging
+from datetime import datetime, timedelta
 
 import structlog
 import typer
 from rich.console import Console
+from rich.prompt import Prompt, Confirm
 from rich.table import Table
 
 app = typer.Typer(
@@ -14,6 +16,80 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+
+# =============================================================================
+# Interactive Form Helpers
+# =============================================================================
+
+def prompt_with_options(prompt_text: str, options: list[tuple[str, str]], allow_empty: bool = True) -> str | None:
+    """
+    Show numbered options and let user pick one.
+
+    Args:
+        prompt_text: The prompt to show
+        options: List of (id, display_text) tuples
+        allow_empty: If True, allow pressing Enter to skip
+
+    Returns:
+        Selected ID or None if skipped
+    """
+    if not options:
+        console.print(f"[dim]  (no options available)[/dim]")
+        return None
+
+    for i, (opt_id, display) in enumerate(options, 1):
+        console.print(f"  [cyan]{i}[/cyan]. {display} [dim]({opt_id[:12]}...)[/dim]")
+
+    skip_hint = " or Enter to skip" if allow_empty else ""
+    choice = Prompt.ask(f"{prompt_text} [dim](1-{len(options)}{skip_hint})[/dim]", default="")
+
+    if not choice:
+        return None
+
+    try:
+        idx = int(choice) - 1
+        if 0 <= idx < len(options):
+            return options[idx][0]
+    except ValueError:
+        # Try matching by partial ID
+        for opt_id, _ in options:
+            if choice in opt_id:
+                return opt_id
+
+    return None
+
+
+def prompt_with_multi_options(prompt_text: str, options: list[tuple[str, str]]) -> list[str]:
+    """
+    Show numbered options and let user pick multiple (comma-separated).
+
+    Returns:
+        List of selected IDs
+    """
+    if not options:
+        console.print(f"[dim]  (no options available)[/dim]")
+        return []
+
+    for i, (opt_id, display) in enumerate(options, 1):
+        console.print(f"  [cyan]{i}[/cyan]. {display}")
+
+    choice = Prompt.ask(f"{prompt_text} [dim](e.g., 1,3,4 or Enter to skip)[/dim]", default="")
+
+    if not choice:
+        return []
+
+    selected = []
+    for part in choice.split(","):
+        part = part.strip()
+        try:
+            idx = int(part) - 1
+            if 0 <= idx < len(options):
+                selected.append(options[idx][0])
+        except ValueError:
+            pass
+
+    return selected
 
 
 @app.callback()
@@ -42,6 +118,7 @@ def cheatsheet() -> None:
 
     # Task management
     console.print("[bold]Task Management[/bold]")
+    console.print("  cognitex task-new       [green]Interactive form[/green] to create task")
     console.print("  cognitex task-show 1    Show task #1 with full context")
     console.print("  cognitex task-done 1    Mark task #1 complete")
     console.print("  cognitex task-update 1 --priority high")
@@ -51,6 +128,7 @@ def cheatsheet() -> None:
 
     # Projects & Goals
     console.print("[bold]Projects & Goals[/bold]")
+    console.print("  cognitex project-new    [green]Interactive form[/green] to create project")
     console.print("  cognitex projects       List all projects")
     console.print("  cognitex goals          List all goals")
     console.print("  cognitex project-add \"Name\" --desc \"Description\"")
@@ -1633,6 +1711,284 @@ def task_add(
             await close_neo4j()
 
     asyncio.run(create_task())
+
+
+@app.command("task-new")
+def task_new() -> None:
+    """Interactive form to create a new task."""
+    console.print("\n[bold cyan]Create New Task[/bold cyan]\n")
+
+    async def create_task_interactive():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
+        from cognitex.db.graph_schema import init_graph_schema, get_projects, get_goals, link_task_to_person
+        from cognitex.services.tasks import get_task_service
+
+        await init_neo4j()
+        await init_graph_schema()
+
+        try:
+            # Fetch options for linking
+            async for session in get_neo4j_session():
+                # Get projects
+                projects_result = await session.run(
+                    "MATCH (p:Project) WHERE p.status <> 'completed' RETURN p.id as id, p.title as title ORDER BY p.title LIMIT 20"
+                )
+                projects = [(r["id"], r["title"]) async for r in projects_result]
+
+                # Get goals
+                goals_result = await session.run(
+                    "MATCH (g:Goal) WHERE g.status <> 'completed' RETURN g.id as id, g.title as title ORDER BY g.title LIMIT 20"
+                )
+                goals = [(r["id"], r["title"]) async for r in goals_result]
+
+                # Get contacts
+                contacts_result = await session.run(
+                    "MATCH (p:Person) WHERE p.email IS NOT NULL RETURN p.email as email, p.name as name ORDER BY p.name LIMIT 30"
+                )
+                contacts = [(r["email"], r["name"] or r["email"]) async for r in contacts_result]
+                break
+
+            # Title (required)
+            title = Prompt.ask("[bold]Task title[/bold]")
+            if not title:
+                console.print("[red]Title is required[/red]")
+                return
+
+            # Description
+            description = Prompt.ask("Description [dim](optional)[/dim]", default="")
+
+            # Priority
+            console.print("\n[bold]Priority:[/bold]")
+            priorities = [("low", "Low"), ("medium", "Medium"), ("high", "High"), ("critical", "Critical")]
+            for i, (_, label) in enumerate(priorities, 1):
+                console.print(f"  [cyan]{i}[/cyan]. {label}")
+            priority_choice = Prompt.ask("Select priority", default="2")
+            try:
+                priority = priorities[int(priority_choice) - 1][0]
+            except (ValueError, IndexError):
+                priority = "medium"
+
+            # Due date
+            console.print("\n[bold]Due date:[/bold]")
+            console.print("  [cyan]1[/cyan]. Today")
+            console.print("  [cyan]2[/cyan]. Tomorrow")
+            console.print("  [cyan]3[/cyan]. This week (Friday)")
+            console.print("  [cyan]4[/cyan]. Next week")
+            console.print("  [cyan]5[/cyan]. Custom date")
+            console.print("  [cyan]6[/cyan]. No deadline")
+            due_choice = Prompt.ask("Select due date", default="6")
+
+            due_date = None
+            today = datetime.now().date()
+            if due_choice == "1":
+                due_date = today.isoformat()
+            elif due_choice == "2":
+                due_date = (today + timedelta(days=1)).isoformat()
+            elif due_choice == "3":
+                days_until_friday = (4 - today.weekday()) % 7
+                if days_until_friday == 0:
+                    days_until_friday = 7
+                due_date = (today + timedelta(days=days_until_friday)).isoformat()
+            elif due_choice == "4":
+                due_date = (today + timedelta(days=7)).isoformat()
+            elif due_choice == "5":
+                custom = Prompt.ask("Enter date (YYYY-MM-DD)")
+                if custom:
+                    due_date = custom
+
+            # Energy cost
+            console.print("\n[bold]Energy cost:[/bold] [dim](cognitive load)[/dim]")
+            energy_options = [("1", "1 - Trivial"), ("3", "3 - Low"), ("5", "5 - Medium"), ("7", "7 - High"), ("9", "9 - Exhausting")]
+            for i, (_, label) in enumerate(energy_options, 1):
+                console.print(f"  [cyan]{i}[/cyan]. {label}")
+            energy_choice = Prompt.ask("Select energy cost", default="3")
+            try:
+                energy = int(energy_options[int(energy_choice) - 1][0])
+            except (ValueError, IndexError):
+                energy = 5
+
+            # Project link
+            project_id = None
+            if projects:
+                console.print("\n[bold]Link to project:[/bold]")
+                project_id = prompt_with_options("Select project", projects)
+
+            # Goal link
+            goal_id = None
+            if goals:
+                console.print("\n[bold]Link to goal:[/bold]")
+                goal_id = prompt_with_options("Select goal", goals)
+
+            # Assign to person
+            assignee_email = None
+            if contacts:
+                console.print("\n[bold]Assign to:[/bold]")
+                assignee_email = prompt_with_options("Select person", contacts)
+
+            # Create the task
+            task_service = get_task_service()
+            task = await task_service.create(
+                title=title,
+                description=description or None,
+                priority=priority,
+                due_date=due_date,
+                project_id=project_id,
+                goal_id=goal_id,
+                energy_cost=energy,
+            )
+
+            # Link to person if selected
+            if assignee_email:
+                async for session in get_neo4j_session():
+                    await link_task_to_person(session, task["id"], assignee_email)
+                    break
+
+            # Summary
+            console.print(f"\n[green]✓ Created task:[/green] {task['title']}")
+            console.print(f"  ID: [dim]{task['id']}[/dim]")
+            console.print(f"  Priority: {priority}")
+            if due_date:
+                console.print(f"  Due: {due_date}")
+            if project_id:
+                proj_name = next((p[1] for p in projects if p[0] == project_id), project_id)
+                console.print(f"  Project: {proj_name}")
+            if goal_id:
+                goal_name = next((g[1] for g in goals if g[0] == goal_id), goal_id)
+                console.print(f"  Goal: {goal_name}")
+            if assignee_email:
+                console.print(f"  Assigned to: {assignee_email}")
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(create_task_interactive())
+
+
+@app.command("project-new")
+def project_new() -> None:
+    """Interactive form to create a new project."""
+    console.print("\n[bold cyan]Create New Project[/bold cyan]\n")
+
+    async def create_project_interactive():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
+        from cognitex.db.graph_schema import init_graph_schema, create_project, link_project_to_goal
+
+        await init_neo4j()
+        await init_graph_schema()
+
+        try:
+            # Fetch options for linking
+            async for session in get_neo4j_session():
+                # Get goals
+                goals_result = await session.run(
+                    "MATCH (g:Goal) WHERE g.status <> 'completed' RETURN g.id as id, g.title as title ORDER BY g.title LIMIT 20"
+                )
+                goals = [(r["id"], r["title"]) async for r in goals_result]
+
+                # Get contacts for owner
+                contacts_result = await session.run(
+                    "MATCH (p:Person) WHERE p.email IS NOT NULL RETURN p.email as email, p.name as name ORDER BY p.name LIMIT 30"
+                )
+                contacts = [(r["email"], r["name"] or r["email"]) async for r in contacts_result]
+                break
+
+            # Title (required)
+            title = Prompt.ask("[bold]Project title[/bold]")
+            if not title:
+                console.print("[red]Title is required[/red]")
+                return
+
+            # Description
+            description = Prompt.ask("Description [dim](optional)[/dim]", default="")
+
+            # Status
+            console.print("\n[bold]Status:[/bold]")
+            statuses = [("planning", "Planning"), ("active", "Active"), ("paused", "Paused")]
+            for i, (_, label) in enumerate(statuses, 1):
+                console.print(f"  [cyan]{i}[/cyan]. {label}")
+            status_choice = Prompt.ask("Select status", default="2")
+            try:
+                status = statuses[int(status_choice) - 1][0]
+            except (ValueError, IndexError):
+                status = "active"
+
+            # Priority
+            console.print("\n[bold]Priority:[/bold]")
+            priorities = [("low", "Low"), ("medium", "Medium"), ("high", "High")]
+            for i, (_, label) in enumerate(priorities, 1):
+                console.print(f"  [cyan]{i}[/cyan]. {label}")
+            priority_choice = Prompt.ask("Select priority", default="2")
+            try:
+                priority = priorities[int(priority_choice) - 1][0]
+            except (ValueError, IndexError):
+                priority = "medium"
+
+            # Target date
+            console.print("\n[bold]Target completion:[/bold]")
+            console.print("  [cyan]1[/cyan]. End of this month")
+            console.print("  [cyan]2[/cyan]. End of next month")
+            console.print("  [cyan]3[/cyan]. End of quarter")
+            console.print("  [cyan]4[/cyan]. Custom date")
+            console.print("  [cyan]5[/cyan]. No target date")
+            target_choice = Prompt.ask("Select target date", default="5")
+
+            target_date = None
+            today = datetime.now().date()
+            if target_choice == "1":
+                # End of this month
+                next_month = today.replace(day=28) + timedelta(days=4)
+                target_date = (next_month - timedelta(days=next_month.day)).isoformat()
+            elif target_choice == "2":
+                # End of next month
+                next_month = (today.replace(day=28) + timedelta(days=4))
+                month_after = (next_month.replace(day=28) + timedelta(days=4))
+                target_date = (month_after - timedelta(days=month_after.day)).isoformat()
+            elif target_choice == "3":
+                # End of quarter
+                quarter_end_month = ((today.month - 1) // 3 + 1) * 3
+                quarter_end = today.replace(month=quarter_end_month, day=1) + timedelta(days=31)
+                target_date = (quarter_end - timedelta(days=quarter_end.day)).isoformat()
+            elif target_choice == "4":
+                custom = Prompt.ask("Enter date (YYYY-MM-DD)")
+                if custom:
+                    target_date = custom
+
+            # Link to goal
+            goal_id = None
+            if goals:
+                console.print("\n[bold]Link to goal:[/bold]")
+                goal_id = prompt_with_options("Select goal", goals)
+
+            # Create the project
+            async for session in get_neo4j_session():
+                project = await create_project(
+                    session,
+                    title=title,
+                    description=description or None,
+                    status=status,
+                    priority=priority,
+                )
+
+                # Link to goal if selected
+                if goal_id:
+                    await link_project_to_goal(session, project["id"], goal_id)
+
+                # Summary
+                console.print(f"\n[green]✓ Created project:[/green] {project['title']}")
+                console.print(f"  ID: [dim]{project['id']}[/dim]")
+                console.print(f"  Status: {status}")
+                console.print(f"  Priority: {priority}")
+                if target_date:
+                    console.print(f"  Target: {target_date}")
+                if goal_id:
+                    goal_name = next((g[1] for g in goals if g[0] == goal_id), goal_id)
+                    console.print(f"  Goal: {goal_name}")
+                break
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(create_project_interactive())
 
 
 @app.command("task-done")
