@@ -114,7 +114,7 @@ def shell() -> None:
     console.print("\n[bold cyan]Cognitex Interactive Shell[/bold cyan]")
     console.print("[dim]Type commands without 'cognitex' prefix. Use 'help' for commands, 'exit' to quit.[/dim]\n")
 
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
 
     # Quick aliases
     aliases = {
