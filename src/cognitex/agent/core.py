@@ -194,10 +194,26 @@ Example queries:
         # Build conversation for the LLM
         system_prompt = self._build_system_prompt()
 
+        # Start with system prompt
         conversation = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"User message: {message}"},
         ]
+
+        # Include recent conversation history from working memory
+        context = await self.memory.working.get_context()
+        recent_interactions = context.get("interactions", [])[-10:]  # Last 10 interactions
+
+        for interaction in recent_interactions:
+            role = interaction.get("role", "user")
+            content = interaction.get("content", "")
+            # Map our roles to OpenAI roles
+            if role == "agent":
+                conversation.append({"role": "assistant", "content": content})
+            else:
+                conversation.append({"role": "user", "content": content})
+
+        # Add current message
+        conversation.append({"role": "user", "content": f"User message: {message}"})
 
         for iteration in range(MAX_REACT_ITERATIONS):
             logger.debug("ReAct iteration", iteration=iteration)
