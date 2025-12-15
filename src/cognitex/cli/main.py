@@ -104,6 +104,93 @@ def main_callback(
     )
 
 
+@app.command("shell")
+def shell() -> None:
+    """Interactive shell mode - run commands without typing 'cognitex' each time."""
+    import shlex
+    import sys
+    from click.testing import CliRunner
+
+    console.print("\n[bold cyan]Cognitex Interactive Shell[/bold cyan]")
+    console.print("[dim]Type commands without 'cognitex' prefix. Use 'help' for commands, 'exit' to quit.[/dim]\n")
+
+    runner = CliRunner(mix_stderr=False)
+
+    # Quick aliases
+    aliases = {
+        "t": "tasks",
+        "p": "projects",
+        "g": "goals",
+        "c": "calendar",
+        "cs": "cheatsheet",
+        "td": "task-done",
+        "ts": "task-show",
+        "tn": "task-new",
+        "pn": "project-new",
+        "ps": "project-show",
+        "?": "cheatsheet",
+    }
+
+    while True:
+        try:
+            user_input = console.input("[bold green]cognitex>[/bold green] ").strip()
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[dim]Goodbye![/dim]")
+            break
+
+        if not user_input:
+            continue
+
+        if user_input.lower() in ("exit", "quit", "q"):
+            console.print("[dim]Goodbye![/dim]")
+            break
+
+        if user_input.lower() == "help":
+            console.print("\n[bold]Available commands:[/bold]")
+            console.print("  tasks, projects, goals, calendar, contacts")
+            console.print("  task-new, task-show <#>, task-done <#>, task-update <#>")
+            console.print("  project-new, project-show <#>, project-link <#>")
+            console.print("  cheatsheet, status, today, briefing")
+            console.print("\n[bold]Aliases:[/bold]")
+            console.print("  t=tasks  p=projects  g=goals  c=calendar")
+            console.print("  tn=task-new  ts=task-show  td=task-done")
+            console.print("  pn=project-new  ps=project-show  ?=cheatsheet")
+            console.print("\n[bold]Chat with agent:[/bold]")
+            console.print("  Start with '>' to chat: > what tasks do I have today?")
+            console.print()
+            continue
+
+        # Check if it's a chat message (starts with >)
+        if user_input.startswith(">"):
+            chat_msg = user_input[1:].strip()
+            if chat_msg:
+                # Run agent-chat with the message
+                result = runner.invoke(app, ["agent-chat", chat_msg])
+                if result.output:
+                    console.print(result.output)
+            continue
+
+        # Parse command and args
+        try:
+            parts = shlex.split(user_input)
+        except ValueError:
+            parts = user_input.split()
+
+        if not parts:
+            continue
+
+        # Apply alias
+        cmd = aliases.get(parts[0], parts[0])
+        args = [cmd] + parts[1:]
+
+        # Run the command
+        result = runner.invoke(app, args)
+        if result.output:
+            console.print(result.output.rstrip())
+        if result.exception and not isinstance(result.exception, SystemExit):
+            console.print(f"[red]Error: {result.exception}[/red]")
+
+
 @app.command("cheatsheet")
 def cheatsheet() -> None:
     """Show quick reference for common commands."""
