@@ -76,6 +76,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
     volumes:
       - ./src:/app/src:ro
+      - ./data:/app/data:ro
     depends_on:
       - cognitex-core
     networks:

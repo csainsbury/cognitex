@@ -1,16 +1,13 @@
-"""Cognitex Agent - Hierarchical agent system for personal task management.
+"""Cognitex Agent - ReAct-style agent for personal task management.
 
 Architecture:
-    Planner (Qwen3-30B-A3B) -> Executors (DeepSeek V3) -> Tools
+    ReAct Loop: Thought -> Action -> Observation -> Repeat until done
 
-The agent operates in several modes:
-    - BRIEFING: Morning/evening summaries
-    - REVIEW: End of day review
-    - MONITOR: Hourly check for urgent items
-    - PROCESS_EMAIL: Handle new email
-    - PROCESS_EVENT: Handle calendar change
-    - CONVERSATION: Interactive user chat
-    - ESCALATE: Handle overdue/urgent items
+The agent uses iterative reasoning to:
+    - Freely explore the knowledge graph
+    - Make connections across emails, tasks, people, events, documents
+    - Take actions when needed
+    - Respond naturally to any query
 
 Memory system:
     - Working Memory (Redis): Short-term context, pending approvals
@@ -22,7 +19,7 @@ Tools are categorized by risk:
     - APPROVAL: Requires user approval (send email, calendar changes)
 """
 
-from cognitex.agent.core import Agent, AgentMode, ExecutionResult, get_agent
+from cognitex.agent.core import Agent, AgentMode, get_agent
 from cognitex.agent.planner import Planner, Plan, PlanStep, get_planner
 from cognitex.agent.executors import get_executor_registry
 from cognitex.agent.memory import Memory, WorkingMemory, EpisodicMemory, init_memory, get_memory
@@ -45,7 +42,6 @@ __all__ = [
     # Core
     "Agent",
     "AgentMode",
-    "ExecutionResult",
     "get_agent",
     # Planner
     "Planner",

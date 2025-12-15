@@ -18,12 +18,31 @@ async def startup(ctx: dict) -> None:
     logger.info("Worker starting up")
     await init_postgres()
     await init_neo4j()
+
+    # Initialize Redis for agent triggers
+    from cognitex.db.redis import init_redis
+    await init_redis()
+
+    # Start the Agent Trigger System (Scheduler & Event Listeners)
+    from cognitex.agent.triggers import start_triggers
+    ctx["trigger_system"] = await start_triggers()
+
     ctx["initialized"] = True
+    logger.info("Worker initialized with agent triggers")
 
 
 async def shutdown(ctx: dict) -> None:
     """Cleanup connections on worker shutdown."""
     logger.info("Worker shutting down")
+
+    # Stop agent triggers first
+    if "trigger_system" in ctx:
+        from cognitex.agent.triggers import stop_triggers
+        await stop_triggers()
+
+    # Close database connections
+    from cognitex.db.redis import close_redis
+    await close_redis()
     await close_neo4j()
     await close_postgres()
 

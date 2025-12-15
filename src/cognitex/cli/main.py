@@ -1159,6 +1159,338 @@ def agent_run(
     asyncio.run(run_agent())
 
 
+@app.command("discord-test")
+def discord_test(
+    send_notification: bool = typer.Option(False, "--notify", "-n", help="Send a test notification via Redis pub/sub"),
+) -> None:
+    """Test Discord bot connectivity and functionality."""
+    console.print("[bold]Discord Integration Test[/bold]\n")
+
+    from cognitex.config import get_settings
+    settings = get_settings()
+
+    results = {}
+
+    # 1. Check Discord configuration
+    console.print("[cyan]1. Checking Discord configuration...[/cyan]")
+    bot_token = settings.discord_bot_token.get_secret_value() if settings.discord_bot_token else None
+    channel_id = settings.discord_channel_id
+
+    if bot_token:
+        results["bot_token"] = True
+        console.print("   [green]✓[/green] DISCORD_BOT_TOKEN is configured")
+    else:
+        results["bot_token"] = False
+        console.print("   [red]✗[/red] DISCORD_BOT_TOKEN not set in .env")
+
+    if channel_id:
+        results["channel_id"] = True
+        console.print(f"   [green]✓[/green] DISCORD_CHANNEL_ID: {channel_id}")
+    else:
+        results["channel_id"] = False
+        console.print("   [red]✗[/red] DISCORD_CHANNEL_ID not set in .env")
+
+    # 2. Check Redis connectivity (needed for notifications)
+    console.print("\n[cyan]2. Checking Redis connectivity...[/cyan]")
+
+    async def check_redis():
+        from cognitex.db.redis import init_redis, close_redis, get_redis
+        try:
+            await init_redis()
+            redis = get_redis()
+            await redis.ping()
+            results["redis"] = True
+            console.print("   [green]✓[/green] Redis is connected")
+            return True
+        except Exception as e:
+            results["redis"] = False
+            console.print(f"   [red]✗[/red] Redis connection failed: {e}")
+            return False
+        finally:
+            try:
+                await close_redis()
+            except Exception:
+                pass
+
+    redis_ok = asyncio.run(check_redis())
+
+    # 3. Check Neo4j connectivity (needed for slash commands)
+    console.print("\n[cyan]3. Checking Neo4j connectivity...[/cyan]")
+
+    async def check_neo4j():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
+        try:
+            await init_neo4j()
+            async for session in get_neo4j_session():
+                result = await session.run("RETURN 1 as n")
+                await result.single()
+            results["neo4j"] = True
+            console.print("   [green]✓[/green] Neo4j is connected")
+            return True
+        except Exception as e:
+            results["neo4j"] = False
+            console.print(f"   [red]✗[/red] Neo4j connection failed: {e}")
+            return False
+        finally:
+            try:
+                await close_neo4j()
+            except Exception:
+                pass
+
+    neo4j_ok = asyncio.run(check_neo4j())
+
+    # 4. Check PostgreSQL connectivity (needed for agent memory)
+    console.print("\n[cyan]4. Checking PostgreSQL connectivity...[/cyan]")
+
+    async def check_postgres():
+        from cognitex.db.postgres import init_postgres, close_postgres, get_session
+        from sqlalchemy import text
+        try:
+            await init_postgres()
+            async for session in get_session():
+                await session.execute(text("SELECT 1"))
+            results["postgres"] = True
+            console.print("   [green]✓[/green] PostgreSQL is connected")
+            return True
+        except Exception as e:
+            results["postgres"] = False
+            console.print(f"   [red]✗[/red] PostgreSQL connection failed: {e}")
+            return False
+        finally:
+            try:
+                await close_postgres()
+            except Exception:
+                pass
+
+    postgres_ok = asyncio.run(check_postgres())
+
+    # 5. Check Together.ai (needed for agent chat)
+    console.print("\n[cyan]5. Checking Together.ai configuration...[/cyan]")
+    together_key = settings.together_api_key.get_secret_value() if settings.together_api_key else None
+
+    if together_key:
+        results["together"] = True
+        console.print(f"   [green]✓[/green] TOGETHER_API_KEY is configured")
+        console.print(f"   [dim]   Planner model: {settings.together_model_planner}[/dim]")
+        console.print(f"   [dim]   Executor model: {settings.together_model_executor}[/dim]")
+    else:
+        results["together"] = False
+        console.print("   [red]✗[/red] TOGETHER_API_KEY not set in .env")
+
+    # 6. Test notification pub/sub if requested
+    if send_notification and redis_ok:
+        console.print("\n[cyan]6. Sending test notification via Redis pub/sub...[/cyan]")
+
+        async def send_test_notification():
+            import json
+            from cognitex.db.redis import init_redis, close_redis, get_redis
+            try:
+                await init_redis()
+                redis = get_redis()
+
+                test_payload = json.dumps({
+                    "title": "🧪 Test Notification",
+                    "message": "This is a test notification from `cognitex discord-test --notify`",
+                    "urgency": "low",
+                    "fields": {
+                        "Source": "CLI Test",
+                        "Status": "Working",
+                    }
+                })
+
+                await redis.publish("cognitex:notifications", test_payload)
+                results["notification_sent"] = True
+                console.print("   [green]✓[/green] Test notification published to cognitex:notifications")
+                console.print("   [dim]   If the Discord bot is running, you should see it in the channel[/dim]")
+            except Exception as e:
+                results["notification_sent"] = False
+                console.print(f"   [red]✗[/red] Failed to send notification: {e}")
+            finally:
+                try:
+                    await close_redis()
+                except Exception:
+                    pass
+
+        asyncio.run(send_test_notification())
+
+    # Summary
+    console.print("\n" + "=" * 50)
+    console.print("[bold]Summary[/bold]\n")
+
+    all_good = all([
+        results.get("bot_token"),
+        results.get("channel_id"),
+        results.get("redis"),
+        results.get("neo4j"),
+        results.get("postgres"),
+        results.get("together"),
+    ])
+
+    if all_good:
+        console.print("[bold green]All checks passed! ✓[/bold green]\n")
+        console.print("To start the Discord bot:")
+        console.print("  [cyan]python -m cognitex.discord_bot[/cyan]\n")
+        console.print("Available slash commands:")
+        console.print("  /status    - System health check")
+        console.print("  /tasks     - List pending tasks")
+        console.print("  /today     - Today's schedule")
+        console.print("  /briefing  - Morning briefing")
+        console.print("  /approvals - Pending approvals\n")
+        console.print("Natural language:")
+        console.print("  @Cognitex what meetings do I have today?")
+        console.print("  @Cognitex draft a reply to the last email from John")
+    else:
+        console.print("[bold yellow]Some checks failed.[/bold yellow]\n")
+        console.print("Fix the issues above before starting the Discord bot.")
+        console.print("\nRequired:")
+        if not results.get("bot_token"):
+            console.print("  - Set DISCORD_BOT_TOKEN in .env")
+        if not results.get("channel_id"):
+            console.print("  - Set DISCORD_CHANNEL_ID in .env")
+        if not results.get("redis"):
+            console.print("  - Start Redis: docker compose up -d redis")
+        if not results.get("neo4j"):
+            console.print("  - Start Neo4j: docker compose up -d neo4j")
+        if not results.get("postgres"):
+            console.print("  - Start PostgreSQL: docker compose up -d postgres")
+        if not results.get("together"):
+            console.print("  - Set TOGETHER_API_KEY in .env")
+
+
+@app.command("watch-setup")
+def watch_setup(
+    webhook_url: str = typer.Option(None, "--webhook", "-w", help="Public HTTPS webhook URL"),
+    pubsub_topic: str = typer.Option(None, "--pubsub", "-p", help="Google Cloud Pub/Sub topic for Gmail"),
+    gmail: bool = typer.Option(True, "--gmail/--no-gmail", help="Set up Gmail watch"),
+    calendar: bool = typer.Option(True, "--calendar/--no-calendar", help="Set up Calendar watch"),
+    drive: bool = typer.Option(True, "--drive/--no-drive", help="Set up Drive watch"),
+) -> None:
+    """Set up Google push notification watches for real-time updates."""
+    console.print("[bold]Setting up Google Push Notification Watches[/bold]\n")
+
+    if not webhook_url and (calendar or drive):
+        console.print("[yellow]Warning: No webhook URL provided. Calendar and Drive watches require a public HTTPS endpoint.[/yellow]")
+        console.print("[dim]Use --webhook https://your-domain.com or set up ngrok for development.[/dim]\n")
+
+    async def setup_watches():
+        from cognitex.services.push_notifications import get_watch_manager
+
+        watch_manager = get_watch_manager(webhook_url)
+        results = {}
+
+        if gmail:
+            console.print("[cyan]Setting up Gmail watch...[/cyan]")
+            if pubsub_topic:
+                result = await watch_manager.setup_gmail_watch(pubsub_topic)
+            else:
+                console.print("  [yellow]Skipping Gmail - requires --pubsub topic[/yellow]")
+                result = {"skipped": "No Pub/Sub topic"}
+            results["Gmail"] = result
+
+        if calendar and webhook_url:
+            console.print("[cyan]Setting up Calendar watch...[/cyan]")
+            result = await watch_manager.setup_calendar_watch()
+            results["Calendar"] = result
+        elif calendar:
+            results["Calendar"] = {"skipped": "No webhook URL"}
+
+        if drive and webhook_url:
+            console.print("[cyan]Setting up Drive watch...[/cyan]")
+            result = await watch_manager.setup_drive_watch()
+            results["Drive"] = result
+        elif drive:
+            results["Drive"] = {"skipped": "No webhook URL"}
+
+        console.print("\n[bold]Results:[/bold]")
+        for service, result in results.items():
+            if "error" in result:
+                console.print(f"  {service}: [red]Error - {result['error'][:50]}[/red]")
+            elif "skipped" in result:
+                console.print(f"  {service}: [yellow]Skipped - {result['skipped']}[/yellow]")
+            else:
+                expiration = result.get("expiration", "unknown")
+                console.print(f"  {service}: [green]Active[/green] (expires: {expiration})")
+
+    asyncio.run(setup_watches())
+
+
+@app.command("watch-status")
+def watch_status() -> None:
+    """Show status of active Google push notification watches."""
+    console.print("[bold]Active Google Push Notification Watches[/bold]\n")
+
+    from cognitex.services.push_notifications import get_watch_manager
+    from datetime import datetime
+
+    watch_manager = get_watch_manager()
+    watches = watch_manager.get_active_watches()
+
+    if not watches:
+        console.print("[yellow]No active watches. Run 'cognitex watch-setup' to create them.[/yellow]")
+        return
+
+    table = Table()
+    table.add_column("Service", style="cyan")
+    table.add_column("Status", style="green")
+    table.add_column("Expires", style="white")
+    table.add_column("Created", style="dim")
+
+    for key, watch in watches.items():
+        expiration_ms = watch.get("expiration")
+        if expiration_ms:
+            exp_dt = datetime.fromtimestamp(int(expiration_ms) / 1000)
+            expires = exp_dt.strftime("%Y-%m-%d %H:%M")
+            if exp_dt < datetime.now():
+                status = "[red]Expired[/red]"
+            else:
+                status = "[green]Active[/green]"
+        else:
+            expires = "Unknown"
+            status = "[yellow]Unknown[/yellow]"
+
+        created = watch.get("created_at", "Unknown")
+        if created != "Unknown":
+            created = created[:16]  # Truncate to date + time
+
+        table.add_row(key, status, expires, created)
+
+    console.print(table)
+
+
+@app.command("watch-stop")
+def watch_stop(
+    gmail: bool = typer.Option(False, "--gmail", help="Stop Gmail watch"),
+    calendar: bool = typer.Option(False, "--calendar", help="Stop Calendar watch"),
+    drive: bool = typer.Option(False, "--drive", help="Stop Drive watch"),
+    all_watches: bool = typer.Option(False, "--all", help="Stop all watches"),
+) -> None:
+    """Stop Google push notification watches."""
+    if not any([gmail, calendar, drive, all_watches]):
+        console.print("[yellow]Specify which watches to stop: --gmail, --calendar, --drive, or --all[/yellow]")
+        return
+
+    async def stop_watches():
+        from cognitex.services.push_notifications import get_watch_manager
+
+        watch_manager = get_watch_manager()
+
+        if gmail or all_watches:
+            console.print("[cyan]Stopping Gmail watch...[/cyan]")
+            await watch_manager.stop_gmail_watch()
+
+        if calendar or all_watches:
+            console.print("[cyan]Stopping Calendar watch...[/cyan]")
+            await watch_manager.stop_calendar_watch()
+
+        if drive or all_watches:
+            console.print("[cyan]Stopping Drive watch...[/cyan]")
+            await watch_manager.stop_drive_watch()
+
+        console.print("[green]Done.[/green]")
+
+    asyncio.run(stop_watches())
+
+
 @app.command("agent-status")
 def agent_status() -> None:
     """Show agent system status."""
@@ -1192,7 +1524,7 @@ def agent_status() -> None:
             await init_redis()
             await init_postgres()
 
-            redis = await get_redis()
+            redis = get_redis()  # get_redis() is sync, returns async Redis client
 
             # Count working memory items
             context_exists = await redis.exists("cognitex:memory:working:context")

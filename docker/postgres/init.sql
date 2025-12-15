@@ -145,3 +145,25 @@ CREATE TRIGGER update_goals_updated_at BEFORE UPDATE ON goals
 
 CREATE TRIGGER update_sync_state_updated_at BEFORE UPDATE ON sync_state
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Agent Episodic Memory for long-term storage
+CREATE TABLE IF NOT EXISTS agent_memory (
+    id TEXT PRIMARY KEY,
+    memory_type TEXT NOT NULL,  -- 'decision', 'interaction', 'feedback', 'preference'
+    content TEXT NOT NULL,
+    entities TEXT[] DEFAULT '{}',
+    importance INTEGER DEFAULT 3 CHECK (importance >= 1 AND importance <= 5),
+    embedding vector(768),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    accessed_at TIMESTAMPTZ DEFAULT NOW(),
+    access_count INTEGER DEFAULT 0,
+    metadata JSONB DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_memory_type ON agent_memory(memory_type);
+CREATE INDEX IF NOT EXISTS idx_agent_memory_created ON agent_memory(created_at);
+CREATE INDEX IF NOT EXISTS idx_agent_memory_importance ON agent_memory(importance);
+
+-- Vector similarity search index for memory retrieval
+CREATE INDEX IF NOT EXISTS idx_agent_memory_embedding
+    ON agent_memory USING hnsw (embedding vector_cosine_ops);

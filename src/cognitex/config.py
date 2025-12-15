@@ -38,8 +38,8 @@ class Settings(BaseSettings):
     # Together.ai
     together_api_key: SecretStr = Field(default=SecretStr(""))
     together_model_planner: str = Field(
-        default="Qwen/Qwen3-30B-A3B",
-        description="Planner model for reasoning and decision making (MoE, 3B active)",
+        default="deepseek-ai/DeepSeek-V3",
+        description="Planner model for reasoning and decision making",
     )
     together_model_executor: str = Field(
         default="deepseek-ai/DeepSeek-V3",

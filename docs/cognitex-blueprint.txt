@@ -1,0 +1,152 @@
+Life OS: Personal Agent System
+Architecture Blueprint & Implementation Plan
+1. Executive Summary
+Life OS is a personal agent system designed to manage the cognitive overhead of professional and personal administration. It continuously monitors email, calendar, and other data sources, builds a rich relationship graph, infers actionable tasks, and proactively assists through Discord notifications and CLI interaction.
+Key design principles:
+Neurodivergent-friendly: Energy-aware scheduling, overwhelm prevention, low-friction interaction
+Graph-centric: All entities (people, projects, goals, tasks) connected in a queryable knowledge graph
+Staged autonomy: Suggestions require approval initially, with path to full automation
+Dual interface: SSH CLI for deep work sessions, Discord for mobile/proactive notifications
+2. System Architecture
+2.1 High-Level Architecture
+The system runs on your dedicated Ubuntu/Docker server with the following major components:
+
+2.2 Docker Compose Stack
+All services containerised for reproducibility:
+life-os-core: Main Python application (FastAPI + background workers)
+neo4j: Graph database for relationship/interaction data
+postgres: Relational store for tasks, goals, audit logs, embeddings (pgvector)
+redis: Message queue (task processing), caching, pub/sub for real-time events
+discord-bot: Separate container for Discord gateway connection
+3. Data Model
+3.1 Graph Schema (Neo4j)
+The graph captures relationships between all entities in your professional and personal life:
+Node Types
+
+Edge Types (Relationships)
+SENT_BY / RECEIVED_BY: Email ↔ Person
+ATTENDED_BY: Event ↔ Person
+ASSIGNED_TO: Task ↔ Person (you)
+RELATED_TO: Task/Email ↔ Project
+CONTRIBUTES_TO: Task ↔ Goal
+PARENT_OF: Goal ↔ Goal (hierarchy: yearly → quarterly → weekly)
+WORKS_WITH: Person ↔ Person (inferred from shared threads/meetings)
+MENTIONED_IN: Person ↔ Email/Event
+3.2 Relational Schema (PostgreSQL)
+PostgreSQL stores structured data that benefits from ACID guarantees and SQL queries:
+tasks: Full task records with status workflow, timestamps, audit trail
+goals: Goal definitions with key results as JSONB
+energy_logs: Time-series energy levels (actual vs predicted)
+draft_actions: Staged emails/calendar changes awaiting approval
+embeddings: pgvector store for semantic search over emails/tasks
+sync_state: Watermarks for incremental Gmail/GCal sync
+4. Together.ai Workflow Design
+4.1 Workflow Patterns
+Using Together.ai's agent workflow patterns for multi-step LLM processing:
+Sequential: Email Processing Pipeline
+For each new email batch:
+Step 1 - Extract: Parse sender, recipients, subject, key entities, dates mentioned
+Step 2 - Classify: Categorise (actionable/FYI/spam), assign project, estimate urgency
+Step 3 - Infer Tasks: Generate candidate tasks with title, due date, energy estimate
+Step 4 - Draft Response: If reply needed, draft response for staging
+Parallel: Batch Processing
+Process multiple emails/calendar events simultaneously, then aggregate results for deduplication and prioritisation.
+Conditional: Smart Routing
+Only generate Discord notifications for genuinely actionable items. Apply strict filters to prevent overwhelm:
+Skip: newsletters, automated notifications, FYI-only threads
+Notify: explicit requests, deadlines within 48h, messages from key contacts
+Escalate: overdue items, repeated follow-ups from same person
+Iterative: Schedule Optimisation
+When proposing time-blocks or task scheduling:
+Generate initial schedule based on deadlines and energy profile
+Check constraints (working hours, buffer between meetings, energy limits)
+Iterate until acceptable or max iterations reached
+Present final suggestion with confidence score
+4.2 Model Selection
+Together.ai model recommendations:
+Primary reasoning: Llama 3.1 70B or Mixtral 8x22B for complex classification/inference
+Fast classification: Llama 3.1 8B for simple routing decisions
+Embeddings: Together's embedding models for semantic search
+Fine-tuning: Consider LoRA fine-tune on your email style for better draft generation
+5. Interface Design
+5.1 CLI Interface
+Rich terminal UI using Python's 'textual' library for SSH sessions:
+Dashboard view: Overview of today's energy, pending tasks, upcoming events, suggested actions
+Inbox view: Processed emails with suggested tasks, approve/reject/defer actions
+Graph explorer: Query relationships ('who have I not replied to?', 'what's blocking project X?')
+Goal tracker: OKR hierarchy with progress indicators
+Energy editor: Adjust today's energy, view/modify daily profile
+Natural language command support:
+'show emails from Sarah about the grant' → graph query + display
+'schedule 2 hours for deep work tomorrow morning' → calendar action
+'what did I promise to do this week?' → task query with source links
+5.2 Discord Bot
+Proactive assistant in a private channel:
+Notification Types
+Morning briefing: Today's calendar, top 3 priorities, energy forecast
+Task suggestions: 'New email from [contact] looks actionable. Suggested task: [title]. Approve?'
+Gentle nudges: 'You have 2 overdue responses. Would you like me to draft replies?'
+End-of-day review: What got done, what's rolling over, tomorrow's preview
+Interaction Model
+Natural language conversation rather than slash commands:
+You: 'approve that task but push it to next week'
+Bot: 'Done. Task "Review grant proposal" moved to Monday. Anything else?'
+You: 'draft a reply to the last email from James'
+Bot: 'Here\'s a draft: [text]. Send, edit, or discard?'
+6. Energy & Neurodivergent Support
+6.1 Energy Model
+Spoon-based energy tracking with dynamic adjustment:
+Base Profile: Default daily energy curve (e.g., peak 9-11am, dip 2-3pm, recovery 4-5pm)
+Event Modifiers: Clinical sessions: -3 spoons, admin meetings: -1, focused coding: -0.5
+Dynamic Inference: Detect high-density days from calendar, auto-reduce availability
+Manual Override: "I'm at 2/10 today" via CLI or Discord adjusts all suggestions
+6.2 Overwhelm Prevention
+Task batching: Group similar small tasks rather than individual notifications
+Suggestion throttling: Max 3 proactive Discord messages per hour
+Complexity hiding: Show simplified view by default, expand on request
+Escape hatch: 'pause' command silences notifications for configurable period
+Honest prioritisation: System admits when everything is urgent rather than false-prioritising
+6.3 Relationship Intelligence
+Graph-powered insights to support communication:
+Contact profiles: Inferred communication style, typical response time, urgency patterns
+Relationship health: Flag contacts you haven't engaged with recently
+Context retrieval: 'What's my history with this person?' before meetings
+Agenda inference: Detect when someone's emails suggest an underlying agenda/ask
+7. Phased Implementation Plan
+Phase 1: Foundation (Weeks 1-2)
+Docker Compose stack with Neo4j, PostgreSQL, Redis
+Gmail API integration with OAuth2, initial 6-month historical sync
+Basic graph schema and ingestion pipeline
+Together.ai integration with simple email classification
+Deliverable: Emails flowing into graph, basic classification working
+Phase 2: Intelligence (Weeks 3-4)
+Task inference pipeline with approval workflow
+Google Calendar integration with event analysis
+Contact enrichment (infer traits from communication patterns)
+Goal/project data model and manual entry
+Deliverable: System suggests tasks from emails, understands your calendar
+Phase 3: Interfaces (Weeks 5-6)
+CLI dashboard with textual TUI
+Discord bot with natural language interaction
+Proactive notification system with throttling
+Draft email staging and review flow
+Deliverable: Full interaction loop via CLI and Discord
+Phase 4: Energy & Polish (Weeks 7-8)
+Energy tracking system with calendar integration
+Daily profile configuration and dynamic adjustment
+Relationship health scoring and alerts
+Morning briefing and end-of-day review automations
+Deliverable: Neurodivergent-friendly system with energy awareness
+Phase 5: Autonomy (Ongoing)
+Confidence-based auto-approval for low-risk actions
+Calendar event creation (after approval track record)
+Email sending with staged review period
+Continuous learning from your corrections
+8. Technical Stack Summary
+
+9. Recommended Next Steps
+Review this blueprint and flag any adjustments to scope or priorities
+Set up Discord server/channel for bot testing
+Provision Google Cloud project for Gmail/Calendar API credentials
+Begin Phase 1 implementation with Docker Compose skeleton
+Once you're happy with this plan, we can start generating the initial codebase structure and Docker configuration.

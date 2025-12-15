@@ -82,6 +82,121 @@ class CalendarService:
             eventId=event_id,
         ).execute()
 
+    def create_event(
+        self,
+        title: str,
+        start: str,
+        end: str,
+        attendees: list[str] | None = None,
+        description: str | None = None,
+        location: str | None = None,
+        calendar_id: str = "primary",
+        send_notifications: bool = True,
+        timezone: str = "UTC",
+    ) -> dict:
+        """
+        Create a new calendar event.
+
+        Args:
+            title: Event title/summary
+            start: Start time (ISO datetime string)
+            end: End time (ISO datetime string)
+            attendees: List of attendee email addresses
+            description: Event description
+            location: Event location
+            calendar_id: Calendar to create event in (default: primary)
+            send_notifications: Whether to send invite emails to attendees
+            timezone: Timezone for the event
+
+        Returns:
+            Created event resource
+        """
+        event = {
+            "summary": title,
+            "start": {"dateTime": start, "timeZone": timezone},
+            "end": {"dateTime": end, "timeZone": timezone},
+        }
+
+        if description:
+            event["description"] = description
+
+        if location:
+            event["location"] = location
+
+        if attendees:
+            event["attendees"] = [{"email": email} for email in attendees]
+
+        result = self.service.events().insert(
+            calendarId=calendar_id,
+            body=event,
+            sendNotifications=send_notifications,
+        ).execute()
+
+        logger.info(
+            "Calendar event created",
+            event_id=result.get("id"),
+            title=title[:50],
+            start=start,
+        )
+        return result
+
+    def update_event(
+        self,
+        event_id: str,
+        updates: dict,
+        calendar_id: str = "primary",
+        send_notifications: bool = True,
+    ) -> dict:
+        """
+        Update an existing calendar event.
+
+        Args:
+            event_id: ID of the event to update
+            updates: Dict of fields to update
+            calendar_id: Calendar containing the event
+            send_notifications: Whether to notify attendees of changes
+
+        Returns:
+            Updated event resource
+        """
+        # Get the existing event first
+        existing = self.get_event(event_id, calendar_id)
+
+        # Merge updates
+        existing.update(updates)
+
+        result = self.service.events().update(
+            calendarId=calendar_id,
+            eventId=event_id,
+            body=existing,
+            sendNotifications=send_notifications,
+        ).execute()
+
+        logger.info("Calendar event updated", event_id=event_id)
+        return result
+
+    def delete_event(
+        self,
+        event_id: str,
+        calendar_id: str = "primary",
+        send_notifications: bool = True,
+    ) -> None:
+        """
+        Delete a calendar event.
+
+        Args:
+            event_id: ID of the event to delete
+            calendar_id: Calendar containing the event
+            send_notifications: Whether to notify attendees
+        """
+        self.service.events().delete(
+            calendarId=calendar_id,
+            eventId=event_id,
+            sendNotifications=send_notifications,
+        ).execute()
+
+        logger.info("Calendar event deleted", event_id=event_id)
+
 
 def extract_event_metadata(event: dict) -> dict:
     """

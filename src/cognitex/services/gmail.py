@@ -298,6 +298,151 @@ def build_incremental_query(since: datetime) -> str:
     return f"after:{since.strftime('%Y/%m/%d')}"
 
 
+class GmailSender:
+    """Service for sending emails via Gmail API."""
+
+    def __init__(self):
+        self._service = None
+
+    @property
+    def service(self):
+        """Lazy-load the Gmail service."""
+        if self._service is None:
+            credentials = get_google_credentials()
+            self._service = build("gmail", "v1", credentials=credentials)
+        return self._service
+
+    def send_message(
+        self,
+        to: str,
+        subject: str,
+        body: str,
+        cc: list[str] | None = None,
+        bcc: list[str] | None = None,
+    ) -> dict:
+        """
+        Send a new email.
+
+        Args:
+            to: Recipient email address
+            subject: Email subject
+            body: Email body (plain text)
+            cc: Optional CC recipients
+            bcc: Optional BCC recipients
+
+        Returns:
+            Sent message resource with 'id' and 'threadId'
+        """
+        from email.mime.text import MIMEText
+
+        message = MIMEText(body)
+        message["to"] = to
+        message["subject"] = subject
+
+        if cc:
+            message["cc"] = ", ".join(cc)
+        if bcc:
+            message["bcc"] = ", ".join(bcc)
+
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+
+        result = self.service.users().messages().send(
+            userId="me",
+            body={"raw": raw}
+        ).execute()
+
+        logger.info("Email sent", to=to, subject=subject[:50], message_id=result.get("id"))
+        return result
+
+    def send_reply(
+        self,
+        thread_id: str,
+        to: str,
+        subject: str,
+        body: str,
+        in_reply_to: str | None = None,
+        references: str | None = None,
+    ) -> dict:
+        """
+        Reply to an existing email thread.
+
+        Args:
+            thread_id: Gmail thread ID to reply to
+            to: Recipient email address
+            subject: Email subject (will add Re: if not present)
+            body: Email body (plain text)
+            in_reply_to: Message-ID header of the message being replied to
+            references: References header for threading
+
+        Returns:
+            Sent message resource with 'id' and 'threadId'
+        """
+        from email.mime.text import MIMEText
+
+        # Ensure subject has Re: prefix for replies
+        if not subject.lower().startswith("re:"):
+            subject = f"Re: {subject}"
+
+        message = MIMEText(body)
+        message["to"] = to
+        message["subject"] = subject
+
+        # Add threading headers if provided
+        if in_reply_to:
+            message["In-Reply-To"] = in_reply_to
+        if references:
+            message["References"] = references
+
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+
+        result = self.service.users().messages().send(
+            userId="me",
+            body={"raw": raw, "threadId": thread_id}
+        ).execute()
+
+        logger.info("Reply sent", thread_id=thread_id, to=to, message_id=result.get("id"))
+        return result
+
+    def create_draft(
+        self,
+        to: str,
+        subject: str,
+        body: str,
+        thread_id: str | None = None,
+    ) -> dict:
+        """
+        Create a draft email (for review before sending).
+
+        Args:
+            to: Recipient email address
+            subject: Email subject
+            body: Email body
+            thread_id: Optional thread ID if this is a reply draft
+
+        Returns:
+            Draft resource with 'id' and 'message'
+        """
+        from email.mime.text import MIMEText
+
+        message = MIMEText(body)
+        message["to"] = to
+        message["subject"] = subject
+
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+
+        draft_body = {"message": {"raw": raw}}
+        if thread_id:
+            draft_body["message"]["threadId"] = thread_id
+
+        result = self.service.users().drafts().create(
+            userId="me",
+            body=draft_body
+        ).execute()
+
+        logger.info("Draft created", to=to, draft_id=result.get("id"))
+        return result
+
+
 async def fetch_all_messages(
     gmail: GmailService,
     query: str,

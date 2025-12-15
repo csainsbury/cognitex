@@ -8,7 +8,7 @@ import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from cognitex.agent.core import Agent, AgentMode, get_agent
+from cognitex.agent.core import Agent, get_agent
 
 logger = structlog.get_logger()
 
@@ -115,7 +115,7 @@ class TriggerSystem:
         """Start Redis pub/sub listeners for events."""
         from cognitex.db.redis import get_redis
 
-        redis = await get_redis()
+        redis = get_redis()  # get_redis() is sync, returns async Redis client
 
         # Subscribe to channels
         pubsub = redis.pubsub()
@@ -123,6 +123,7 @@ class TriggerSystem:
             "cognitex:events:email",
             "cognitex:events:calendar",
             "cognitex:events:task",
+            "cognitex:events:drive",
         )
 
         # Start listener task
@@ -141,21 +142,27 @@ class TriggerSystem:
                 channel = message["channel"]
                 data = message["data"]
 
-                logger.debug("Event received", channel=channel)
+                # Normalize channel to string for comparison
+                channel_str = channel.decode() if isinstance(channel, bytes) else channel
+                logger.debug("Event received", channel=channel_str)
 
                 try:
                     import json
                     event_data = json.loads(data) if isinstance(data, (str, bytes)) else data
 
-                    if channel == b"cognitex:events:email":
+                    if channel_str == "cognitex:events:email":
                         await self._on_new_email(event_data)
-                    elif channel == b"cognitex:events:calendar":
+                    elif channel_str == "cognitex:events:calendar":
                         await self._on_calendar_change(event_data)
-                    elif channel == b"cognitex:events:task":
+                    elif channel_str == "cognitex:events:task":
                         await self._on_task_event(event_data)
+                    elif channel_str == "cognitex:events:drive":
+                        await self._on_drive_change(event_data)
+                    else:
+                        logger.warning("Unknown event channel", channel=channel_str)
 
                 except Exception as e:
-                    logger.error("Event handling failed", channel=channel, error=str(e))
+                    logger.error("Event handling failed", channel=channel_str, error=str(e))
 
         except asyncio.CancelledError:
             await pubsub.unsubscribe()
@@ -188,9 +195,14 @@ class TriggerSystem:
         """Handle hourly monitoring check."""
         logger.debug("Triggering hourly check")
         try:
-            result = await self.agent.check_for_urgent()
-            if result.user_notification:
-                await self._send_notification(result.user_notification, urgency="normal")
+            # Use ReAct agent to check for urgent items
+            response = await self.agent.chat(
+                "Quick check: are there any urgent tasks overdue or high-priority emails "
+                "that need immediate attention? Only notify me if something is truly urgent."
+            )
+            # Only send notification if the agent found something urgent
+            if response and "no urgent" not in response.lower() and "nothing urgent" not in response.lower():
+                await self._send_notification(response, urgency="normal")
         except Exception as e:
             logger.error("Hourly check failed", error=str(e))
 
@@ -206,12 +218,17 @@ class TriggerSystem:
             if result.success and result.data:
                 overdue_tasks = result.data
                 if overdue_tasks:
-                    # Escalate
-                    await self.agent.run(
-                        mode=AgentMode.ESCALATE,
-                        trigger=f"Found {len(overdue_tasks)} overdue tasks",
-                        trigger_data={"tasks": overdue_tasks},
+                    # Use ReAct agent to handle escalation
+                    task_titles = [t.get("title", "Unknown") for t in overdue_tasks[:5]]
+                    response = await self.agent.chat(
+                        f"These tasks are overdue: {', '.join(task_titles)}. "
+                        "What should I prioritize and are there any I should follow up on?"
                     )
+                    if response:
+                        await self._send_notification(
+                            f"**Overdue Task Check**\n\n{response}",
+                            urgency="normal"
+                        )
 
         except Exception as e:
             logger.error("Overdue check failed", error=str(e))
@@ -221,37 +238,195 @@ class TriggerSystem:
     # =========================================================================
 
     async def _on_new_email(self, email_data: dict) -> None:
-        """Handle new email event."""
-        logger.info("Processing new email", subject=email_data.get("subject", "")[:50])
+        """Handle new email event from Gmail push notification."""
+        history_id = email_data.get("history_id")
+        email_address = email_data.get("email_address")
+        logger.info("Processing Gmail push notification", history_id=history_id, email_address=email_address)
+
         try:
-            result = await self.agent.process_new_email(email_data)
-            if result.user_notification:
-                await self._send_notification(result.user_notification, urgency="normal")
+            # First, sync new emails from Gmail using the history ID
+            from cognitex.services.ingestion import run_incremental_sync
+
+            if history_id:
+                logger.info("Syncing emails from history", history_id=history_id)
+                sync_result = await run_incremental_sync(history_id)
+
+                if sync_result.get("first_sync"):
+                    logger.info("First sync - history ID stored, waiting for next email")
+                    return  # First sync just stores the baseline
+
+                if sync_result.get("error"):
+                    logger.warning("Incremental sync failed", error=sync_result.get("error"))
+                    return  # Will retry on next push
+
+                if sync_result.get("total", 0) == 0:
+                    logger.info("No new emails found in history")
+                    return  # No new emails, nothing to notify about
+
+                # We have new emails - prepare summary for agent
+                emails = sync_result.get("emails", [])
+                email_count = len(emails)
+                logger.info("Synced new emails", count=email_count)
+
+                # Build email summary for agent
+                email_summaries = []
+                for email in emails[:5]:  # Limit to 5 most recent
+                    sender = email.get("sender_email", "unknown")
+                    subject = email.get("subject", "(no subject)")[:80]
+                    snippet = email.get("snippet", "")[:150]
+                    email_summaries.append(f"- From: {sender}\n  Subject: {subject}\n  Preview: {snippet}")
+
+                email_list = "\n\n".join(email_summaries)
+
+                # Ask the agent to analyze the new emails
+                response = await self.agent.chat(
+                    f"I just received {email_count} new email(s). Here are the details:\n\n"
+                    f"{email_list}\n\n"
+                    "Please analyze these emails and let me know:\n"
+                    "1. Are any of these urgent or need immediate attention?\n"
+                    "2. Should any tasks be created from these?\n"
+                    "3. Do any require a reply?\n"
+                    "Only highlight what's truly important."
+                )
+            else:
+                # No history ID - just ask agent to check emails
+                response = await self.agent.chat(
+                    "A new email notification was received. "
+                    "Please check my recent emails for anything that needs my attention."
+                )
+
+            # Only notify if the agent found something important
+            if response and any(kw in response.lower() for kw in ["task", "reply", "urgent", "important", "action", "need", "require", "attention"]):
+                await self._send_notification(
+                    f"**New Email Alert**\n\n{response}",
+                    urgency="normal"
+                )
+
         except Exception as e:
             logger.error("Email processing failed", error=str(e))
 
     async def _on_calendar_change(self, event_data: dict) -> None:
         """Handle calendar change event."""
-        logger.info("Processing calendar change", title=event_data.get("title", "")[:50])
+        resource_state = event_data.get("resource_state", "change")
+        calendar_id = event_data.get("calendar_id", "primary")
+        logger.info("Processing calendar change", resource_state=resource_state, calendar_id=calendar_id)
+
         try:
-            result = await self.agent.process_calendar_change(event_data)
-            if result.user_notification:
-                await self._send_notification(result.user_notification, urgency="low")
+            # First, sync calendar from Google to get latest data
+            from cognitex.services.ingestion import run_calendar_sync
+            logger.info("Syncing calendar before processing change")
+            await run_calendar_sync(months_back=0, days_ahead=7)
+            logger.info("Calendar sync complete")
+
+            # Now use the agent to check for any notable calendar updates
+            response = await self.agent.chat(
+                "A calendar change was just detected and I've synced the latest data. "
+                "Please check my calendar for today and the next few days "
+                "to see if there are any new or updated events I should know about. "
+                "Tell me about any meetings that were just added or changed."
+            )
+
+            # Only send notification if agent found something worth mentioning
+            if response and not any(phrase in response.lower() for phrase in [
+                "no new", "no notable", "nothing new", "no changes", "no updates"
+            ]):
+                await self._send_notification(
+                    f"**Calendar Update**\n\n{response}",
+                    urgency="low"
+                )
         except Exception as e:
             logger.error("Calendar processing failed", error=str(e))
 
     async def _on_task_event(self, task_data: dict) -> None:
         """Handle task-related events."""
         event_type = task_data.get("event_type", "unknown")
+        title = task_data.get("title", "Unknown")
         logger.info("Processing task event", event_type=event_type)
 
-        # Could trigger escalation for certain events
         if event_type == "became_overdue":
-            await self.agent.run(
-                mode=AgentMode.ESCALATE,
-                trigger=f"Task became overdue: {task_data.get('title', 'Unknown')}",
-                trigger_data=task_data,
+            response = await self.agent.chat(
+                f"Task '{title}' just became overdue. What should I do about this?"
             )
+            if response:
+                await self._send_notification(
+                    f"**Task Overdue**: {title}\n\n{response}",
+                    urgency="high"
+                )
+
+    async def _on_drive_change(self, event_data: dict) -> None:
+        """Handle Drive change event (file added/modified/deleted)."""
+        resource_state = event_data.get("resource_state", "change")
+        changed_types = event_data.get("changed", [])
+        logger.info("Processing Drive change", state=resource_state, changed=changed_types)
+
+        try:
+            # Fetch actual changes from Drive API
+            from cognitex.services.drive import DriveService
+
+            drive = DriveService()
+
+            # Get the watch info to find our page token
+            from cognitex.services.push_notifications import get_watch_manager
+            watch_manager = get_watch_manager()
+            watch_info = watch_manager.get_active_watches().get('drive', {})
+            page_token = watch_info.get('page_token')
+
+            if not page_token:
+                logger.warning("No page token for Drive changes, fetching new one")
+                return
+
+            # Fetch changes since last token
+            changes = drive.get_changes(page_token)
+
+            if not changes:
+                logger.debug("No new Drive changes found")
+                return
+
+            # Filter for files in indexed folders (priority folders)
+            from cognitex.config import get_settings
+            settings = get_settings()
+            priority_folders = getattr(settings, 'drive_priority_folders', [])
+
+            relevant_changes = []
+            for change in changes.get('changes', []):
+                file_info = change.get('file', {})
+                file_name = file_info.get('name', 'Unknown')
+                parents = file_info.get('parents', [])
+
+                # Check if file is in a priority folder
+                if any(folder_id in parents for folder_id in priority_folders):
+                    relevant_changes.append({
+                        'name': file_name,
+                        'mime_type': file_info.get('mimeType'),
+                        'modified': file_info.get('modifiedTime'),
+                        'change_type': 'removed' if change.get('removed') else 'modified',
+                    })
+
+            if relevant_changes:
+                # Notify about relevant changes
+                change_summary = "\n".join(
+                    f"- {c['name']} ({c['change_type']})"
+                    for c in relevant_changes[:5]
+                )
+
+                response = await self.agent.chat(
+                    f"Files changed in your priority folders:\n{change_summary}\n\n"
+                    "Should I update my index or is there anything I should note about these changes?"
+                )
+
+                if response:
+                    await self._send_notification(
+                        f"**Drive Changes Detected**\n\n{response}",
+                        urgency="low"
+                    )
+
+            # Update page token for next time
+            new_token = changes.get('newStartPageToken')
+            if new_token and 'drive' in watch_manager._active_watches:
+                watch_manager._active_watches['drive']['page_token'] = new_token
+
+        except Exception as e:
+            logger.error("Drive change processing failed", error=str(e))
 
     # =========================================================================
     # Utilities

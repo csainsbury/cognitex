@@ -634,6 +634,54 @@ async def update_person_enrichment(
     )
 
 
+async def get_todays_events(session: AsyncSession) -> list[dict]:
+    """Get all events scheduled for today."""
+    query = """
+    MATCH (ev:Event)
+    WHERE date(ev.start) = date()
+    RETURN ev.gcal_id as gcal_id,
+           ev.title as title,
+           ev.start as start,
+           ev.end as end,
+           ev.duration_minutes as duration_minutes,
+           ev.event_type as event_type,
+           ev.energy_impact as energy_impact,
+           ev.location as location,
+           ev.attendee_count as attendee_count
+    ORDER BY ev.start ASC
+    """
+    result = await session.run(query)
+    records = await result.data()
+    return records
+
+
+async def get_upcoming_events(
+    session: AsyncSession,
+    days_ahead: int = 7,
+    limit: int = 50,
+) -> list[dict]:
+    """Get upcoming events for the next N days."""
+    query = """
+    MATCH (ev:Event)
+    WHERE date(ev.start) >= date()
+      AND date(ev.start) <= date() + duration({days: $days_ahead})
+    RETURN ev.gcal_id as gcal_id,
+           ev.title as title,
+           ev.start as start,
+           ev.end as end,
+           ev.duration_minutes as duration_minutes,
+           ev.event_type as event_type,
+           ev.energy_impact as energy_impact,
+           ev.location as location,
+           ev.attendee_count as attendee_count
+    ORDER BY ev.start ASC
+    LIMIT $limit
+    """
+    result = await session.run(query, days_ahead=days_ahead, limit=limit)
+    records = await result.data()
+    return records
+
+
 async def get_graph_stats(session: AsyncSession) -> dict:
     """Get statistics about the graph."""
     query = """

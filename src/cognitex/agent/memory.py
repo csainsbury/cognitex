@@ -465,7 +465,7 @@ async def init_memory() -> Memory:
     from cognitex.db.redis import get_redis
     from cognitex.db.postgres import get_session
 
-    redis = await get_redis()
+    redis = get_redis()  # get_redis() is sync, returns async Redis client
     _memory = Memory(redis, get_session)
 
     logger.info("Memory system initialized")

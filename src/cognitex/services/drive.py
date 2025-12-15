@@ -262,6 +262,42 @@ class DriveService:
                 logger.warning("Priority folder not found", name=folder_name)
         return result
 
+    def get_start_page_token(self) -> str:
+        """Get the starting page token for change tracking."""
+        response = self.service.changes().getStartPageToken().execute()
+        return response.get('startPageToken')
+
+    def get_changes(self, page_token: str) -> dict:
+        """
+        Get changes since the given page token.
+
+        Args:
+            page_token: Token from previous getStartPageToken or changes.list call
+
+        Returns:
+            Dict with 'changes' list and 'newStartPageToken'
+        """
+        try:
+            response = self.service.changes().list(
+                pageToken=page_token,
+                fields="changes(fileId, removed, file(id, name, mimeType, parents, modifiedTime, trashed)), "
+                       "newStartPageToken, nextPageToken",
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True,
+            ).execute()
+
+            logger.info(
+                "Fetched Drive changes",
+                change_count=len(response.get('changes', [])),
+                has_more=bool(response.get('nextPageToken')),
+            )
+
+            return response
+
+        except Exception as e:
+            logger.error("Failed to get Drive changes", error=str(e))
+            return {'changes': [], 'newStartPageToken': page_token}
+
 
 # Singleton instance
 _drive_service: DriveService | None = None

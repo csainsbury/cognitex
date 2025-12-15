@@ -123,28 +123,49 @@ class GetCalendarTool(BaseTool):
         "days_ahead": {"type": "integer", "description": "Days in the future", "default": 7},
     }
 
-    async def execute(self, days_back: int = 0, days_ahead: int = 7) -> ToolResult:
+    async def execute(self, days_back: int = 0, days_ahead: int = 1) -> ToolResult:
         from cognitex.db.neo4j import get_neo4j_session
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
 
         try:
-            start_date = datetime.now() - timedelta(days=days_back)
-            end_date = datetime.now() + timedelta(days=days_ahead)
+            # Use UTC and format for Neo4j datetime comparison
+            now = datetime.now(timezone.utc)
 
+            # For "today" queries, use start of day and end of day
+            if days_back == 0 and days_ahead <= 1:
+                start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                end_date = start_date + timedelta(days=max(1, days_ahead))
+            else:
+                start_date = now - timedelta(days=days_back)
+                end_date = now + timedelta(days=days_ahead)
+
+            start_str = start_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+            end_str = end_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            logger.info("Calendar query", start=start_str, end=end_str, days_back=days_back, days_ahead=days_ahead)
+
+            # Neo4j datetime comparison needs datetime() function
             query = """
             MATCH (e:Event)
-            WHERE e.start >= $start AND e.start <= $end
-            RETURN e
+            WHERE e.start >= datetime($start) AND e.start <= datetime($end)
+            RETURN e {
+                .title, .gcal_id, .location, .description,
+                start: toString(e.start),
+                end: toString(e.end)
+            } as event
             ORDER BY e.start
             """
 
             async for session in get_neo4j_session():
                 result = await session.run(query, {
-                    "start": start_date.isoformat(),
-                    "end": end_date.isoformat(),
+                    "start": start_str,
+                    "end": end_str,
                 })
                 events = await result.data()
-                return ToolResult(success=True, data=events)
+                # Flatten the result
+                flattened = [e["event"] for e in events]
+                logger.info("Calendar query result", event_count=len(flattened))
+                return ToolResult(success=True, data=flattened)
         except Exception as e:
             logger.warning("Calendar fetch failed", error=str(e))
             return ToolResult(success=False, error=str(e))
@@ -172,6 +193,10 @@ class GetTasksTool(BaseTool):
         from cognitex.db.graph_schema import get_tasks
 
         try:
+            # Normalize status: "all" or empty string means no filter
+            if status in ("all", ""):
+                status = None
+
             async for session in get_neo4j_session():
                 tasks = await get_tasks(session, status=status, limit=limit)
 
@@ -322,14 +347,70 @@ class CreateTaskTool(BaseTool):
             return ToolResult(success=False, error=str(e))
 
 
+class FindTaskTool(BaseTool):
+    """Find a task by title or keywords."""
+
+    name = "find_task"
+    description = "Find a specific task by title or keywords. Use this before update_task to get the task_id. Returns matching tasks with their IDs."
+    risk = ToolRisk.READONLY
+    parameters = {
+        "title_search": {"type": "string", "description": "Title or keywords to search for"},
+        "status": {"type": "string", "description": "Filter by status: pending, in_progress, done, all", "optional": True},
+    }
+
+    async def execute(
+        self,
+        title_search: str,
+        status: str | None = None,
+    ) -> ToolResult:
+        from cognitex.db.neo4j import get_neo4j_session
+
+        try:
+            # Use case-insensitive contains search
+            status_filter = ""
+            if status and status != "all":
+                status_filter = "AND t.status = $status"
+
+            query = f"""
+            MATCH (t:Task)
+            WHERE toLower(t.title) CONTAINS toLower($search)
+            {status_filter}
+            RETURN t.id as task_id, t.title as title, t.status as status,
+                   t.energy_cost as energy_cost, t.due as due,
+                   t.source_type as source_type, t.source_id as source_id
+            ORDER BY t.created_at DESC
+            LIMIT 10
+            """
+
+            params = {"search": title_search}
+            if status and status != "all":
+                params["status"] = status
+
+            async for session in get_neo4j_session():
+                result = await session.run(query, params)
+                tasks = await result.data()
+
+                if tasks:
+                    logger.info("Found tasks", search=title_search[:30], count=len(tasks))
+                    return ToolResult(success=True, data=tasks)
+                return ToolResult(
+                    success=True,
+                    data=[],
+                    error=f"No tasks found matching '{title_search}'"
+                )
+        except Exception as e:
+            logger.warning("Task search failed", search=title_search[:30], error=str(e))
+            return ToolResult(success=False, error=str(e))
+
+
 class UpdateTaskTool(BaseTool):
     """Update an existing task."""
 
     name = "update_task"
-    description = "Update task status, due date, or other properties."
+    description = "Update task status, due date, or other properties. Use find_task first to get the task_id if you only have the title."
     risk = ToolRisk.AUTO
     parameters = {
-        "task_id": {"type": "string", "description": "Task ID to update"},
+        "task_id": {"type": "string", "description": "Task ID to update (use find_task to get this from title)"},
         "status": {"type": "string", "description": "New status: pending, in_progress, done", "optional": True},
         "due_date": {"type": "string", "description": "New due date (ISO)", "optional": True},
         "energy_cost": {"type": "integer", "description": "Updated energy cost", "optional": True},
@@ -397,14 +478,15 @@ class SendNotificationTool(BaseTool):
 
         try:
             # Publish to notification channel for the Discord bot to pick up
-            redis = await get_redis()
-            await redis.publish("cognitex:notifications", json.dumps({
+            redis = get_redis()  # get_redis() is sync, returns async Redis client
+            notification_data = json.dumps({
                 "message": message,
                 "urgency": urgency,
-            }))
+            })
+            subscribers = await redis.publish("cognitex:notifications", notification_data)
 
-            logger.info("Notification queued", urgency=urgency, length=len(message))
-            return ToolResult(success=True, data={"queued": True})
+            logger.info("Notification published", urgency=urgency, length=len(message), subscribers=subscribers)
+            return ToolResult(success=True, data={"queued": True, "subscribers": subscribers})
         except Exception as e:
             logger.warning("Notification failed", error=str(e))
             return ToolResult(success=False, error=str(e))
@@ -565,6 +647,51 @@ class CreateEventTool(BaseTool):
 # TOOL REGISTRY
 # =============================================================================
 
+class ReadDocumentTool(BaseTool):
+    """Read the full content of a specific document."""
+
+    name = "read_document"
+    description = "Read the full text content of a document by its Drive ID. Use after search_documents to get full content."
+    risk = ToolRisk.READONLY
+    parameters = {
+        "drive_id": {"type": "string", "description": "Google Drive ID of the file"},
+        "max_length": {"type": "integer", "description": "Maximum content length to return", "default": 10000},
+    }
+
+    async def execute(self, drive_id: str, max_length: int = 10000) -> ToolResult:
+        from cognitex.db.postgres import get_session
+        from sqlalchemy import text
+
+        try:
+            async for session in get_session():
+                result = await session.execute(
+                    text("SELECT content, char_count FROM document_content WHERE drive_id = :drive_id"),
+                    {"drive_id": drive_id}
+                )
+                row = result.fetchone()
+
+                if row:
+                    content = row.content
+                    char_count = row.char_count
+                    truncated = len(content) > max_length
+
+                    return ToolResult(
+                        success=True,
+                        data={
+                            "drive_id": drive_id,
+                            "content": content[:max_length],
+                            "char_count": char_count,
+                            "truncated": truncated,
+                        }
+                    )
+
+                return ToolResult(success=False, error=f"Document content not found for ID: {drive_id}")
+
+        except Exception as e:
+            logger.warning("Read document failed", drive_id=drive_id, error=str(e))
+            return ToolResult(success=False, error=str(e))
+
+
 class ToolRegistry:
     """Registry of all available tools."""
 
@@ -578,8 +705,10 @@ class ToolRegistry:
             # Read-only
             GraphQueryTool(),
             SearchDocumentsTool(),
+            ReadDocumentTool(),
             GetCalendarTool(),
             GetTasksTool(),
+            FindTaskTool(),
             GetContactTool(),
             RecallMemoryTool(),
             # Auto-execute

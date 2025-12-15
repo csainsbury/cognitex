@@ -1,50 +1,57 @@
-"""Agent Core - Main orchestrator for the Cognitex agent system."""
+"""Agent Core - ReAct-style agent with iterative reasoning and tool use."""
 
-import asyncio
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 import structlog
+from together import Together
 
+from cognitex.config import get_settings
 from cognitex.agent.memory import Memory, init_memory, get_memory
-from cognitex.agent.planner import Planner, Plan, PlanStep, AgentMode, get_planner
-from cognitex.agent.executors import get_executor_registry
-from cognitex.agent.tools import ToolRisk, ToolResult
+from cognitex.agent.tools import ToolRisk, ToolResult, get_tool_registry
 
 logger = structlog.get_logger()
 
+# Maximum iterations to prevent infinite loops
+MAX_REACT_ITERATIONS = 8
+
 
 @dataclass
-class ExecutionResult:
-    """Result from executing a plan."""
-    success: bool
-    steps_executed: int
-    steps_total: int
-    results: list[ToolResult]
-    pending_approvals: list[str]
-    errors: list[str]
-    user_notification: str | None
+class ThoughtAction:
+    """A single thought-action pair in the ReAct loop."""
+    thought: str
+    action: str | None = None  # Tool name, or None if ready to respond
+    action_input: dict = field(default_factory=dict)
+    observation: str | None = None
+
+
+@dataclass
+class ReactTrace:
+    """Complete trace of a ReAct execution."""
+    steps: list[ThoughtAction] = field(default_factory=list)
+    final_response: str = ""
+    pending_approvals: list[str] = field(default_factory=list)
 
 
 class Agent:
     """
-    Main agent orchestrator.
+    ReAct-style agent for Cognitex.
 
-    Coordinates:
-    - Memory (working + episodic)
-    - Planner (Qwen3-30B-A3B)
-    - Executors (DeepSeek V3)
-    - Tools
-
-    Handles the full observe → think → plan → act loop.
+    Uses an iterative Thought → Action → Observation loop to:
+    - Freely explore the knowledge graph
+    - Make connections across emails, tasks, people, events, documents
+    - Take actions when needed
+    - Respond naturally to any query
     """
 
     def __init__(self):
         self.memory: Memory | None = None
-        self.planner: Planner | None = None
-        self.executor_registry = get_executor_registry()
+        self.tool_registry = get_tool_registry()
         self._initialized = False
+        self._client = None
+        self._model = None
 
     async def initialize(self) -> None:
         """Initialize the agent and all subsystems."""
@@ -53,11 +60,16 @@ class Agent:
 
         logger.info("Initializing agent")
 
+        settings = get_settings()
+        api_key = settings.together_api_key.get_secret_value()
+        if not api_key:
+            raise ValueError("TOGETHER_API_KEY not configured")
+
+        self._client = Together(api_key=api_key)
+        self._model = settings.together_model_planner
+
         # Initialize memory
         self.memory = await init_memory()
-
-        # Initialize planner
-        self.planner = get_planner()
 
         self._initialized = True
         logger.info("Agent initialized")
@@ -67,131 +79,87 @@ class Agent:
         if not self._initialized:
             raise RuntimeError("Agent not initialized. Call initialize() first.")
 
-    async def run(
-        self,
-        mode: AgentMode,
-        trigger: str,
-        trigger_data: dict | None = None,
-    ) -> ExecutionResult:
-        """
-        Run the agent for a given trigger.
+    def _build_system_prompt(self) -> str:
+        """Build the system prompt with available tools."""
+        tool_descriptions = []
+        for tool in self.tool_registry.all():
+            risk_label = {
+                ToolRisk.READONLY: "(read-only)",
+                ToolRisk.AUTO: "(auto-execute)",
+                ToolRisk.APPROVAL: "(requires approval)",
+            }[tool.risk]
 
-        This is the main entry point for agent execution.
+            params = ", ".join(
+                f"{k}: {v.get('type', 'any')}" + (" [optional]" if v.get("optional") else "")
+                for k, v in tool.parameters.items()
+            )
 
-        Args:
-            mode: Operating mode
-            trigger: Description of what triggered this run
-            trigger_data: Additional trigger data
+            tool_descriptions.append(
+                f"- {tool.name} {risk_label}: {tool.description}\n  Parameters: {params}"
+            )
 
-        Returns:
-            ExecutionResult with what happened
-        """
-        self._ensure_initialized()
+        tools_text = "\n".join(tool_descriptions)
 
-        logger.info("Agent run starting", mode=mode.value, trigger=trigger[:100])
+        return f"""You are Cognitex, a personal assistant with access to a knowledge graph containing emails, tasks, calendar events, contacts, and documents.
 
-        # Build context from memory
-        context = await self.memory.build_context(trigger)
+Your job is to help the user by reasoning through their request, gathering information, and taking actions when needed.
 
-        # Plan
-        plan = await self.planner.plan(
-            mode=mode,
-            context=context,
-            trigger=trigger,
-            trigger_data=trigger_data,
-        )
+## Available Tools
+{tools_text}
 
-        # Store planning decision in memory
-        await self.memory.episodic.store(
-            content=f"Trigger: {trigger}\nReasoning: {plan.reasoning}\nSteps: {len(plan.steps)}",
-            memory_type="decision",
-            importance=3,
-            metadata={
-                "mode": mode.value,
-                "confidence": plan.confidence,
-                "step_count": len(plan.steps),
-            },
-        )
+## How to Respond
 
-        # Execute plan
-        result = await self._execute_plan(plan)
+You use a Thought → Action → Observation loop. For each step:
 
-        # Record interaction in working memory
-        await self.memory.working.add_interaction(
-            role="agent",
-            content=f"Executed {result.steps_executed}/{result.steps_total} steps",
-            metadata={
-                "mode": mode.value,
-                "success": result.success,
-                "pending_approvals": result.pending_approvals,
-            },
-        )
+1. **Thought**: Reason about what you know and what you need to find out
+2. **Action**: Call a tool to get information or take an action (or respond if ready)
+3. **Observation**: See the result and continue reasoning
 
-        logger.info(
-            "Agent run complete",
-            mode=mode.value,
-            steps_executed=result.steps_executed,
-            pending_approvals=len(result.pending_approvals),
-            success=result.success,
-        )
+Output your response as JSON:
+```json
+{{
+  "thought": "Your reasoning about the current state and what to do next",
+  "action": "tool_name or null if ready to give final response",
+  "action_input": {{}},
+  "response": "Your final response to the user (only if action is null)"
+}}
+```
 
-        return result
+## Guidelines
 
-    async def _execute_plan(self, plan: Plan) -> ExecutionResult:
-        """Execute a plan step by step."""
-        results = []
-        pending_approvals = []
-        errors = []
-        steps_executed = 0
+- **Explore freely**: Query the graph to understand context before acting
+- **Make connections**: Link information across emails, tasks, people, events
+- **Be thorough**: If the user asks about something, find the actual data
+- **Chain queries**: Use results from one query to inform the next
+- **Take action when asked**: Update tasks, draft emails, create events as requested
+- **Be honest**: If you can't find something, say so
+- **Respond promptly**: Once you have enough information, set action to null and provide your response. Don't keep querying unnecessarily - 2-4 tool calls is usually enough.
 
-        for step in plan.steps:
-            try:
-                result = await self._execute_step(step)
-                results.append(result)
+## Graph Query Tips (for graph_query tool)
 
-                if result.success:
-                    steps_executed += 1
+The Neo4j graph has these node types:
+- Person (email, name, org, role, communication_style)
+- Email (gmail_id, subject, snippet, date, classification, urgency)
+- Task (id, title, status, energy_cost, due, source_type)
+- Event (gcal_id, title, start, end, event_type, energy_impact)
+- Document (drive_id, name, mime_type, folder_path)
 
-                    if result.needs_approval and result.approval_id:
-                        pending_approvals.append(result.approval_id)
-                else:
-                    if result.error:
-                        errors.append(f"{step.tool}: {result.error}")
+Common relationships:
+- (Email)-[:SENT_BY]->(Person)
+- (Email)-[:RECEIVED_BY]->(Person)
+- (Task)-[:DERIVED_FROM]->(Email)
+- (Task)-[:REQUESTED_BY]->(Person)
+- (Event)-[:ATTENDED_BY]->(Person)
+- (Document)-[:OWNED_BY]->(Person)
 
-            except Exception as e:
-                logger.error("Step execution failed", step=step.tool, error=str(e))
-                errors.append(f"{step.tool}: {str(e)}")
-                results.append(ToolResult(success=False, error=str(e)))
-
-        return ExecutionResult(
-            success=len(errors) == 0,
-            steps_executed=steps_executed,
-            steps_total=len(plan.steps),
-            results=results,
-            pending_approvals=pending_approvals,
-            errors=errors,
-            user_notification=plan.user_notification,
-        )
-
-    async def _execute_step(self, step: PlanStep) -> ToolResult:
-        """Execute a single plan step."""
-        logger.debug(
-            "Executing step",
-            executor=step.executor,
-            tool=step.tool,
-            risk=step.risk.value,
-        )
-
-        return await self.executor_registry.execute(
-            executor_name=step.executor,
-            tool=step.tool,
-            args=step.args,
-            reasoning=step.reasoning,
-        )
+Example queries:
+- Tasks from a person: MATCH (t:Task)-[:REQUESTED_BY]->(p:Person {{email: $email}}) RETURN t
+- Recent emails: MATCH (e:Email) WHERE e.date > datetime() - duration('P7D') RETURN e ORDER BY e.date DESC LIMIT 10
+- Person's communication history: MATCH (p:Person {{email: $email}})<-[:SENT_BY]-(e:Email) RETURN e ORDER BY e.date DESC LIMIT 5"""
 
     async def chat(self, message: str) -> str:
         """
-        Handle a conversational message from the user.
+        Handle a conversational message using ReAct loop.
 
         Args:
             message: User's message
@@ -201,51 +169,231 @@ class Agent:
         """
         self._ensure_initialized()
 
-        logger.info("Chat message received", length=len(message))
+        logger.info("ReAct chat starting", message=message[:100])
 
         # Record user message
-        await self.memory.working.add_interaction(
-            role="user",
-            content=message,
-        )
+        await self.memory.working.add_interaction(role="user", content=message)
 
-        # Get response and plan from planner
-        context = await self.memory.build_context(f"User chat: {message}")
-        response, plan = await self.planner.respond_to_user(context, message)
-
-        # Execute any planned actions
-        if plan:
-            result = await self._execute_plan(plan)
-
-            # Append info about actions to response if needed
-            if result.pending_approvals:
-                response += f"\n\n_(Staged {len(result.pending_approvals)} action(s) for your approval)_"
+        # Run ReAct loop
+        trace = await self._react_loop(message)
 
         # Record response
-        await self.memory.working.add_interaction(
-            role="agent",
-            content=response,
-        )
+        await self.memory.working.add_interaction(role="agent", content=trace.final_response)
+
+        # Add approval notice if any
+        response = trace.final_response
+        if trace.pending_approvals:
+            response += f"\n\n_(Staged {len(trace.pending_approvals)} action(s) for your approval)_"
 
         return response
 
-    async def handle_approval(self, approval_id: str, approved: bool, feedback: str | None = None) -> dict:
-        """
-        Handle user approval or rejection of a staged action.
+    async def _react_loop(self, message: str) -> ReactTrace:
+        """Execute the ReAct reasoning loop."""
+        trace = ReactTrace()
 
-        Args:
-            approval_id: ID of the approval request
-            approved: Whether the user approved
-            feedback: Optional feedback from user
+        # Build conversation for the LLM
+        system_prompt = self._build_system_prompt()
+
+        conversation = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"User message: {message}"},
+        ]
+
+        for iteration in range(MAX_REACT_ITERATIONS):
+            logger.debug("ReAct iteration", iteration=iteration)
+
+            # Get next thought/action from LLM
+            try:
+                response = self._client.chat.completions.create(
+                    model=self._model,
+                    messages=conversation,
+                    max_tokens=2048,
+                    temperature=0.3,
+                )
+
+                content = response.choices[0].message.content.strip()
+
+                # Parse JSON response
+                parsed = self._parse_react_response(content)
+
+                step = ThoughtAction(
+                    thought=parsed.get("thought", ""),
+                    action=parsed.get("action"),
+                    action_input=parsed.get("action_input", {}),
+                )
+
+                logger.debug(
+                    "ReAct step",
+                    thought=step.thought[:100],
+                    action=step.action,
+                )
+
+                # If no action, we have the final response
+                if step.action is None:
+                    trace.final_response = parsed.get("response", step.thought)
+                    trace.steps.append(step)
+                    break
+
+                # Execute the action
+                observation, approval_id = await self._execute_action(
+                    step.action,
+                    step.action_input
+                )
+                step.observation = observation
+
+                if approval_id:
+                    trace.pending_approvals.append(approval_id)
+
+                trace.steps.append(step)
+
+                # Add to conversation for next iteration
+                conversation.append({
+                    "role": "assistant",
+                    "content": content,
+                })
+                conversation.append({
+                    "role": "user",
+                    "content": f"Observation: {observation}",
+                })
+
+            except Exception as e:
+                logger.error("ReAct iteration failed", error=str(e), iteration=iteration)
+                trace.final_response = f"I encountered an error while processing your request: {str(e)[:100]}"
+                break
+
+        else:
+            # Hit max iterations - ask LLM to summarize what we found
+            logger.warning("ReAct hit max iterations", iterations=MAX_REACT_ITERATIONS)
+            trace.final_response = await self._generate_summary(message, trace)
+
+        logger.info(
+            "ReAct complete",
+            iterations=len(trace.steps),
+            approvals=len(trace.pending_approvals),
+        )
+
+        return trace
+
+    def _parse_react_response(self, content: str) -> dict:
+        """Parse the LLM's JSON response."""
+        # Handle markdown code blocks
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0]
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0]
+
+        try:
+            return json.loads(content.strip())
+        except json.JSONDecodeError:
+            # Try to extract key fields manually
+            logger.warning("Failed to parse ReAct JSON, attempting manual extraction")
+            result = {"thought": content}
+
+            # Look for response patterns
+            if "final response" in content.lower() or "my response" in content.lower():
+                result["action"] = None
+                result["response"] = content
+
+            return result
+
+    async def _execute_action(self, action: str, action_input: dict) -> tuple[str, str | None]:
+        """
+        Execute a tool action and return the observation.
 
         Returns:
-            Result of the approval handling
+            Tuple of (observation string, approval_id if approval needed)
         """
+        tool = self.tool_registry.get(action)
+        if not tool:
+            return f"Error: Unknown tool '{action}'. Available tools: {[t.name for t in self.tool_registry.all()]}", None
+
+        try:
+            result = await tool.execute(**action_input)
+
+            if result.success:
+                # Format the observation
+                if result.needs_approval:
+                    return f"Action staged for approval (ID: {result.approval_id}). Details: {result.data}", result.approval_id
+
+                # Format data nicely for observation
+                if result.data is None:
+                    return "Success (no data returned)", None
+                elif isinstance(result.data, list):
+                    if len(result.data) == 0:
+                        return "No results found", None
+                    # Format list results
+                    items = []
+                    for item in result.data[:15]:  # Limit to 15 items
+                        if isinstance(item, dict):
+                            # Pick key fields
+                            item_str = ", ".join(f"{k}: {v}" for k, v in list(item.items())[:6] if v is not None)
+                            items.append(f"  - {item_str}")
+                        else:
+                            items.append(f"  - {item}")
+
+                    obs = f"Found {len(result.data)} results:\n" + "\n".join(items)
+                    if len(result.data) > 15:
+                        obs += f"\n  ... and {len(result.data) - 15} more"
+                    return obs, None
+                elif isinstance(result.data, dict):
+                    return f"Result: {json.dumps(result.data, indent=2, default=str)}", None
+                else:
+                    return f"Result: {result.data}", None
+            else:
+                return f"Error: {result.error}", None
+
+        except Exception as e:
+            logger.error("Tool execution failed", tool=action, error=str(e))
+            return f"Error executing {action}: {str(e)}", None
+
+    async def _generate_summary(self, original_message: str, trace: ReactTrace) -> str:
+        """Generate a natural summary when hitting max iterations."""
+        # Collect all observations
+        observations = []
+        for step in trace.steps:
+            if step.observation:
+                observations.append(f"- {step.action}: {step.observation[:500]}")
+
+        observations_text = "\n".join(observations) if observations else "No data retrieved."
+
+        prompt = f"""Based on the user's question and the data I gathered, provide a helpful, natural response.
+
+User's question: {original_message}
+
+Data gathered:
+{observations_text}
+
+Instructions:
+- Summarize the key information naturally, as if talking to the user
+- Don't dump raw data - interpret it helpfully
+- If there are calendar events, format times nicely
+- If there are tasks, list them clearly
+- Be concise but complete
+
+Your response:"""
+
+        try:
+            response = self._client.chat.completions.create(
+                model=self._model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1024,
+                temperature=0.4,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            logger.error("Summary generation failed", error=str(e))
+            return "I found some information but had trouble summarizing it. Please try asking again."
+
+    # =========================================================================
+    # APPROVAL HANDLING
+    # =========================================================================
+
+    async def handle_approval(self, approval_id: str, approved: bool, feedback: str | None = None) -> dict:
+        """Handle user approval or rejection of a staged action."""
         self._ensure_initialized()
 
         logger.info("Handling approval", approval_id=approval_id, approved=approved)
 
-        # Get and resolve the approval
         approval = await self.memory.working.resolve_approval(approval_id, approved, feedback)
 
         if not approval:
@@ -254,14 +402,12 @@ class Agent:
         result = {"success": True, "approval_id": approval_id, "action": approval["action_type"]}
 
         if approved:
-            # Execute the approved action
             action_type = approval["action_type"]
             params = approval["params"]
 
             if action_type == "send_email":
-                # Actually send the email via Gmail API
-                from cognitex.services.gmail import GmailService
-                gmail = GmailService()
+                from cognitex.services.gmail import GmailSender
+                gmail = GmailSender()
 
                 try:
                     if params.get("reply_to_id"):
@@ -280,7 +426,6 @@ class Agent:
                     result["sent"] = True
                     result["message_id"] = sent.get("id")
 
-                    # Store in memory
                     await self.memory.episodic.store(
                         content=f"Sent email to {params['to']}: {params['subject']}",
                         memory_type="interaction",
@@ -293,7 +438,6 @@ class Agent:
                     result["error"] = str(e)
 
             elif action_type == "create_event":
-                # Create the calendar event
                 from cognitex.services.calendar import CalendarService
                 calendar = CalendarService()
 
@@ -308,7 +452,6 @@ class Agent:
                     result["created"] = True
                     result["event_id"] = event.get("id")
 
-                    # Store in memory
                     await self.memory.episodic.store(
                         content=f"Created event: {params['title']} at {params['start']}",
                         memory_type="interaction",
@@ -320,7 +463,6 @@ class Agent:
                     result["error"] = str(e)
 
         else:
-            # User rejected - store feedback for learning
             if feedback:
                 await self.memory.episodic.store(
                     content=f"User rejected {approval['action_type']}: {feedback}",
@@ -336,47 +478,22 @@ class Agent:
         self._ensure_initialized()
         return await self.memory.working.get_pending_approvals()
 
-    async def morning_briefing(self) -> str:
-        """Generate and return a morning briefing."""
-        result = await self.run(
-            mode=AgentMode.BRIEFING,
-            trigger="Scheduled morning briefing",
-            trigger_data={"time": "morning"},
-        )
+    # =========================================================================
+    # SCHEDULED MODES (briefing, review, etc.)
+    # =========================================================================
 
-        return result.user_notification or "Good morning! No urgent items today."
+    async def morning_briefing(self) -> str:
+        """Generate a morning briefing using ReAct."""
+        return await self.chat(
+            "Give me a morning briefing: what's on my calendar today, what are my top priority tasks, "
+            "any urgent emails I should know about, and any important deadlines coming up this week."
+        )
 
     async def evening_review(self) -> str:
-        """Generate and return an evening review."""
-        result = await self.run(
-            mode=AgentMode.REVIEW,
-            trigger="Scheduled evening review",
-            trigger_data={"time": "evening"},
-        )
-
-        return result.user_notification or "End of day review complete. Rest well!"
-
-    async def process_new_email(self, email_data: dict) -> ExecutionResult:
-        """Process a newly received email."""
-        return await self.run(
-            mode=AgentMode.PROCESS_EMAIL,
-            trigger=f"New email from {email_data.get('sender_email', 'unknown')}: {email_data.get('subject', 'No subject')}",
-            trigger_data=email_data,
-        )
-
-    async def process_calendar_change(self, event_data: dict) -> ExecutionResult:
-        """Process a calendar change."""
-        return await self.run(
-            mode=AgentMode.PROCESS_EVENT,
-            trigger=f"Calendar change: {event_data.get('title', 'Unknown event')}",
-            trigger_data=event_data,
-        )
-
-    async def check_for_urgent(self) -> ExecutionResult:
-        """Hourly check for urgent items."""
-        return await self.run(
-            mode=AgentMode.MONITOR,
-            trigger="Scheduled hourly monitoring check",
+        """Generate an evening review using ReAct."""
+        return await self.chat(
+            "Give me an end-of-day review: what did I have scheduled today, "
+            "what tasks might need attention tomorrow, and any emails that came in today that need responses."
         )
 
 
@@ -393,5 +510,18 @@ async def get_agent() -> Agent:
     return _agent
 
 
-# Re-export AgentMode for convenience
-__all__ = ["Agent", "AgentMode", "ExecutionResult", "get_agent"]
+# Keep AgentMode for backward compatibility with existing code
+from enum import Enum
+
+class AgentMode(Enum):
+    """Operating modes for the agent (legacy, kept for compatibility)."""
+    BRIEFING = "briefing"
+    REVIEW = "review"
+    MONITOR = "monitor"
+    PROCESS_EMAIL = "process_email"
+    PROCESS_EVENT = "process_event"
+    CONVERSATION = "conversation"
+    ESCALATE = "escalate"
+
+
+__all__ = ["Agent", "AgentMode", "get_agent"]

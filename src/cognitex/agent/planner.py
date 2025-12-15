@@ -133,6 +133,12 @@ Important guidelines:
 - Be honest about uncertainty. If you're not sure, say so in your reasoning.
 - Use the user's communication style when drafting messages.
 
+Tool chaining:
+- To update a task by title, FIRST use find_task to search for it, THEN use update_task with the returned task_id
+- To mark a task as complete/done, use update_task with status="done"
+- When the user refers to "task 8" or similar, use find_task with keywords from that task's title
+- Always execute tools in dependency order - don't skip the find step when you need an ID
+
 Trigger:
 {trigger}
 
@@ -348,6 +354,84 @@ Your response (just the text, no JSON):"""
         except Exception as e:
             logger.error("Response generation failed", error=str(e))
             return "I encountered an error processing your request. Could you try again?", None
+
+    async def generate_response(
+        self,
+        message: str,
+        plan: Plan | None,
+        tool_results: list[dict],
+    ) -> str:
+        """
+        Generate a response to the user based on the plan and actual tool results.
+
+        This is called AFTER tools have been executed, so it can include real data.
+
+        Args:
+            message: Original user message
+            plan: The plan that was executed (or None)
+            tool_results: Results from executing tools
+
+        Returns:
+            Natural language response for the user
+        """
+        # Format tool results for the prompt
+        results_text = ""
+        if tool_results:
+            results_parts = []
+            for r in tool_results:
+                if r["success"] and r["data"]:
+                    # Format the data nicely
+                    data = r["data"]
+                    if isinstance(data, list):
+                        results_parts.append(f"**{r['tool']}** returned {len(data)} items:")
+                        for item in data[:10]:  # Limit to 10 items
+                            if isinstance(item, dict):
+                                # Format dict nicely
+                                item_str = ", ".join(f"{k}: {v}" for k, v in list(item.items())[:5])
+                                results_parts.append(f"  - {item_str}")
+                            else:
+                                results_parts.append(f"  - {item}")
+                        if len(data) > 10:
+                            results_parts.append(f"  ... and {len(data) - 10} more")
+                    else:
+                        results_parts.append(f"**{r['tool']}**: {data}")
+                elif r["error"]:
+                    results_parts.append(f"**{r['tool']}** failed: {r['error']}")
+            results_text = "\n".join(results_parts)
+
+        reasoning = plan.reasoning if plan else "No specific plan needed."
+
+        prompt = f"""You are Cognitex, a helpful personal assistant. Respond to the user's message based on the actual data retrieved.
+
+User's message: {message}
+
+Your analysis: {reasoning}
+
+Tool results (REAL DATA - use this, don't make things up):
+{results_text if results_text else "No tools were called."}
+
+Instructions:
+- Respond naturally and helpfully
+- Use the ACTUAL data from tool results - do not invent or hallucinate information
+- If no data was found, say so honestly
+- Be concise but complete
+- Format lists nicely if presenting multiple items
+
+Your response:"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1024,
+                temperature=0.4,
+            )
+
+            return response.choices[0].message.content.strip()
+
+        except Exception as e:
+            logger.error("Response generation failed", error=str(e))
+            return "I encountered an error generating a response. Please try again."
 
 
 # Singleton

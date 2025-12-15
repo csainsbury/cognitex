@@ -1,7 +1,9 @@
 """Together.ai LLM integration for email classification and task inference."""
 
+import asyncio
 import json
-from typing import Any
+from functools import wraps
+from typing import Any, Callable, TypeVar
 
 import structlog
 from together import Together
@@ -9,6 +11,58 @@ from together import Together
 from cognitex.config import get_settings
 
 logger = structlog.get_logger()
+
+T = TypeVar("T")
+
+
+def with_retry(
+    max_attempts: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 30.0,
+    exceptions: tuple = (Exception,),
+) -> Callable:
+    """
+    Decorator to retry async functions with exponential backoff.
+
+    Args:
+        max_attempts: Maximum number of retry attempts
+        base_delay: Initial delay in seconds
+        max_delay: Maximum delay between retries
+        exceptions: Tuple of exception types to catch
+    """
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        async def wrapper(*args, **kwargs) -> T:
+            last_exception = None
+
+            for attempt in range(max_attempts):
+                try:
+                    return await func(*args, **kwargs)
+                except exceptions as e:
+                    last_exception = e
+                    if attempt == max_attempts - 1:
+                        logger.error(
+                            "LLM call failed after retries",
+                            function=func.__name__,
+                            attempts=max_attempts,
+                            error=str(e),
+                        )
+                        raise
+
+                    # Exponential backoff with jitter
+                    delay = min(base_delay * (2 ** attempt), max_delay)
+                    logger.warning(
+                        "LLM call failed, retrying",
+                        function=func.__name__,
+                        attempt=attempt + 1,
+                        delay=delay,
+                        error=str(e),
+                    )
+                    await asyncio.sleep(delay)
+
+            raise last_exception
+        return wrapper
+    return decorator
 
 
 class LLMService:
@@ -21,10 +75,13 @@ class LLMService:
             raise ValueError("TOGETHER_API_KEY not configured")
 
         self.client = Together(api_key=api_key)
-        self.primary_model = settings.together_model_primary
-        self.fast_model = settings.together_model_fast
+        # Use planner model for primary reasoning tasks
+        self.primary_model = settings.together_model_planner
+        # Use executor model for fast classification
+        self.fast_model = settings.together_model_executor
         self.embedding_model = settings.together_model_embedding
 
+    @with_retry(max_attempts=3, base_delay=1.0)
     async def complete(
         self,
         prompt: str,

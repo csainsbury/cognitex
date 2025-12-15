@@ -61,11 +61,12 @@ def create_app() -> FastAPI:
         )
 
     # Register routes
-    from cognitex.api.routes import health, tasks, goals
+    from cognitex.api.routes import health, tasks, goals, webhooks
 
     app.include_router(health.router, tags=["health"])
     app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
     app.include_router(goals.router, prefix="/api/goals", tags=["goals"])
+    app.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
 
     return app
 

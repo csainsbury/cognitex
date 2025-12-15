@@ -247,24 +247,47 @@ async def run_incremental_sync(history_id: str) -> dict:
     """
     Run an incremental sync using Gmail history API.
 
+    The incoming history_id is the CURRENT state from Gmail push notification.
+    We need to query from our LAST KNOWN history_id to find what's new.
+
     Args:
-        history_id: The history ID to sync from
+        history_id: The current history ID from Gmail push notification
 
     Returns:
-        Sync result stats
+        Sync result stats including emails list for further processing
     """
-    logger.info("Starting incremental Gmail sync", history_id=history_id)
+    from cognitex.db.redis import get_redis
+
+    redis = get_redis()
+    redis_key = "cognitex:gmail:last_history_id"
+
+    # Get the last known history ID
+    last_history_id = await redis.get(redis_key)
+
+    if not last_history_id:
+        # First time - store current ID and return (nothing to sync yet)
+        await redis.set(redis_key, history_id)
+        logger.info("First Gmail sync - storing initial history ID", history_id=history_id)
+        return {
+            "total": 0,
+            "success": 0,
+            "history_id": history_id,
+            "first_sync": True,
+        }
+
+    logger.info("Starting incremental Gmail sync", from_history_id=last_history_id, to_history_id=history_id)
 
     gmail = GmailService()
 
     try:
         history = gmail.get_history(
-            start_history_id=history_id,
+            start_history_id=last_history_id,
             history_types=["messageAdded"],
         )
     except Exception as e:
-        # History ID might be too old
-        logger.warning("History sync failed, falling back to date-based", error=str(e))
+        # History ID might be too old - reset and try again next time
+        logger.warning("History sync failed, resetting history ID", error=str(e))
+        await redis.set(redis_key, history_id)
         return {"error": str(e), "fallback_needed": True}
 
     # Extract new message IDs from history
@@ -273,13 +296,19 @@ async def run_incremental_sync(history_id: str) -> dict:
         for msg in record.get("messagesAdded", []):
             new_message_ids.add(msg["message"]["id"])
 
+    # Update stored history ID
+    new_history_id = history.get("historyId", history_id)
+    await redis.set(redis_key, new_history_id)
+
     if not new_message_ids:
         logger.info("No new messages found")
         return {
             "total": 0,
             "success": 0,
-            "history_id": history.get("historyId"),
+            "history_id": new_history_id,
         }
+
+    logger.info("Found new messages", count=len(new_message_ids))
 
     # Fetch full metadata for new messages
     messages = gmail.get_message_batch(list(new_message_ids), format="metadata")
@@ -288,9 +317,10 @@ async def run_incremental_sync(history_id: str) -> dict:
 
     # Ingest into graph
     stats = await ingest_email_batch(email_data)
-    stats["history_id"] = history.get("historyId")
+    stats["history_id"] = new_history_id
+    stats["emails"] = email_data  # Include email data for agent processing
 
-    logger.info("Incremental sync complete", **stats)
+    logger.info("Incremental sync complete", **{k: v for k, v in stats.items() if k != "emails"})
 
     return stats
 
@@ -424,6 +454,7 @@ async def run_calendar_sync(months_back: int = 1, days_ahead: int = 30) -> dict:
     Returns:
         Sync result stats
     """
+    from datetime import datetime, timedelta, timezone
     from cognitex.services.calendar import (
         CalendarService,
         fetch_historical_events,
@@ -443,12 +474,46 @@ async def run_calendar_sync(months_back: int = 1, days_ahead: int = 30) -> dict:
     # Deduplicate (upcoming might overlap with historical)
     all_events = {e["gcal_id"]: e for e in historical + upcoming}
     events = list(all_events.values())
+    gcal_ids = set(all_events.keys())
 
     logger.info("Fetched calendar events", historical=len(historical), upcoming=len(upcoming), total=len(events))
 
     # Ingest into graph
     stats = await ingest_event_batch(events)
 
+    # Delete events from Neo4j that are no longer in Google Calendar (within the sync window)
+    now = datetime.now(timezone.utc)
+    start_date = now - timedelta(days=months_back * 30)
+    end_date = now + timedelta(days=days_ahead)
+
+    deleted_count = 0
+    async for session in get_neo4j_session():
+        # Find events in Neo4j within the sync window that aren't in the fetched events
+        result = await session.run("""
+            MATCH (e:Event)
+            WHERE e.start >= datetime($start) AND e.start <= datetime($end)
+            RETURN e.gcal_id as gcal_id
+        """, {
+            "start": start_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "end": end_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
+        existing = await result.data()
+        existing_ids = {e["gcal_id"] for e in existing}
+
+        # Find IDs to delete (in Neo4j but not in Google Calendar)
+        to_delete = existing_ids - gcal_ids
+
+        if to_delete:
+            # Delete orphaned events
+            await session.run("""
+                MATCH (e:Event)
+                WHERE e.gcal_id IN $ids
+                DETACH DELETE e
+            """, {"ids": list(to_delete)})
+            deleted_count = len(to_delete)
+            logger.info("Deleted orphaned events", count=deleted_count)
+
+    stats["deleted"] = deleted_count
     logger.info("Calendar sync complete", **stats)
 
     return stats
