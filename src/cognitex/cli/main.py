@@ -1819,11 +1819,20 @@ def task_new() -> None:
                 console.print("\n[bold]Link to goal:[/bold]")
                 goal_id = prompt_with_options("Select goal", goals)
 
-            # Assign to person
+            # Assign to person (primary assignee)
             assignee_email = None
             if contacts:
-                console.print("\n[bold]Assign to:[/bold]")
-                assignee_email = prompt_with_options("Select person", contacts)
+                console.print("\n[bold]Assign to:[/bold] [dim](primary person responsible)[/dim]")
+                assignee_email = prompt_with_options("Select assignee", contacts)
+
+            # Related people (multiple selection)
+            related_emails = []
+            if contacts:
+                console.print("\n[bold]Related people:[/bold] [dim](others involved - requestor, collaborators)[/dim]")
+                related_emails = prompt_with_multi_options("Select related people", contacts)
+                # Remove assignee from related if selected
+                if assignee_email and assignee_email in related_emails:
+                    related_emails.remove(assignee_email)
 
             # Create the task
             task_service = get_task_service()
@@ -1837,11 +1846,13 @@ def task_new() -> None:
                 energy_cost=energy,
             )
 
-            # Link to person if selected
-            if assignee_email:
-                async for session in get_neo4j_session():
-                    await link_task_to_person(session, task["id"], assignee_email)
-                    break
+            # Link to people
+            async for session in get_neo4j_session():
+                if assignee_email:
+                    await link_task_to_person(session, task["id"], assignee_email, relationship_type="ASSIGNED_TO")
+                for email in related_emails:
+                    await link_task_to_person(session, task["id"], email, relationship_type="INVOLVES")
+                break
 
             # Summary
             console.print(f"\n[green]✓ Created task:[/green] {task['title']}")
@@ -1856,7 +1867,11 @@ def task_new() -> None:
                 goal_name = next((g[1] for g in goals if g[0] == goal_id), goal_id)
                 console.print(f"  Goal: {goal_name}")
             if assignee_email:
-                console.print(f"  Assigned to: {assignee_email}")
+                assignee_name = next((c[1] for c in contacts if c[0] == assignee_email), assignee_email)
+                console.print(f"  Assigned to: {assignee_name}")
+            if related_emails:
+                names = [next((c[1] for c in contacts if c[0] == e), e) for e in related_emails]
+                console.print(f"  Related: {', '.join(names)}")
 
         finally:
             await close_neo4j()
@@ -1871,7 +1886,7 @@ def project_new() -> None:
 
     async def create_project_interactive():
         from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
-        from cognitex.db.graph_schema import init_graph_schema, create_project, link_project_to_goal
+        from cognitex.db.graph_schema import init_graph_schema, create_project, link_project_to_goal, link_project_to_person
 
         await init_neo4j()
         await init_graph_schema()
@@ -1948,6 +1963,21 @@ def project_new() -> None:
                 console.print("\n[bold]Link to goal:[/bold]")
                 goal_id = prompt_with_options("Select goal", goals)
 
+            # Project owner
+            owner_email = None
+            if contacts:
+                console.print("\n[bold]Project owner:[/bold]")
+                owner_email = prompt_with_options("Select owner", contacts)
+
+            # Stakeholders (multiple selection)
+            stakeholder_emails = []
+            if contacts:
+                console.print("\n[bold]Stakeholders:[/bold] [dim](people involved in this project)[/dim]")
+                stakeholder_emails = prompt_with_multi_options("Select stakeholders", contacts)
+                # Remove owner from stakeholders if selected
+                if owner_email and owner_email in stakeholder_emails:
+                    stakeholder_emails.remove(owner_email)
+
             # Create the project
             import uuid
             project_id = f"proj_{uuid.uuid4().hex[:12]}"
@@ -1966,6 +1996,14 @@ def project_new() -> None:
                 if goal_id:
                     await link_project_to_goal(session, project["id"], goal_id)
 
+                # Link to owner
+                if owner_email:
+                    await link_project_to_person(session, project["id"], owner_email, role="owner")
+
+                # Link to stakeholders
+                for email in stakeholder_emails:
+                    await link_project_to_person(session, project["id"], email, role="stakeholder")
+
                 # Summary
                 console.print(f"\n[green]✓ Created project:[/green] {project['title']}")
                 console.print(f"  ID: [dim]{project['id']}[/dim]")
@@ -1975,6 +2013,12 @@ def project_new() -> None:
                 if goal_id:
                     goal_name = next((g[1] for g in goals if g[0] == goal_id), goal_id)
                     console.print(f"  Goal: {goal_name}")
+                if owner_email:
+                    owner_name = next((c[1] for c in contacts if c[0] == owner_email), owner_email)
+                    console.print(f"  Owner: {owner_name}")
+                if stakeholder_emails:
+                    names = [next((c[1] for c in contacts if c[0] == e), e) for e in stakeholder_emails]
+                    console.print(f"  Stakeholders: {', '.join(names)}")
                 break
 
         finally:
