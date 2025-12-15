@@ -937,6 +937,65 @@ class CreateGoalTool(BaseTool):
             return ToolResult(success=False, error=str(e))
 
 
+class ParseGoalTool(BaseTool):
+    """Parse a goal description and create structured graph entities."""
+
+    name = "parse_goal"
+    description = """Parse a natural language goal description and automatically create:
+    - The goal itself
+    - Related projects (if mentioned)
+    - Tasks/milestones (if mentioned)
+    - Links to people (stakeholders, owners)
+
+    Use this when the user describes a complex goal with multiple components.
+    Example: "Build a health analytics platform by Q2, with Scott leading backend
+    and data pipelines as the first phase"
+    """
+    risk = ToolRisk.AUTO
+    parameters = {
+        "description": {"type": "string", "description": "Natural language goal description"},
+        "create_projects": {"type": "boolean", "description": "Create extracted projects", "default": True, "optional": True},
+        "create_tasks": {"type": "boolean", "description": "Create extracted tasks", "default": True, "optional": True},
+    }
+
+    async def execute(
+        self,
+        description: str,
+        create_projects: bool = True,
+        create_tasks: bool = True,
+    ) -> ToolResult:
+        from cognitex.services.goal_parser import parse_and_create_goal
+
+        try:
+            result = await parse_and_create_goal(
+                description,
+                create_projects=create_projects,
+                create_tasks=create_tasks,
+                link_people=True,
+                dry_run=False,
+            )
+
+            created = result["created"]
+            parsed = result["parsed"]
+
+            summary = {
+                "goal_id": created["goal"]["id"] if created["goal"] else None,
+                "goal_title": parsed["title"],
+                "projects_created": len(created["projects"]),
+                "tasks_created": len(created["tasks"]),
+                "people_linked": len(created["people_linked"]),
+                "themes": parsed["themes"],
+                "confidence": parsed["confidence"],
+            }
+
+            logger.info("Parsed and created goal", goal_title=parsed["title"][:50], **summary)
+            return ToolResult(success=True, data=summary)
+
+        except Exception as e:
+            logger.warning("Goal parsing failed", error=str(e))
+            return ToolResult(success=False, error=str(e))
+
+
 class UpdateGoalTool(BaseTool):
     """Update an existing goal."""
 
@@ -1119,6 +1178,7 @@ class ToolRegistry:
             UpdateProjectTool(),
             LinkProjectToPersonTool(),
             CreateGoalTool(),
+            ParseGoalTool(),
             UpdateGoalTool(),
             SendNotificationTool(),
             AddMemoryTool(),

@@ -1452,6 +1452,28 @@ async def link_project_to_person(
     await session.run(query, project_id=project_id, person_email=person_email, role=role)
 
 
+async def link_goal_to_person(
+    session: AsyncSession,
+    goal_id: str,
+    person_email: str,
+    role: str = "stakeholder",
+) -> None:
+    """Create relationship between Goal and Person (OWNED_BY or STAKEHOLDER)."""
+    if role == "owner":
+        query = """
+        MATCH (g:Goal {id: $goal_id})
+        MATCH (person:Person {email: $person_email})
+        MERGE (g)-[:OWNED_BY]->(person)
+        """
+    else:
+        query = """
+        MATCH (g:Goal {id: $goal_id})
+        MATCH (person:Person {email: $person_email})
+        MERGE (g)<-[:STAKEHOLDER {role: $role}]-(person)
+        """
+    await session.run(query, goal_id=goal_id, person_email=person_email, role=role)
+
+
 async def link_project_to_repository(
     session: AsyncSession,
     project_id: str,

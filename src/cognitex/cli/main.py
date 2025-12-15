@@ -2680,6 +2680,102 @@ def goal_add(
     asyncio.run(create_goal())
 
 
+@app.command("goal-parse")
+def goal_parse(
+    description: str = typer.Argument(..., help="Goal description to parse"),
+    dry_run: bool = typer.Option(False, "--dry-run", "-n", help="Show what would be created without creating"),
+    no_projects: bool = typer.Option(False, "--no-projects", help="Don't create extracted projects"),
+    no_tasks: bool = typer.Option(False, "--no-tasks", help="Don't create extracted tasks"),
+    no_people: bool = typer.Option(False, "--no-people", help="Don't link mentioned people"),
+) -> None:
+    """Parse a goal description and create structured graph entities.
+
+    Uses AI to extract projects, tasks, people, and themes from a natural
+    language goal description and creates them in the semantic graph.
+
+    Example:
+        cognitex goal-parse "Build a personal AI assistant that manages my emails,
+        calendar and tasks. Scott will help with the backend, target Q1 2025."
+    """
+    async def parse_goal():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.db.graph_schema import init_graph_schema
+        from cognitex.services.goal_parser import parse_and_create_goal
+
+        await init_neo4j()
+        await init_graph_schema()
+
+        try:
+            console.print(f"\n[bold cyan]Parsing goal...[/bold cyan]")
+            console.print(f"[dim]{description[:100]}{'...' if len(description) > 100 else ''}[/dim]\n")
+
+            result = await parse_and_create_goal(
+                description,
+                create_projects=not no_projects,
+                create_tasks=not no_tasks,
+                link_people=not no_people,
+                dry_run=dry_run,
+            )
+
+            parsed = result["parsed"]
+
+            # Show parsed structure
+            console.print(f"[bold]Extracted Structure[/bold] [dim](confidence: {parsed['confidence']:.0%})[/dim]\n")
+            console.print(f"  [bold]Title:[/bold] {parsed['title']}")
+            if parsed['timeframe']:
+                console.print(f"  [bold]Timeframe:[/bold] {parsed['timeframe']}")
+            if parsed['target_date']:
+                console.print(f"  [bold]Target:[/bold] {parsed['target_date']}")
+
+            if parsed['themes']:
+                console.print(f"  [bold]Themes:[/bold] {', '.join(parsed['themes'])}")
+
+            if parsed['projects']:
+                console.print(f"\n  [bold]Projects ({len(parsed['projects'])}):[/bold]")
+                for p in parsed['projects']:
+                    console.print(f"    • {p['title']}")
+                    if p.get('description'):
+                        console.print(f"      [dim]{p['description'][:60]}...[/dim]")
+
+            if parsed['tasks']:
+                console.print(f"\n  [bold]Tasks ({len(parsed['tasks'])}):[/bold]")
+                for t in parsed['tasks']:
+                    priority = t.get('priority', 'medium')
+                    console.print(f"    • {t['title']} [{priority}]")
+
+            if parsed['people']:
+                console.print(f"\n  [bold]People ({len(parsed['people'])}):[/bold]")
+                for p in parsed['people']:
+                    role = p.get('role', 'stakeholder')
+                    name = p.get('name', p.get('email_hint', 'unknown'))
+                    console.print(f"    • {name} ({role})")
+
+            if parsed['success_criteria']:
+                console.print(f"\n  [bold]Success Criteria:[/bold]")
+                for c in parsed['success_criteria']:
+                    console.print(f"    ✓ {c}")
+
+            # Show what was created
+            if dry_run:
+                console.print(f"\n[yellow]Dry run - nothing created.[/yellow]")
+            else:
+                created = result["created"]
+                console.print(f"\n[green]Created:[/green]")
+                if created['goal']:
+                    console.print(f"  Goal: {created['goal']['id']}")
+                if created['projects']:
+                    console.print(f"  Projects: {len(created['projects'])}")
+                if created['tasks']:
+                    console.print(f"  Tasks: {len(created['tasks'])}")
+                if created['people_linked']:
+                    console.print(f"  People linked: {len(created['people_linked'])}")
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(parse_goal())
+
+
 @app.command()
 def goals(
     status: str = typer.Option(None, "--status", "-s", help="Filter by status: active, achieved, abandoned"),
