@@ -108,13 +108,11 @@ def main_callback(
 def shell() -> None:
     """Interactive shell mode - run commands without typing 'cognitex' each time."""
     import shlex
+    import subprocess
     import sys
-    from click.testing import CliRunner
 
     console.print("\n[bold cyan]Cognitex Interactive Shell[/bold cyan]")
     console.print("[dim]Type commands without 'cognitex' prefix. Use 'help' for commands, 'exit' to quit.[/dim]\n")
-
-    runner = CliRunner()
 
     # Quick aliases
     aliases = {
@@ -164,10 +162,7 @@ def shell() -> None:
         if user_input.startswith(">"):
             chat_msg = user_input[1:].strip()
             if chat_msg:
-                # Run agent-chat with the message
-                result = runner.invoke(app, ["agent-chat", chat_msg])
-                if result.output:
-                    console.print(result.output)
+                subprocess.run(["cognitex", "agent-chat", chat_msg])
             continue
 
         # Parse command and args
@@ -181,14 +176,10 @@ def shell() -> None:
 
         # Apply alias
         cmd = aliases.get(parts[0], parts[0])
-        args = [cmd] + parts[1:]
+        args = ["cognitex", cmd] + parts[1:]
 
         # Run the command
-        result = runner.invoke(app, args)
-        if result.output:
-            console.print(result.output.rstrip())
-        if result.exception and not isinstance(result.exception, SystemExit):
-            console.print(f"[red]Error: {result.exception}[/red]")
+        subprocess.run(args)
 
 
 @app.command("cheatsheet")
