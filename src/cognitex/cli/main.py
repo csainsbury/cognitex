@@ -2378,9 +2378,12 @@ def projects(
     """List projects."""
     async def list_projects():
         from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.db.redis import init_redis, get_redis, close_redis
         from cognitex.services.tasks import get_project_service
+        from cognitex.cli.short_ids import store_project_ids
 
         await init_neo4j()
+        await init_redis()
 
         try:
             project_service = get_project_service()
@@ -2394,14 +2397,19 @@ def projects(
                 console.print("[yellow]No projects found.[/yellow]")
                 return
 
+            # Store short IDs
+            redis = get_redis()
+            project_ids = [p['id'] for p in project_list]
+            await store_project_ids(redis, project_ids)
+
             table = Table(title=f"Projects ({len(project_list)})")
-            table.add_column("ID", style="cyan", width=16)
-            table.add_column("Title", style="white", width=30)
+            table.add_column("#", style="cyan", width=3)
+            table.add_column("Title", style="white", width=32)
             table.add_column("Status", style="green", width=10)
-            table.add_column("Tasks", style="yellow", width=10)
+            table.add_column("Tasks", style="yellow", width=8)
             table.add_column("Target", style="magenta", width=12)
 
-            for project in project_list:
+            for i, project in enumerate(project_list, 1):
                 task_count = project.get('task_count', 0)
                 done_count = project.get('done_count', 0)
                 task_str = f"{done_count}/{task_count}"
@@ -2410,16 +2418,18 @@ def projects(
                 target_str = str(target)[:10] if target else "-"
 
                 table.add_row(
-                    project['id'],
-                    project['title'][:30],
+                    str(i),
+                    project['title'][:32],
                     project.get('status', 'active'),
                     task_str,
                     target_str,
                 )
 
             console.print(table)
+            console.print("\n[dim]Use short IDs: project-show 1, project-link 2 --goal ...[/dim]")
 
         finally:
+            await close_redis()
             await close_neo4j()
 
     asyncio.run(list_projects())
@@ -2427,19 +2437,30 @@ def projects(
 
 @app.command("project-show")
 def project_show(
-    project_id: str = typer.Argument(..., help="Project ID to show"),
+    project_id: str = typer.Argument(..., help="Project ID (short # or full ID)"),
     with_tasks: bool = typer.Option(False, "--tasks", "-t", help="Show project tasks"),
 ) -> None:
     """Show detailed project information."""
     async def show_project():
         from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.db.redis import init_redis, get_redis, close_redis
         from cognitex.services.tasks import get_project_service
+        from cognitex.cli.short_ids import resolve_project_id
 
         await init_neo4j()
+        await init_redis()
+        redis = get_redis()
 
         try:
+            # Resolve short ID to full UUID
+            resolved_id = await resolve_project_id(redis, project_id)
+            if not resolved_id:
+                console.print(f"[red]Project not found:[/red] {project_id}")
+                console.print("[dim]Run 'cognitex projects' first to see available projects.[/dim]")
+                return
+
             project_service = get_project_service()
-            project = await project_service.get(project_id)
+            project = await project_service.get(resolved_id)
 
             if not project:
                 console.print(f"[red]Project not found:[/red] {project_id}")
@@ -2471,7 +2492,7 @@ def project_show(
                     console.print(f"  - {rp['title']} ({rp['id']})")
 
             if with_tasks:
-                tasks = await project_service.get_tasks(project_id, include_done=True)
+                tasks = await project_service.get_tasks(resolved_id, include_done=True)
                 if tasks:
                     console.print(f"\n[bold]Tasks:[/bold]")
                     for task in tasks:
@@ -2483,9 +2504,66 @@ def project_show(
                         console.print(f"  {status_icon} {task['title'][:50]} ({task['id']})")
 
         finally:
+            await close_redis()
             await close_neo4j()
 
     asyncio.run(show_project())
+
+
+@app.command("project-link")
+def project_link(
+    project_id: str = typer.Argument(..., help="Project ID (short # or full ID)"),
+    goal: str = typer.Option(None, "--goal", "-g", help="Goal ID to link"),
+    owner: str = typer.Option(None, "--owner", "-o", help="Owner email"),
+    stakeholder: str = typer.Option(None, "--stakeholder", "-s", help="Stakeholder email"),
+) -> None:
+    """Link a project to goals and people."""
+    async def link_project():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
+        from cognitex.db.redis import init_redis, get_redis, close_redis
+        from cognitex.db.graph_schema import link_project_to_goal, link_project_to_person
+        from cognitex.cli.short_ids import resolve_project_id
+
+        await init_neo4j()
+        await init_redis()
+        redis = get_redis()
+
+        try:
+            # Resolve project short ID
+            resolved_id = await resolve_project_id(redis, project_id)
+            if not resolved_id:
+                console.print(f"[red]Project not found:[/red] {project_id}")
+                console.print("[dim]Run 'cognitex projects' first to see available projects.[/dim]")
+                return
+
+            linked = []
+
+            async for session in get_neo4j_session():
+                if goal:
+                    await link_project_to_goal(session, resolved_id, goal)
+                    linked.append(f"Goal: {goal}")
+
+                if owner:
+                    await link_project_to_person(session, resolved_id, owner, role="owner")
+                    linked.append(f"Owner: {owner}")
+
+                if stakeholder:
+                    await link_project_to_person(session, resolved_id, stakeholder, role="stakeholder")
+                    linked.append(f"Stakeholder: {stakeholder}")
+                break
+
+            if linked:
+                console.print(f"[green]Linked project:[/green]")
+                for link in linked:
+                    console.print(f"  → {link}")
+            else:
+                console.print("[yellow]No links specified. Use --goal, --owner, or --stakeholder[/yellow]")
+
+        finally:
+            await close_redis()
+            await close_neo4j()
+
+    asyncio.run(link_project())
 
 
 @app.command("goal-add")
