@@ -1,0 +1,37 @@
+<tr id="goal-{{ goal.id }}">
+    <td>
+        <strong><a href="/goals/{{ goal.id }}" class="link">{{ goal.title }}</a></strong>
+        {% if goal.description %}
+        <div class="desc-preview">{{ goal.description }}</div>
+        {% endif %}
+    </td>
+    <td>
+        {% if goal.timeframe %}
+        <span class="badge timeframe-{{ goal.timeframe }}">{{ goal.timeframe }}</span>
+        {% else %}
+        -
+        {% endif %}
+    </td>
+    <td><span class="badge badge-{{ goal.status }}">{{ goal.status }}</span></td>
+    <td>{{ goal.project_count|default(0) }}</td>
+    <td colspan="2">
+        {% if goal.people %}
+        <span class="people-list">{{ goal.people | join(', ') }}</span>
+        {% else %}
+        -
+        {% endif %}
+    </td>
+    <td class="actions">
+        <button class="btn btn-secondary btn-sm"
+                hx-get="/goals/{{ goal.id }}/edit"
+                hx-target="#goal-{{ goal.id }}"
+                hx-swap="outerHTML"
+                title="Edit">Edit</button>
+        <button class="btn btn-danger btn-sm"
+                hx-delete="/goals/{{ goal.id }}"
+                hx-target="#goal-{{ goal.id }}"
+                hx-swap="outerHTML"
+                hx-confirm="Delete this goal?"
+                title="Delete">&#10005;</button>
+    </td>
+</tr>

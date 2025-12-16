@@ -1,0 +1,34 @@
+<tr id="goal-{{ goal.id }}" class="edit-form">
+    <td>
+        <form id="goal-edit-{{ goal.id }}" hx-post="/goals/{{ goal.id }}" hx-target="#goal-{{ goal.id }}" hx-swap="outerHTML" hx-include="[form='goal-edit-{{ goal.id }}']">
+            <input type="text" name="title" value="{{ goal.title }}" required>
+            <textarea name="description" placeholder="Description (optional)">{{ goal.description or '' }}</textarea>
+        </form>
+    </td>
+    <td>
+        <select name="timeframe" form="goal-edit-{{ goal.id }}">
+            <option value="">None</option>
+            <option value="quarterly" {% if goal.timeframe == 'quarterly' %}selected{% endif %}>quarterly</option>
+            <option value="yearly" {% if goal.timeframe == 'yearly' %}selected{% endif %}>yearly</option>
+            <option value="multi_year" {% if goal.timeframe == 'multi_year' %}selected{% endif %}>multi_year</option>
+        </select>
+    </td>
+    <td>
+        <select name="status" form="goal-edit-{{ goal.id }}">
+            <option value="active" {% if goal.status == 'active' %}selected{% endif %}>active</option>
+            <option value="achieved" {% if goal.status == 'achieved' %}selected{% endif %}>achieved</option>
+            <option value="abandoned" {% if goal.status == 'abandoned' %}selected{% endif %}>abandoned</option>
+        </select>
+    </td>
+    <td>{{ goal.project_count|default(0) }}</td>
+    <td colspan="2">
+        <div class="people-picker" data-form-id="goal-edit-{{ goal.id }}" data-initial='{{ goal.people_full | default([]) | tojson }}'></div>
+    </td>
+    <td class="actions">
+        <button type="submit" form="goal-edit-{{ goal.id }}" class="btn btn-primary btn-sm">Save</button>
+        <button type="button" class="btn btn-secondary btn-sm"
+                hx-get="/goals/{{ goal.id }}/row"
+                hx-target="#goal-{{ goal.id }}"
+                hx-swap="outerHTML">Cancel</button>
+    </td>
+</tr>

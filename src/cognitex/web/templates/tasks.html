@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block title %}Tasks - Cognitex{% endblock %}
+
+{% block content %}
+<h1>Tasks</h1>
+
+<div class="filters">
+    <label>Status:</label>
+    <select onchange="window.location.href='/tasks?status=' + this.value + '{% if current_project %}&project={{ current_project }}{% endif %}'">
+        <option value="">All</option>
+        <option value="pending" {% if current_status == "pending" %}selected{% endif %}>Pending</option>
+        <option value="in_progress" {% if current_status == "in_progress" %}selected{% endif %}>In Progress</option>
+        <option value="done" {% if current_status == "done" %}selected{% endif %}>Done</option>
+    </select>
+
+    <label style="margin-left: 1rem;">Project:</label>
+    <select onchange="window.location.href='/tasks?project=' + this.value + '{% if current_status %}&status={{ current_status }}{% endif %}'">
+        <option value="">All</option>
+        {% for project in projects %}
+        <option value="{{ project.id }}" {% if current_project == project.id %}selected{% endif %}>{{ project.title }}</option>
+        {% endfor %}
+    </select>
+
+    <button class="btn btn-primary" style="margin-left: auto;"
+            hx-get="/tasks/new"
+            hx-target="#new-task-row"
+            hx-swap="outerHTML">
+        + New Task
+    </button>
+</div>
+
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th style="width: 25%;">Title</th>
+                <th>Priority</th>
+                <th>Status</th>
+                <th>Due</th>
+                <th>Project</th>
+                <th colspan="2">People</th>
+                <th style="width: 130px;">Actions</th>
+            </tr>
+        </thead>
+        <tbody id="task-list">
+            <tr id="new-task-row"></tr>
+            {% for task in tasks %}
+            {% include "partials/task_row.html" %}
+            {% endfor %}
+        </tbody>
+    </table>
+
+    {% if not tasks %}
+    <p class="empty">No tasks found</p>
+    {% endif %}
+</div>
+
+<div class="shortcuts">
+    Click Edit to modify | Ctrl+click to select multiple people
+</div>
+{% endblock %}

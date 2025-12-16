@@ -1,0 +1,41 @@
+<tr id="new-task-form" class="new-form">
+    <td>
+        <form id="task-create-form" hx-post="/tasks" hx-target="#new-task-form" hx-swap="outerHTML" hx-include="[form='task-create-form']">
+            <input type="text" name="title" placeholder="Task title" required autofocus>
+            <textarea name="description" placeholder="Description (optional)"></textarea>
+        </form>
+    </td>
+    <td>
+        <select name="priority" form="task-create-form">
+            <option value="low">low</option>
+            <option value="medium" selected>medium</option>
+            <option value="high">high</option>
+            <option value="critical">critical</option>
+        </select>
+    </td>
+    <td>
+        <select name="status" form="task-create-form">
+            <option value="pending" selected>pending</option>
+            <option value="in_progress">in_progress</option>
+        </select>
+    </td>
+    <td>
+        <input type="date" name="due_date" form="task-create-form">
+    </td>
+    <td>
+        <select name="project_id" form="task-create-form">
+            <option value="">None</option>
+            {% for project in projects %}
+            <option value="{{ project.id }}">{{ project.title }}</option>
+            {% endfor %}
+        </select>
+    </td>
+    <td colspan="2">
+        <div class="people-picker" data-form-id="task-create-form" data-initial="[]"></div>
+    </td>
+    <td class="actions">
+        <button type="submit" form="task-create-form" class="btn btn-primary btn-sm">Add</button>
+        <button type="button" class="btn btn-secondary btn-sm"
+                hx-get="/tasks/cancel-new" hx-target="#new-task-form" hx-swap="outerHTML">Cancel</button>
+    </td>
+</tr>

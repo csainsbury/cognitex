@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Cognitex{% endblock %}
+
+{% block content %}
+<h1>Dashboard</h1>
+
+<div class="stats">
+    <div class="stat">
+        <div class="stat-value">{{ pending_tasks }}</div>
+        <div class="stat-label">Pending Tasks</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value">{{ active_projects }}</div>
+        <div class="stat-label">Active Projects</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value">{{ active_goals }}</div>
+        <div class="stat-label">Active Goals</div>
+    </div>
+</div>
+
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+    <div class="card">
+        <div class="card-header">
+            <h2>Recent Tasks</h2>
+            <a href="/tasks" class="link">View all</a>
+        </div>
+        {% if recent_tasks %}
+        <table>
+            <tr>
+                <th>Task</th>
+                <th>Priority</th>
+                <th>Status</th>
+            </tr>
+            {% for task in recent_tasks %}
+            <tr>
+                <td>{{ task.title }}</td>
+                <td><span class="priority-{{ task.priority }}">{{ task.priority }}</span></td>
+                <td><span class="badge badge-{{ task.status }}">{{ task.status }}</span></td>
+            </tr>
+            {% endfor %}
+        </table>
+        {% else %}
+        <p class="empty">No tasks yet</p>
+        {% endif %}
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <h2>Recent Projects</h2>
+            <a href="/projects" class="link">View all</a>
+        </div>
+        {% if recent_projects %}
+        <table>
+            <tr>
+                <th>Project</th>
+                <th>Status</th>
+                <th>Tasks</th>
+            </tr>
+            {% for project in recent_projects %}
+            <tr>
+                <td>{{ project.title }}</td>
+                <td><span class="badge badge-{{ project.status }}">{{ project.status }}</span></td>
+                <td>{{ project.done_count|default(0) }}/{{ project.task_count|default(0) }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+        {% else %}
+        <p class="empty">No projects yet</p>
+        {% endif %}
+    </div>
+</div>
+
+<div class="shortcuts">
+    CLI: <code>cognitex tasks</code> | <code>cognitex projects</code> | <code>cognitex goals</code>
+</div>
+{% endblock %}

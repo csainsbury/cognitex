@@ -120,6 +120,7 @@ def shell() -> None:
         "p": "projects",
         "g": "goals",
         "c": "calendar",
+        "w": "web",
         "cs": "cheatsheet",
         "td": "task-done",
         "ts": "task-show",
@@ -233,6 +234,12 @@ def cheatsheet() -> None:
     console.print("  cognitex agent-chat     Interactive agent conversation")
     console.print("  cognitex briefing       Generate morning summary")
     console.print("  cognitex approvals      Review pending agent actions")
+    console.print()
+
+    # Web Dashboard
+    console.print("[bold]Web Dashboard[/bold]")
+    console.print("  cognitex web            Start web UI at http://127.0.0.1:8080")
+    console.print("  cognitex web --port 3000   Use different port")
     console.print()
 
     # System
@@ -2904,6 +2911,21 @@ def goal_achieve(
             await close_neo4j()
 
     asyncio.run(achieve_goal())
+
+
+@app.command("web")
+def web(
+    host: str = typer.Option("127.0.0.1", "--host", "-h", help="Host to bind to"),
+    port: int = typer.Option(8080, "--port", "-p", help="Port to listen on"),
+) -> None:
+    """Start the web dashboard for visual overview of tasks, projects, and goals."""
+    from cognitex.web.app import run_server
+
+    console.print(f"[bold]Starting Cognitex Dashboard[/bold]")
+    console.print(f"  Open: [cyan]http://{host}:{port}[/cyan]")
+    console.print(f"\n[dim]Press Ctrl+C to stop[/dim]\n")
+
+    run_server(host=host, port=port)
 
 
 @app.command("agent-status")

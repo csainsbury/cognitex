@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+
+{% block title %}Projects - Cognitex{% endblock %}
+
+{% block content %}
+<h1>Projects</h1>
+
+<div class="filters">
+    <label>Status:</label>
+    <select onchange="window.location.href='/projects?status=' + this.value">
+        <option value="">All</option>
+        <option value="planning" {% if current_status == "planning" %}selected{% endif %}>Planning</option>
+        <option value="active" {% if current_status == "active" %}selected{% endif %}>Active</option>
+        <option value="paused" {% if current_status == "paused" %}selected{% endif %}>Paused</option>
+        <option value="completed" {% if current_status == "completed" %}selected{% endif %}>Completed</option>
+        <option value="archived" {% if current_status == "archived" %}selected{% endif %}>Archived</option>
+    </select>
+
+    <button class="btn btn-primary" style="margin-left: auto;"
+            hx-get="/projects/new"
+            hx-target="#new-project-row"
+            hx-swap="outerHTML">
+        + New Project
+    </button>
+</div>
+
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th style="width: 25%;">Title</th>
+                <th>Status</th>
+                <th>Target Date</th>
+                <th>Tasks</th>
+                <th>Goal</th>
+                <th colspan="2">People</th>
+                <th style="width: 100px;">Actions</th>
+            </tr>
+        </thead>
+        <tbody id="project-list">
+            <tr id="new-project-row"></tr>
+            {% for project in projects %}
+            {% include "partials/project_row.html" %}
+            {% endfor %}
+        </tbody>
+    </table>
+
+    {% if not projects %}
+    <p class="empty">No projects found</p>
+    {% endif %}
+</div>
+
+<div class="shortcuts">
+    Click Edit to modify | Ctrl+click to select multiple people
+</div>
+{% endblock %}

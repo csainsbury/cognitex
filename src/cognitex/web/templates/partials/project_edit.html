@@ -1,0 +1,32 @@
+<tr id="project-{{ project.id }}" class="edit-form">
+    <td>
+        <form id="project-edit-{{ project.id }}" hx-post="/projects/{{ project.id }}" hx-target="#project-{{ project.id }}" hx-swap="outerHTML" hx-include="[form='project-edit-{{ project.id }}']">
+            <input type="text" name="title" value="{{ project.title }}" required>
+            <textarea name="description" placeholder="Description (optional)">{{ project.description or '' }}</textarea>
+        </form>
+    </td>
+    <td>
+        <select name="status" form="project-edit-{{ project.id }}">
+            <option value="planning" {% if project.status == 'planning' %}selected{% endif %}>planning</option>
+            <option value="active" {% if project.status == 'active' %}selected{% endif %}>active</option>
+            <option value="paused" {% if project.status == 'paused' %}selected{% endif %}>paused</option>
+            <option value="completed" {% if project.status == 'completed' %}selected{% endif %}>completed</option>
+            <option value="archived" {% if project.status == 'archived' %}selected{% endif %}>archived</option>
+        </select>
+    </td>
+    <td>
+        <input type="date" name="target_date" value="{{ project.target_date[:10] if project.target_date else '' }}" form="project-edit-{{ project.id }}">
+    </td>
+    <td>{{ project.done_count|default(0) }}/{{ project.task_count|default(0) }}</td>
+    <td>{{ project.goal or '-' }}</td>
+    <td colspan="2">
+        <div class="people-picker" data-form-id="project-edit-{{ project.id }}" data-initial='{{ project.people_full | default([]) | tojson }}'></div>
+    </td>
+    <td class="actions">
+        <button type="submit" form="project-edit-{{ project.id }}" class="btn btn-primary btn-sm">Save</button>
+        <button type="button" class="btn btn-secondary btn-sm"
+                hx-get="/projects/{{ project.id }}/row"
+                hx-target="#project-{{ project.id }}"
+                hx-swap="outerHTML">Cancel</button>
+    </td>
+</tr>

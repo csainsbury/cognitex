@@ -226,7 +226,8 @@ class TaskService:
                     WHEN 'medium' THEN 2
                     WHEN 'low' THEN 3
                 END,
-                t.due ASC NULLS LAST
+                CASE WHEN t.due IS NULL THEN 1 ELSE 0 END,
+                t.due ASC
             LIMIT $limit
             """
 

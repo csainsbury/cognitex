@@ -1,0 +1,32 @@
+<tr id="project-{{ project.id }}">
+    <td>
+        <strong>{{ project.title }}</strong>
+        {% if project.description %}
+        <div class="desc-preview">{{ project.description }}</div>
+        {% endif %}
+    </td>
+    <td><span class="badge badge-{{ project.status }}">{{ project.status }}</span></td>
+    <td>{{ project.target_date[:10] if project.target_date else '-' }}</td>
+    <td>{{ project.done_count|default(0) }}/{{ project.task_count|default(0) }}</td>
+    <td>{{ project.goal or '-' }}</td>
+    <td colspan="2">
+        {% if project.people %}
+        <span class="people-list">{{ project.people | join(', ') }}</span>
+        {% else %}
+        -
+        {% endif %}
+    </td>
+    <td class="actions">
+        <button class="btn btn-secondary btn-sm"
+                hx-get="/projects/{{ project.id }}/edit"
+                hx-target="#project-{{ project.id }}"
+                hx-swap="outerHTML"
+                title="Edit">Edit</button>
+        <button class="btn btn-danger btn-sm"
+                hx-delete="/projects/{{ project.id }}"
+                hx-target="#project-{{ project.id }}"
+                hx-swap="outerHTML"
+                hx-confirm="Delete this project?"
+                title="Delete">&#10005;</button>
+    </td>
+</tr>

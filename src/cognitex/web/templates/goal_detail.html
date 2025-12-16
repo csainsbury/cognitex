@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+
+{% block title %}{{ goal.title }} - Cognitex{% endblock %}
+
+{% block content %}
+<div style="margin-bottom: 1rem;">
+    <a href="/goals" class="link">&larr; Back to Goals</a>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h1>{{ goal.title }}</h1>
+        <div>
+            {% if goal.timeframe %}
+            <span class="badge timeframe-{{ goal.timeframe }}">{{ goal.timeframe }}</span>
+            {% endif %}
+            <span class="badge badge-{{ goal.status }}">{{ goal.status }}</span>
+        </div>
+    </div>
+
+    {% if goal.description %}
+    <p style="color: #666; margin-bottom: 1rem;">{{ goal.description }}</p>
+    {% endif %}
+</div>
+
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+    <div class="card">
+        <div class="card-header">
+            <h2>Projects ({{ projects|length }})</h2>
+            <a href="/projects" class="link">View all</a>
+        </div>
+
+        {% if projects %}
+        <table>
+            <tr>
+                <th>Project</th>
+                <th>Status</th>
+                <th>Progress</th>
+            </tr>
+            {% for project in projects %}
+            <tr>
+                <td><a href="/projects?project={{ project.id }}" class="link">{{ project.title }}</a></td>
+                <td><span class="badge badge-{{ project.status }}">{{ project.status }}</span></td>
+                <td>{{ project.done_count|default(0) }}/{{ project.task_count|default(0) }} tasks</td>
+            </tr>
+            {% endfor %}
+        </table>
+        {% else %}
+        <p class="empty">No projects linked to this goal</p>
+        {% endif %}
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <h2>Direct Tasks ({{ tasks|length }})</h2>
+            <a href="/tasks" class="link">View all</a>
+        </div>
+
+        {% if tasks %}
+        <table>
+            <tr>
+                <th>Task</th>
+                <th>Priority</th>
+                <th>Status</th>
+            </tr>
+            {% for task in tasks %}
+            <tr>
+                <td>{{ task.title }}</td>
+                <td><span class="priority-{{ task.priority }}">{{ task.priority }}</span></td>
+                <td><span class="badge badge-{{ task.status }}">{{ task.status }}</span></td>
+            </tr>
+            {% endfor %}
+        </table>
+        {% else %}
+        <p class="empty">No tasks directly linked to this goal</p>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

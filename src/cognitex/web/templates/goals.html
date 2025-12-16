@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block title %}Goals - Cognitex{% endblock %}
+
+{% block content %}
+<h1>Goals</h1>
+
+<div class="filters">
+    <label>Status:</label>
+    <select onchange="window.location.href='/goals?status=' + this.value + '{% if current_timeframe %}&timeframe={{ current_timeframe }}{% endif %}'">
+        <option value="">All</option>
+        <option value="active" {% if current_status == "active" %}selected{% endif %}>Active</option>
+        <option value="achieved" {% if current_status == "achieved" %}selected{% endif %}>Achieved</option>
+        <option value="abandoned" {% if current_status == "abandoned" %}selected{% endif %}>Abandoned</option>
+    </select>
+
+    <label style="margin-left: 1rem;">Timeframe:</label>
+    <select onchange="window.location.href='/goals?timeframe=' + this.value + '{% if current_status %}&status={{ current_status }}{% endif %}'">
+        <option value="">All</option>
+        <option value="quarterly" {% if current_timeframe == "quarterly" %}selected{% endif %}>Quarterly</option>
+        <option value="yearly" {% if current_timeframe == "yearly" %}selected{% endif %}>Yearly</option>
+        <option value="multi_year" {% if current_timeframe == "multi_year" %}selected{% endif %}>Multi-year</option>
+    </select>
+
+    <button class="btn btn-primary" style="margin-left: auto;"
+            hx-get="/goals/new"
+            hx-target="#new-goal-row"
+            hx-swap="outerHTML">
+        + New Goal
+    </button>
+</div>
+
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th style="width: 30%;">Title</th>
+                <th>Timeframe</th>
+                <th>Status</th>
+                <th>Projects</th>
+                <th colspan="2">People</th>
+                <th style="width: 100px;">Actions</th>
+            </tr>
+        </thead>
+        <tbody id="goal-list">
+            <tr id="new-goal-row"></tr>
+            {% for goal in goals %}
+            {% include "partials/goal_row.html" %}
+            {% endfor %}
+        </tbody>
+    </table>
+
+    {% if not goals %}
+    <p class="empty">No goals found</p>
+    {% endif %}
+</div>
+
+<div class="shortcuts">
+    Click title for details | Ctrl+click to select multiple people | CLI: <code>cognitex goal-parse "description..."</code>
+</div>
+{% endblock %}

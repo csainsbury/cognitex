@@ -745,7 +745,7 @@ async def get_task(
     // Other relationships
     OPTIONAL MATCH (t)-[:PART_OF]->(p:Project)
     OPTIONAL MATCH (t)-[:CONTRIBUTES_TO]->(g:Goal)
-    OPTIONAL MATCH (t)-[assigned:ASSIGNED_TO]->(assignee:Person)
+    OPTIONAL MATCH (t)-[assigned:ASSIGNED_TO|INVOLVES]->(assignee:Person)
     OPTIONAL MATCH (t)-[:REFERENCES]->(d:Document)
     OPTIONAL MATCH (t)-[:INVOLVES_CODE]->(cf:CodeFile)
     OPTIONAL MATCH (cf)-[:CONTAINED_IN]->(repo:Repository)
@@ -789,13 +789,19 @@ async def get_task(
     codefiles = [c for c in record["codefiles"] if c.get("id")]
     blocked_by = [b for b in record["blocked_by"] if b.get("id")]
 
+    # Create display-friendly people list (names or emails)
+    people_display = [p.get("name") or p.get("email") for p in people]
+    people_emails = [p.get("email") for p in people if p.get("email")]
+
     return {
         **task_data,
         "source_email": record["source_email"] if record["source_email"] and record["source_email"].get("gmail_id") else None,
         "source_event": record["source_event"] if record["source_event"] and record["source_event"].get("gcal_id") else None,
         "projects": projects,
         "goals": goals,
-        "people": people,
+        "people": people_display,  # Display-friendly names/emails
+        "people_emails": people_emails,  # For form selection
+        "people_full": people,  # Full info including roles
         "documents": documents,
         "codefiles": codefiles,
         "blocked_by": blocked_by,
@@ -1346,7 +1352,8 @@ async def get_project(
     RETURN p,
            collect(DISTINCT g.id) as goal_ids,
            owner.email as owner_email,
-           collect(DISTINCT stakeholder.email) as stakeholders,
+           owner.name as owner_name,
+           collect(DISTINCT {email: stakeholder.email, name: stakeholder.name}) as stakeholders,
            collect(DISTINCT r.full_name) as repositories,
            collect(DISTINCT d.drive_id) as document_ids,
            collect(DISTINCT related.id) as related_project_ids,
@@ -1357,11 +1364,29 @@ async def get_project(
     record = await result.single()
     if not record:
         return None
+
+    # Combine owner and stakeholders for display
+    owner_email = record["owner_email"]
+    owner_name = record.get("owner_name")
+    stakeholders = [s for s in record["stakeholders"] if s.get("email")]
+    all_people = ([{"email": owner_email, "name": owner_name}] if owner_email else []) + stakeholders
+    # Deduplicate by email while preserving order
+    seen = set()
+    people_full = []
+    for p in all_people:
+        if p["email"] and p["email"] not in seen:
+            seen.add(p["email"])
+            people_full.append(p)
+    people_emails = [p["email"] for p in people_full]
+
     return {
         **dict(record["p"]),
         "goal_ids": [g for g in record["goal_ids"] if g],
-        "owner_email": record["owner_email"],
-        "stakeholders": [s for s in record["stakeholders"] if s],
+        "owner_email": owner_email,
+        "stakeholders": [s["email"] for s in stakeholders],
+        "people": people_emails,  # For display
+        "people_emails": people_emails,  # For form selection
+        "people_full": people_full,  # For people picker (with names)
         "repositories": [r for r in record["repositories"] if r],
         "document_ids": [d for d in record["document_ids"] if d],
         "related_project_ids": [r for r in record["related_project_ids"] if r],
@@ -1628,24 +1653,50 @@ async def get_goal(
     OPTIONAL MATCH (t:Task)-[:CONTRIBUTES_TO]->(g)
     OPTIONAL MATCH (g)-[:PARENT_OF]->(child:Goal)
     OPTIONAL MATCH (parent:Goal)-[:PARENT_OF]->(g)
+    OPTIONAL MATCH (g)-[:OWNED_BY]->(owner:Person)
+    OPTIONAL MATCH (g)<-[:STAKEHOLDER]-(stakeholder:Person)
     RETURN g,
            collect(DISTINCT p.id) as project_ids,
            count(DISTINCT t) as task_count,
            sum(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) as completed_tasks,
            collect(DISTINCT child.id) as child_goal_ids,
-           parent.id as parent_goal_id
+           parent.id as parent_goal_id,
+           owner.email as owner_email,
+           owner.name as owner_name,
+           collect(DISTINCT {email: stakeholder.email, name: stakeholder.name}) as stakeholders
     """
     result = await session.run(query, goal_id=goal_id)
     record = await result.single()
     if not record:
         return None
+
+    # Combine owner and stakeholders for display
+    owner_email = record["owner_email"]
+    owner_name = record.get("owner_name")
+    stakeholders = [s for s in record["stakeholders"] if s.get("email")]
+    all_people = ([{"email": owner_email, "name": owner_name}] if owner_email else []) + stakeholders
+    # Deduplicate by email while preserving order
+    seen = set()
+    people_full = []
+    for p in all_people:
+        if p["email"] and p["email"] not in seen:
+            seen.add(p["email"])
+            people_full.append(p)
+    people_emails = [p["email"] for p in people_full]
+
     return {
         **dict(record["g"]),
         "project_ids": [p for p in record["project_ids"] if p],
+        "project_count": len([p for p in record["project_ids"] if p]),
         "task_count": record["task_count"],
         "completed_tasks": record["completed_tasks"],
         "child_goal_ids": [c for c in record["child_goal_ids"] if c],
         "parent_goal_id": record["parent_goal_id"],
+        "owner_email": owner_email,
+        "stakeholders": [s["email"] for s in stakeholders],
+        "people": people_emails,  # For display
+        "people_emails": people_emails,  # For form selection
+        "people_full": people_full,  # For people picker (with names)
     }
 
 

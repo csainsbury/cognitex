@@ -1,0 +1,34 @@
+<tr id="new-project-form" class="new-form">
+    <td>
+        <form id="project-create-form" hx-post="/projects" hx-target="#new-project-form" hx-swap="outerHTML" hx-include="[form='project-create-form']">
+            <input type="text" name="title" placeholder="Project title" required autofocus>
+            <textarea name="description" placeholder="Description (optional)"></textarea>
+        </form>
+    </td>
+    <td>
+        <select name="status" form="project-create-form">
+            <option value="planning" selected>planning</option>
+            <option value="active">active</option>
+        </select>
+    </td>
+    <td>
+        <input type="date" name="target_date" form="project-create-form">
+    </td>
+    <td>-</td>
+    <td>
+        <select name="goal_id" form="project-create-form">
+            <option value="">None</option>
+            {% for goal in goals %}
+            <option value="{{ goal.id }}">{{ goal.title }}</option>
+            {% endfor %}
+        </select>
+    </td>
+    <td colspan="2">
+        <div class="people-picker" data-form-id="project-create-form" data-initial="[]"></div>
+    </td>
+    <td class="actions">
+        <button type="submit" form="project-create-form" class="btn btn-primary btn-sm">Add</button>
+        <button type="button" class="btn btn-secondary btn-sm"
+                hx-get="/projects/cancel-new" hx-target="#new-project-form" hx-swap="outerHTML">Cancel</button>
+    </td>
+</tr>

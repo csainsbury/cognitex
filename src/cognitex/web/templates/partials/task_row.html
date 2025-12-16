@@ -1,0 +1,39 @@
+<tr id="task-{{ task.id }}">
+    <td>
+        <strong>{{ task.title }}</strong>
+        {% if task.description %}
+        <div class="desc-preview">{{ task.description }}</div>
+        {% endif %}
+    </td>
+    <td><span class="priority-{{ task.priority }}">{{ task.priority }}</span></td>
+    <td><span class="badge badge-{{ task.status }}">{{ task.status }}</span></td>
+    <td>{{ task.due[:10] if task.due else '-' }}</td>
+    <td>{{ task.project or '-' }}</td>
+    <td colspan="2">
+        {% if task.people %}
+        <span class="people-list">{{ task.people | join(', ') }}</span>
+        {% else %}
+        -
+        {% endif %}
+    </td>
+    <td class="actions">
+        {% if task.status != 'done' %}
+        <button class="btn btn-success btn-sm"
+                hx-post="/tasks/{{ task.id }}/complete"
+                hx-target="#task-{{ task.id }}"
+                hx-swap="outerHTML"
+                title="Complete">&#10003;</button>
+        {% endif %}
+        <button class="btn btn-secondary btn-sm"
+                hx-get="/tasks/{{ task.id }}/edit"
+                hx-target="#task-{{ task.id }}"
+                hx-swap="outerHTML"
+                title="Edit">Edit</button>
+        <button class="btn btn-danger btn-sm"
+                hx-delete="/tasks/{{ task.id }}"
+                hx-target="#task-{{ task.id }}"
+                hx-swap="outerHTML"
+                hx-confirm="Delete this task?"
+                title="Delete">&#10005;</button>
+    </td>
+</tr>

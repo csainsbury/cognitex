@@ -1,0 +1,37 @@
+<tr id="new-goal-form" class="new-form">
+    <td>
+        <form id="goal-create-form" hx-post="/goals" hx-target="#new-goal-form" hx-swap="outerHTML" hx-include="[form='goal-create-form']">
+            <input type="text" name="title" placeholder="Goal title" required autofocus>
+            <textarea name="description" placeholder="Description (optional)"></textarea>
+        </form>
+    </td>
+    <td>
+        <select name="timeframe" form="goal-create-form">
+            <option value="">None</option>
+            <option value="quarterly">quarterly</option>
+            <option value="yearly" selected>yearly</option>
+            <option value="multi_year">multi_year</option>
+        </select>
+    </td>
+    <td>
+        <select name="status" form="goal-create-form">
+            <option value="active" selected>active</option>
+        </select>
+    </td>
+    <td>
+        <select name="parent_goal_id" form="goal-create-form">
+            <option value="">No parent</option>
+            {% for g in goals %}
+            <option value="{{ g.id }}">{{ g.title }}</option>
+            {% endfor %}
+        </select>
+    </td>
+    <td colspan="2">
+        <div class="people-picker" data-form-id="goal-create-form" data-initial="[]"></div>
+    </td>
+    <td class="actions">
+        <button type="submit" form="goal-create-form" class="btn btn-primary btn-sm">Add</button>
+        <button type="button" class="btn btn-secondary btn-sm"
+                hx-get="/goals/cancel-new" hx-target="#new-goal-form" hx-swap="outerHTML">Cancel</button>
+    </td>
+</tr>
