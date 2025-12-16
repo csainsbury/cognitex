@@ -697,6 +697,58 @@ async def link_task_blocked_by(
     return record is not None
 
 
+async def get_tasks_by_email_thread(
+    session: AsyncSession,
+    thread_id: str,
+) -> list[dict]:
+    """
+    Find all pending tasks that originated from emails in a given thread.
+
+    Args:
+        thread_id: Gmail thread ID
+
+    Returns:
+        List of tasks linked to emails in this thread
+    """
+    query = """
+    MATCH (e:Email {thread_id: $thread_id})<-[:ORIGINATED_FROM]-(t:Task)
+    WHERE t.status IN ['pending', 'in_progress']
+    RETURN t.id as id, t.title as title, t.status as status,
+           t.priority as priority, t.description as description,
+           e.gmail_id as source_email_id, e.subject as source_subject
+    ORDER BY t.created_at DESC
+    """
+    result = await session.run(query, thread_id=thread_id)
+    records = await result.data()
+    return records
+
+
+async def get_tasks_by_source_email(
+    session: AsyncSession,
+    gmail_id: str,
+) -> list[dict]:
+    """
+    Find all pending tasks that originated from a specific email.
+
+    Args:
+        gmail_id: Gmail message ID
+
+    Returns:
+        List of tasks linked to this email
+    """
+    query = """
+    MATCH (t:Task)
+    WHERE t.source_type = 'email' AND t.source_id = $gmail_id
+      AND t.status IN ['pending', 'in_progress']
+    RETURN t.id as id, t.title as title, t.status as status,
+           t.priority as priority, t.description as description
+    ORDER BY t.created_at DESC
+    """
+    result = await session.run(query, gmail_id=gmail_id)
+    records = await result.data()
+    return records
+
+
 async def get_actionable_emails(
     session: AsyncSession,
     limit: int = 50,

@@ -263,6 +263,17 @@ class TriggerSystem:
                     logger.info("No new emails found in history")
                     return  # No new emails, nothing to notify about
 
+                # Check if any tasks were auto-completed from sent emails
+                auto_completed = sync_result.get("auto_completed_tasks", [])
+                if auto_completed:
+                    logger.info("Tasks auto-completed from sent emails", task_ids=auto_completed)
+                    await self._send_notification(
+                        f"**Tasks Auto-Completed**\n\n"
+                        f"I detected that you replied to emails related to {len(auto_completed)} task(s). "
+                        f"These tasks have been automatically marked as done.",
+                        urgency="low"
+                    )
+
                 # We have new emails - prepare summary for agent
                 emails = sync_result.get("emails", [])
                 email_count = len(emails)

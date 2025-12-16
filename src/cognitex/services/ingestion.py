@@ -13,6 +13,7 @@ from cognitex.db.graph_schema import (
     create_email,
     create_event,
     create_person,
+    get_tasks_by_email_thread,
     link_document_owner,
     link_document_shared_with,
     link_email_recipient,
@@ -20,6 +21,7 @@ from cognitex.db.graph_schema import (
     link_event_attendee,
     link_event_organizer,
     mark_document_indexed,
+    update_task_status,
 )
 from cognitex.services.gmail import GmailService, fetch_all_messages, build_historical_query
 
@@ -95,6 +97,201 @@ async def ingest_email_to_graph(email_data: dict) -> None:
             gmail_id=email_data["gmail_id"],
             subject=email_data["subject"][:50],
         )
+
+
+async def get_user_email() -> str | None:
+    """Get the authenticated user's email address."""
+    try:
+        gmail = GmailService()
+        profile = gmail.get_profile()
+        return profile.get("emailAddress", "").lower()
+    except Exception as e:
+        logger.warning("Failed to get user email", error=str(e))
+        return None
+
+
+async def check_sent_email_for_task_completion(
+    email_data: dict,
+    user_email: str,
+) -> list[dict]:
+    """
+    Check if a sent email might complete any pending tasks.
+
+    When the user sends a reply in a thread that has associated tasks,
+    analyze whether the reply resolves those tasks.
+
+    Args:
+        email_data: Email metadata dict
+        user_email: The authenticated user's email address
+
+    Returns:
+        List of tasks that were identified for potential completion
+    """
+    # Check if this email was sent by the user
+    sender_email = email_data.get("sender_email", "").lower()
+    if sender_email != user_email:
+        return []
+
+    thread_id = email_data.get("thread_id")
+    if not thread_id:
+        return []
+
+    # Find tasks linked to this email thread
+    tasks_to_check = []
+    async for session in get_neo4j_session():
+        tasks_to_check = await get_tasks_by_email_thread(session, thread_id)
+        break
+
+    if not tasks_to_check:
+        return []
+
+    logger.info(
+        "Found tasks linked to sent email thread",
+        thread_id=thread_id,
+        task_count=len(tasks_to_check),
+        subject=email_data.get("subject", "")[:50],
+    )
+
+    return tasks_to_check
+
+
+async def auto_complete_tasks_from_reply(
+    email_data: dict,
+    tasks: list[dict],
+) -> list[str]:
+    """
+    Use LLM to determine if a sent email completes any tasks.
+
+    Args:
+        email_data: The sent email metadata
+        tasks: List of tasks potentially completed by this email
+
+    Returns:
+        List of task IDs that were marked as complete
+    """
+    from cognitex.services.llm import get_llm_service
+
+    if not tasks:
+        return []
+
+    llm = get_llm_service()
+
+    # Build context for LLM
+    task_descriptions = "\n".join([
+        f"- Task #{i+1}: {t['title']} (status: {t['status']})"
+        + (f"\n  Description: {t['description']}" if t.get('description') else "")
+        + (f"\n  Original email subject: {t.get('source_subject', 'N/A')}")
+        for i, t in enumerate(tasks)
+    ])
+
+    prompt = f"""Analyze whether the following sent email reply resolves any of the listed tasks.
+
+SENT EMAIL:
+Subject: {email_data.get('subject', '(no subject)')}
+To: {', '.join([e for _, e in email_data.get('to', [])])}
+Snippet: {email_data.get('snippet', '')}
+
+PENDING TASKS FROM THIS EMAIL THREAD:
+{task_descriptions}
+
+For each task, determine if the sent email effectively completes or resolves it.
+Consider:
+- Did the user respond to a request? (e.g., confirming a meeting time, answering a question)
+- Did the user take the action implied by the task?
+- A simple acknowledgment or reply usually completes "respond to..." tasks
+
+Respond with a JSON object:
+{{"completed_tasks": [1, 2], "reasoning": "Task 1 was to respond about meeting time, user confirmed 2:30pm..."}}
+
+Use task numbers (1-indexed) from the list above. Return empty array if no tasks are completed."""
+
+    try:
+        response = await llm.generate(prompt)
+
+        # Parse JSON response
+        import json
+        import re
+
+        # Extract JSON from response
+        json_match = re.search(r'\{.*\}', response, re.DOTALL)
+        if not json_match:
+            logger.warning("No JSON found in LLM response", response=response[:200])
+            return []
+
+        result = json.loads(json_match.group())
+        completed_indices = result.get("completed_tasks", [])
+        reasoning = result.get("reasoning", "")
+
+        if not completed_indices:
+            logger.info("LLM determined no tasks completed", reasoning=reasoning[:200])
+            return []
+
+        # Mark tasks as complete
+        completed_ids = []
+        async for session in get_neo4j_session():
+            for idx in completed_indices:
+                if 1 <= idx <= len(tasks):
+                    task = tasks[idx - 1]
+                    task_id = task["id"]
+                    await update_task_status(session, task_id, "done")
+                    completed_ids.append(task_id)
+                    logger.info(
+                        "Auto-completed task from email reply",
+                        task_id=task_id,
+                        task_title=task["title"],
+                        reasoning=reasoning[:200],
+                    )
+            break
+
+        return completed_ids
+
+    except Exception as e:
+        logger.warning("Failed to analyze email for task completion", error=str(e))
+        return []
+
+
+async def process_sent_emails(emails: list[dict], user_email: str) -> dict:
+    """
+    Process sent emails to check for task auto-completion.
+
+    Args:
+        emails: List of email metadata dicts
+        user_email: The authenticated user's email
+
+    Returns:
+        Dict with processing stats
+    """
+    stats = {
+        "sent_emails_found": 0,
+        "tasks_checked": 0,
+        "tasks_completed": [],
+    }
+
+    for email_data in emails:
+        # Check if sent by user
+        sender = email_data.get("sender_email", "").lower()
+        if sender != user_email:
+            continue
+
+        stats["sent_emails_found"] += 1
+
+        # Find related tasks
+        tasks = await check_sent_email_for_task_completion(email_data, user_email)
+        stats["tasks_checked"] += len(tasks)
+
+        if tasks:
+            # Use LLM to determine completion
+            completed = await auto_complete_tasks_from_reply(email_data, tasks)
+            stats["tasks_completed"].extend(completed)
+
+    if stats["tasks_completed"]:
+        logger.info(
+            "Auto-completed tasks from sent emails",
+            completed_count=len(stats["tasks_completed"]),
+            task_ids=stats["tasks_completed"],
+        )
+
+    return stats
 
 
 async def ingest_email_batch(emails: list[dict]) -> dict:
@@ -320,7 +517,15 @@ async def run_incremental_sync(history_id: str) -> dict:
     stats["history_id"] = new_history_id
     stats["emails"] = email_data  # Include email data for agent processing
 
-    logger.info("Incremental sync complete", **{k: v for k, v in stats.items() if k != "emails"})
+    # Check for task auto-completion from sent emails
+    user_email = await get_user_email()
+    if user_email:
+        sent_stats = await process_sent_emails(email_data, user_email)
+        stats["sent_email_stats"] = sent_stats
+        if sent_stats["tasks_completed"]:
+            stats["auto_completed_tasks"] = sent_stats["tasks_completed"]
+
+    logger.info("Incremental sync complete", **{k: v for k, v in stats.items() if k not in ["emails", "sent_email_stats"]})
 
     return stats
 

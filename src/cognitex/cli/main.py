@@ -3001,5 +3001,104 @@ def agent_status() -> None:
     asyncio.run(check_memory())
 
 
+@app.command("check-replies")
+def check_replies(
+    days: int = typer.Option(1, "--days", "-d", help="Number of days to look back"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be completed without doing it"),
+) -> None:
+    """Check recent sent emails for task auto-completion.
+
+    Scans your recent sent emails to find replies to email threads that have
+    associated tasks. Uses AI to determine if your reply completes the task.
+    """
+    async def check_for_completions():
+        from datetime import datetime, timedelta
+        from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
+        from cognitex.services.gmail import GmailService, extract_email_metadata
+        from cognitex.services.ingestion import (
+            get_user_email,
+            check_sent_email_for_task_completion,
+            auto_complete_tasks_from_reply,
+        )
+        from cognitex.db.graph_schema import get_tasks_by_email_thread
+
+        await init_neo4j()
+
+        try:
+            # Get user's email address
+            user_email = await get_user_email()
+            if not user_email:
+                console.print("[red]Could not determine your email address.[/red]")
+                return
+
+            console.print(f"[dim]Checking sent emails for: {user_email}[/dim]")
+
+            # Fetch recent sent emails
+            gmail = GmailService()
+            cutoff = datetime.now() - timedelta(days=days)
+            query = f"from:me after:{cutoff.strftime('%Y/%m/%d')}"
+
+            console.print(f"[dim]Fetching sent emails from last {days} day(s)...[/dim]")
+
+            result = gmail.list_messages(query=query, max_results=50)
+            messages = result.get("messages", [])
+
+            if not messages:
+                console.print("[yellow]No sent emails found in the specified period.[/yellow]")
+                return
+
+            console.print(f"Found {len(messages)} sent email(s)")
+
+            # Get full metadata for messages
+            full_messages = gmail.get_message_batch([m["id"] for m in messages], format="metadata")
+            emails = [extract_email_metadata(m) for m in full_messages]
+
+            # Check each sent email for potential task completion
+            tasks_found = 0
+            tasks_completed = []
+
+            for email_data in emails:
+                # Verify it's from the user
+                sender = email_data.get("sender_email", "").lower()
+                if sender != user_email:
+                    continue
+
+                # Check for related tasks
+                tasks = await check_sent_email_for_task_completion(email_data, user_email)
+
+                if tasks:
+                    tasks_found += len(tasks)
+                    subject = email_data.get("subject", "(no subject)")[:50]
+                    console.print(f"\n[cyan]Reply:[/cyan] {subject}")
+                    console.print(f"  [dim]Thread has {len(tasks)} pending task(s)[/dim]")
+
+                    for t in tasks:
+                        console.print(f"    • {t['title']}")
+
+                    if not dry_run:
+                        # Use LLM to determine completion
+                        completed = await auto_complete_tasks_from_reply(email_data, tasks)
+                        tasks_completed.extend(completed)
+                        if completed:
+                            console.print(f"  [green]✓ Auto-completed {len(completed)} task(s)[/green]")
+                    else:
+                        console.print(f"  [yellow](dry run - would analyze for completion)[/yellow]")
+
+            # Summary
+            console.print(f"\n[bold]Summary:[/bold]")
+            console.print(f"  Sent emails checked: {len(emails)}")
+            console.print(f"  Tasks found in threads: {tasks_found}")
+
+            if not dry_run:
+                console.print(f"  Tasks auto-completed: {len(tasks_completed)}")
+            else:
+                console.print(f"  [yellow]Dry run - no tasks were modified[/yellow]")
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(check_for_completions())
+
+
 if __name__ == "__main__":
     app()
