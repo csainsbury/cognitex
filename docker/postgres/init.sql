@@ -167,3 +167,23 @@ CREATE INDEX IF NOT EXISTS idx_agent_memory_importance ON agent_memory(importanc
 -- Vector similarity search index for memory retrieval
 CREATE INDEX IF NOT EXISTS idx_agent_memory_embedding
     ON agent_memory USING hnsw (embedding vector_cosine_ops);
+
+-- Code content store for GitHub repository files
+CREATE TABLE IF NOT EXISTS code_content (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    file_id VARCHAR(500) NOT NULL UNIQUE,  -- repo_id:path format
+    repo_name VARCHAR(255) NOT NULL,       -- owner/repo format
+    path VARCHAR(500) NOT NULL,            -- File path within repo
+    content TEXT NOT NULL,
+    content_hash VARCHAR(64) NOT NULL,
+    char_count INTEGER NOT NULL,
+    indexed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_code_content_file_id ON code_content(file_id);
+CREATE INDEX IF NOT EXISTS idx_code_content_repo ON code_content(repo_name);
+CREATE INDEX IF NOT EXISTS idx_code_content_path ON code_content(path);
+
+-- Full-text search index on code content
+CREATE INDEX IF NOT EXISTS idx_code_content_fts ON code_content USING gin(to_tsvector('english', content));

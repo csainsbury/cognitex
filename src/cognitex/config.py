@@ -65,6 +65,12 @@ class Settings(BaseSettings):
         description="Path to store OAuth tokens",
     )
 
+    # GitHub API
+    github_token: SecretStr = Field(
+        default=SecretStr(""),
+        description="GitHub personal access token for repo access",
+    )
+
     # Application behavior
     max_notifications_per_hour: int = Field(
         default=3,

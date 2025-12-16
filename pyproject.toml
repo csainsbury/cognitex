@@ -33,6 +33,9 @@ dependencies = [
     # Discord
     "discord.py>=2.4.0",
 
+    # GitHub
+    "PyGithub>=2.5.0",
+
     # CLI
     "textual>=0.89.0",
     "rich>=13.9.0",

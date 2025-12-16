@@ -3100,5 +3100,267 @@ def check_replies(
     asyncio.run(check_for_completions())
 
 
+# ============================================================================
+# GitHub Integration
+# ============================================================================
+
+
+@app.command("github-repos")
+def github_repos(
+    include_forks: bool = typer.Option(False, "--forks", "-f", help="Include forked repositories"),
+    limit: int = typer.Option(50, "--limit", "-l", help="Maximum repos to list"),
+) -> None:
+    """List your GitHub repositories."""
+    from cognitex.services.github import get_github_service
+
+    try:
+        github = get_github_service()
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        console.print("[dim]Add GITHUB_TOKEN to your .env file[/dim]")
+        return
+
+    user = github.get_user()
+    console.print(f"[dim]Authenticated as: {user['login']} ({user['name'] or 'N/A'})[/dim]\n")
+
+    repos = github.list_repos(include_forks=include_forks, limit=limit)
+
+    if not repos:
+        console.print("[yellow]No repositories found.[/yellow]")
+        return
+
+    table = Table(title=f"GitHub Repositories ({len(repos)})")
+    table.add_column("Name", style="cyan", width=30)
+    table.add_column("Language", style="green", width=12)
+    table.add_column("Updated", style="yellow", width=12)
+    table.add_column("Private", style="dim", width=7)
+
+    for repo in repos:
+        updated = repo["pushed_at"][:10] if repo["pushed_at"] else "-"
+        table.add_row(
+            repo["full_name"],
+            repo["language"] or "-",
+            updated,
+            "Yes" if repo["is_private"] else "No",
+        )
+
+    console.print(table)
+    console.print("\n[dim]Sync a repo: cognitex github-sync owner/repo[/dim]")
+
+
+@app.command("github-sync")
+def github_sync(
+    repo_name: str = typer.Argument(..., help="Repository to sync (e.g., 'owner/repo')"),
+    index_code: bool = typer.Option(True, "--index/--no-index", help="Index code files for semantic search"),
+    link_project: str = typer.Option(None, "--project", "-p", help="Link to existing project ID"),
+) -> None:
+    """Sync a GitHub repository to the graph and optionally index code."""
+    async def sync_repo():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
+        from cognitex.db.postgres import init_postgres, close_postgres, get_session
+        from cognitex.services.github import get_github_service
+        from cognitex.db.graph_schema import (
+            create_repository,
+            create_codefile,
+            link_project_to_repository,
+            get_repository,
+        )
+
+        await init_neo4j()
+
+        try:
+            github = get_github_service()
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            return
+
+        # Get repo info
+        console.print(f"[dim]Fetching repository info for {repo_name}...[/dim]")
+        repo = github.get_repo(repo_name)
+
+        if not repo:
+            console.print(f"[red]Repository not found: {repo_name}[/red]")
+            return
+
+        console.print(f"[green]Found:[/green] {repo['full_name']}")
+        console.print(f"  Language: {repo['language'] or 'N/A'}")
+        console.print(f"  Description: {(repo['description'] or 'No description')[:60]}")
+
+        # Create repository node
+        async for session in get_neo4j_session():
+            await create_repository(
+                session,
+                repo_id=repo["id"],
+                full_name=repo["full_name"],
+                name=repo["name"],
+                owner=repo["owner"],
+                description=repo["description"],
+                url=repo["url"],
+                default_branch=repo["default_branch"],
+                language=repo["language"],
+                is_private=repo["is_private"],
+            )
+            console.print("[green]✓[/green] Repository node created")
+
+            # Link to project if specified
+            if link_project:
+                success = await link_project_to_repository(session, link_project, repo["id"])
+                if success:
+                    console.print(f"[green]✓[/green] Linked to project: {link_project}")
+                else:
+                    console.print(f"[yellow]Warning: Could not link to project {link_project}[/yellow]")
+            break
+
+        # Index code files
+        if index_code:
+            console.print("\n[dim]Scanning repository for code files...[/dim]")
+
+            files = list(github.get_indexable_files(repo_name))
+            console.print(f"Found {len(files)} files to index")
+
+            if files:
+                await init_postgres()
+
+                indexed_count = 0
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    BarColumn(),
+                    TaskProgressColumn(),
+                    console=console,
+                ) as progress:
+                    task = progress.add_task("Indexing files...", total=len(files))
+
+                    for file_info in files:
+                        progress.update(task, description=f"Indexing {file_info['name'][:30]}...")
+
+                        # Get file content
+                        content = github.get_file_content(repo_name, file_info["path"])
+
+                        if content:
+                            # Create CodeFile node
+                            async for session in get_neo4j_session():
+                                file_id = f"{repo['id']}:{file_info['path']}"
+                                await create_codefile(
+                                    session,
+                                    codefile_id=file_id,
+                                    path=file_info["path"],
+                                    name=file_info["name"],
+                                    repository_id=repo["id"],
+                                    language=_detect_language(file_info["name"]),
+                                    size_bytes=file_info.get("size"),
+                                )
+                                break
+
+                            # Generate embedding for semantic search
+                            try:
+                                async for pg_session in get_session():
+                                    from cognitex.services.ingestion import index_code_content
+                                    await index_code_content(
+                                        pg_session,
+                                        file_id=file_id,
+                                        path=file_info["path"],
+                                        content=content,
+                                        repo_name=repo_name,
+                                    )
+                                    break
+                                indexed_count += 1
+                            except Exception as e:
+                                logger.debug("Failed to index file", path=file_info["path"], error=str(e))
+
+                        progress.advance(task)
+
+                console.print(f"[green]✓[/green] Indexed {indexed_count} files with embeddings")
+
+                await close_postgres()
+
+        await close_neo4j()
+
+        console.print(f"\n[bold green]Repository synced successfully![/bold green]")
+
+    asyncio.run(sync_repo())
+
+
+@app.command("github-search")
+def github_search(
+    query: str = typer.Argument(..., help="Search query for code"),
+    repo: str = typer.Option(None, "--repo", "-r", help="Limit search to specific repo"),
+    limit: int = typer.Option(10, "--limit", "-l", help="Maximum results"),
+) -> None:
+    """Search indexed code using semantic similarity."""
+    async def search_code():
+        from cognitex.db.postgres import init_postgres, close_postgres, get_session
+        from cognitex.services.ingestion import search_code_semantic
+
+        await init_postgres()
+
+        try:
+            async for session in get_session():
+                results = await search_code_semantic(session, query, repo_filter=repo, limit=limit)
+                break
+
+            if not results:
+                console.print("[yellow]No matching code found.[/yellow]")
+                return
+
+            console.print(f"[bold]Code search results for:[/bold] {query}\n")
+
+            for i, result in enumerate(results, 1):
+                similarity = result.get("similarity", 0)
+                color = "green" if similarity > 0.7 else "yellow" if similarity > 0.5 else "dim"
+
+                console.print(f"[{color}]{i}. {result['repo_name']}[/{color}]")
+                console.print(f"   [cyan]{result['path']}[/cyan]")
+                console.print(f"   Similarity: {similarity:.2%}")
+
+                # Show preview
+                preview = result.get("content_preview", "")[:200]
+                if preview:
+                    console.print(f"   [dim]{preview}...[/dim]")
+                console.print()
+
+        finally:
+            await close_postgres()
+
+    asyncio.run(search_code())
+
+
+def _detect_language(filename: str) -> str | None:
+    """Detect programming language from filename."""
+    ext_map = {
+        ".py": "Python",
+        ".js": "JavaScript",
+        ".ts": "TypeScript",
+        ".tsx": "TypeScript",
+        ".jsx": "JavaScript",
+        ".go": "Go",
+        ".rs": "Rust",
+        ".java": "Java",
+        ".kt": "Kotlin",
+        ".rb": "Ruby",
+        ".php": "PHP",
+        ".c": "C",
+        ".cpp": "C++",
+        ".h": "C",
+        ".hpp": "C++",
+        ".swift": "Swift",
+        ".scala": "Scala",
+        ".sql": "SQL",
+        ".sh": "Shell",
+        ".bash": "Shell",
+        ".yaml": "YAML",
+        ".yml": "YAML",
+        ".json": "JSON",
+        ".toml": "TOML",
+        ".md": "Markdown",
+        ".html": "HTML",
+        ".css": "CSS",
+        ".scss": "SCSS",
+    }
+    from pathlib import Path
+    ext = Path(filename).suffix.lower()
+    return ext_map.get(ext)
+
+
 if __name__ == "__main__":
     app()

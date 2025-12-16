@@ -1061,6 +1061,186 @@ async def run_priority_folder_indexing(
     return stats
 
 
+# ============================================================================
+# Code indexing (GitHub)
+# ============================================================================
+
+
+async def index_code_content(
+    pg_session: AsyncSession,
+    file_id: str,
+    path: str,
+    content: str,
+    repo_name: str,
+) -> int | None:
+    """
+    Store code file content and generate embedding for semantic search.
+
+    Args:
+        pg_session: PostgreSQL async session
+        file_id: Unique file identifier (repo_id:path)
+        path: File path within repository
+        content: File content
+        repo_name: Repository full name (owner/repo)
+
+    Returns:
+        Embedding ID if successful, None otherwise
+    """
+    from cognitex.services.llm import get_llm_service
+
+    # Calculate content hash
+    content_hash = hashlib.sha256(content.encode()).hexdigest()[:64]
+
+    # Check if content already indexed with same hash
+    check_query = text("""
+        SELECT content_hash FROM code_content WHERE file_id = :file_id
+    """)
+    result = await pg_session.execute(check_query, {"file_id": file_id})
+    existing = result.fetchone()
+
+    if existing and existing.content_hash == content_hash:
+        logger.debug("Code content unchanged, skipping", file_id=file_id)
+        return None
+
+    # Store content
+    upsert_query = text("""
+        INSERT INTO code_content (file_id, repo_name, path, content, content_hash, char_count)
+        VALUES (:file_id, :repo_name, :path, :content, :content_hash, :char_count)
+        ON CONFLICT (file_id) DO UPDATE SET
+            content = :content,
+            content_hash = :content_hash,
+            char_count = :char_count,
+            repo_name = :repo_name,
+            path = :path,
+            updated_at = NOW()
+    """)
+    await pg_session.execute(upsert_query, {
+        "file_id": file_id,
+        "repo_name": repo_name,
+        "path": path,
+        "content": content,
+        "content_hash": content_hash,
+        "char_count": len(content),
+    })
+
+    # Generate embedding (truncate content if too long)
+    llm = get_llm_service()
+
+    # Create a summary for embedding that includes path context
+    embedding_text = f"File: {path}\nRepository: {repo_name}\n\n{content[:7500]}"
+
+    try:
+        embedding = await llm.generate_embedding(embedding_text)
+
+        # Store embedding
+        embedding_query = text("""
+            INSERT INTO embeddings (entity_type, entity_id, content_hash, embedding)
+            VALUES ('code', :file_id, :content_hash, :embedding)
+            ON CONFLICT (entity_type, entity_id) DO UPDATE SET
+                content_hash = :content_hash,
+                embedding = :embedding,
+                created_at = NOW()
+            RETURNING id
+        """)
+        result = await pg_session.execute(embedding_query, {
+            "file_id": file_id,
+            "content_hash": content_hash,
+            "embedding": embedding,
+        })
+        row = result.fetchone()
+        embedding_id = row.id if row else None
+
+        await pg_session.commit()
+
+        logger.debug("Indexed code content", file_id=file_id, chars=len(content))
+        return embedding_id
+
+    except Exception as e:
+        logger.warning("Failed to generate code embedding", file_id=file_id, error=str(e))
+        await pg_session.commit()  # Still save the content
+        return None
+
+
+async def search_code_semantic(
+    pg_session: AsyncSession,
+    query: str,
+    repo_filter: str | None = None,
+    limit: int = 10,
+) -> list[dict]:
+    """
+    Search code files using semantic similarity.
+
+    Args:
+        pg_session: PostgreSQL async session
+        query: Search query text
+        repo_filter: Optional repository name to filter results
+        limit: Maximum results to return
+
+    Returns:
+        List of matching code files with similarity scores
+    """
+    from cognitex.services.llm import get_llm_service
+
+    llm = get_llm_service()
+
+    # Generate query embedding
+    query_embedding = await llm.generate_embedding(query)
+
+    # Build search query
+    if repo_filter:
+        search_query = text("""
+            SELECT
+                e.entity_id as file_id,
+                cc.repo_name,
+                cc.path,
+                cc.content,
+                1 - (e.embedding <=> :query_embedding::vector) as similarity
+            FROM embeddings e
+            JOIN code_content cc ON cc.file_id = e.entity_id
+            WHERE e.entity_type = 'code'
+              AND cc.repo_name = :repo_filter
+            ORDER BY e.embedding <=> :query_embedding::vector
+            LIMIT :limit
+        """)
+        params = {
+            "query_embedding": query_embedding,
+            "repo_filter": repo_filter,
+            "limit": limit,
+        }
+    else:
+        search_query = text("""
+            SELECT
+                e.entity_id as file_id,
+                cc.repo_name,
+                cc.path,
+                cc.content,
+                1 - (e.embedding <=> :query_embedding::vector) as similarity
+            FROM embeddings e
+            JOIN code_content cc ON cc.file_id = e.entity_id
+            WHERE e.entity_type = 'code'
+            ORDER BY e.embedding <=> :query_embedding::vector
+            LIMIT :limit
+        """)
+        params = {
+            "query_embedding": query_embedding,
+            "limit": limit,
+        }
+
+    result = await pg_session.execute(search_query, params)
+
+    results = []
+    for row in result.fetchall():
+        results.append({
+            "file_id": row.file_id,
+            "repo_name": row.repo_name,
+            "path": row.path,
+            "content_preview": row.content[:500] if row.content else "",
+            "similarity": float(row.similarity),
+        })
+
+    return results
+
+
 async def search_documents_semantic(
     pg_session: AsyncSession,
     query: str,

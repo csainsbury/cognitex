@@ -1102,6 +1102,119 @@ class LinkTaskTool(BaseTool):
 # TOOL REGISTRY
 # =============================================================================
 
+class SearchCodeTool(BaseTool):
+    """Search indexed code files using semantic similarity."""
+
+    name = "search_code"
+    description = "Search code across all indexed GitHub repositories using semantic similarity. Use to find relevant code for a task or concept."
+    risk = ToolRisk.READONLY
+    parameters = {
+        "query": {"type": "string", "description": "Search query describing what code you're looking for"},
+        "repo": {"type": "string", "description": "Optional: limit search to specific repository (owner/repo format)"},
+        "limit": {"type": "integer", "description": "Maximum results to return", "default": 5},
+    }
+
+    async def execute(self, query: str, repo: str | None = None, limit: int = 5) -> ToolResult:
+        from cognitex.db.postgres import get_session
+        from cognitex.services.ingestion import search_code_semantic
+
+        try:
+            async for session in get_session():
+                results = await search_code_semantic(session, query, repo_filter=repo, limit=limit)
+                break
+
+            if not results:
+                return ToolResult(success=True, data={"results": [], "message": "No matching code found"})
+
+            return ToolResult(
+                success=True,
+                data={
+                    "results": results,
+                    "count": len(results),
+                }
+            )
+
+        except Exception as e:
+            logger.warning("Code search failed", query=query, error=str(e))
+            return ToolResult(success=False, error=str(e))
+
+
+class ReadCodeFileTool(BaseTool):
+    """Read the full content of a specific code file."""
+
+    name = "read_code_file"
+    description = "Read the full content of a code file by its file ID. Use after search_code to get complete file content."
+    risk = ToolRisk.READONLY
+    parameters = {
+        "file_id": {"type": "string", "description": "Code file ID (from search_code results)"},
+        "max_length": {"type": "integer", "description": "Maximum content length to return", "default": 15000},
+    }
+
+    async def execute(self, file_id: str, max_length: int = 15000) -> ToolResult:
+        from cognitex.db.postgres import get_session
+        from sqlalchemy import text
+
+        try:
+            async for session in get_session():
+                result = await session.execute(
+                    text("SELECT repo_name, path, content, char_count FROM code_content WHERE file_id = :file_id"),
+                    {"file_id": file_id}
+                )
+                row = result.fetchone()
+
+                if row:
+                    content = row.content
+                    truncated = len(content) > max_length
+
+                    return ToolResult(
+                        success=True,
+                        data={
+                            "file_id": file_id,
+                            "repo_name": row.repo_name,
+                            "path": row.path,
+                            "content": content[:max_length],
+                            "char_count": row.char_count,
+                            "truncated": truncated,
+                        }
+                    )
+
+                return ToolResult(success=False, error=f"Code file not found: {file_id}")
+
+        except Exception as e:
+            logger.warning("Read code file failed", file_id=file_id, error=str(e))
+            return ToolResult(success=False, error=str(e))
+
+
+class GetRepositoriesTool(BaseTool):
+    """List indexed GitHub repositories."""
+
+    name = "get_repositories"
+    description = "List all GitHub repositories that have been synced and indexed. Shows repo name, language, and file count."
+    risk = ToolRisk.READONLY
+    parameters = {}
+
+    async def execute(self) -> ToolResult:
+        from cognitex.db.neo4j import get_neo4j_session
+        from cognitex.db.graph_schema import list_repositories
+
+        try:
+            async for session in get_neo4j_session():
+                repos = await list_repositories(session)
+                break
+
+            return ToolResult(
+                success=True,
+                data={
+                    "repositories": repos,
+                    "count": len(repos),
+                }
+            )
+
+        except Exception as e:
+            logger.warning("Get repositories failed", error=str(e))
+            return ToolResult(success=False, error=str(e))
+
+
 class ReadDocumentTool(BaseTool):
     """Read the full content of a specific document."""
 
@@ -1161,6 +1274,9 @@ class ToolRegistry:
             GraphQueryTool(),
             SearchDocumentsTool(),
             ReadDocumentTool(),
+            SearchCodeTool(),
+            ReadCodeFileTool(),
+            GetRepositoriesTool(),
             GetCalendarTool(),
             GetTasksTool(),
             FindTaskTool(),
