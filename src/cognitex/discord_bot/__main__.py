@@ -43,11 +43,14 @@ class CognitexBot(commands.Bot):
 
         # Register slash commands
         self.tree.add_command(tasks_command)
+        self.tree.add_command(projects_command)
+        self.tree.add_command(goals_command)
         self.tree.add_command(today_command)
         self.tree.add_command(briefing_command)
         self.tree.add_command(approvals_command)
         self.tree.add_command(status_command)
         self.tree.add_command(triggers_command)
+        self.tree.add_command(goal_parse_command)
 
         # Sync commands with Discord
         try:
@@ -479,6 +482,126 @@ async def tasks_command(interaction: discord.Interaction, limit: int = 10) -> No
     except Exception as e:
         logger.error("Tasks command failed", error=str(e))
         await interaction.followup.send(f"Error fetching tasks: {str(e)[:100]}")
+
+
+@app_commands.command(name="projects", description="Show your active projects")
+@app_commands.describe(limit="Number of projects to show (default: 10)")
+async def projects_command(interaction: discord.Interaction, limit: int = 10) -> None:
+    """Show active projects."""
+    await interaction.response.defer()
+
+    try:
+        from cognitex.services.tasks import get_project_service
+
+        project_service = get_project_service()
+        projects = await project_service.list(status="active", limit=limit)
+
+        if not projects:
+            await interaction.followup.send("No active projects found.")
+            return
+
+        lines = [f"**📁 Active Projects ({len(projects)})**\n"]
+        for i, project in enumerate(projects, 1):
+            title = project.get("title", "Untitled")
+            task_count = project.get("task_count", 0)
+            done_count = project.get("done_count", 0)
+            lines.append(f"{i}. **{title}** ({done_count}/{task_count} tasks)")
+
+        await interaction.followup.send("\n".join(lines))
+
+    except Exception as e:
+        logger.error("Projects command failed", error=str(e))
+        await interaction.followup.send(f"Error fetching projects: {str(e)[:100]}")
+
+
+@app_commands.command(name="goals", description="Show your goals")
+@app_commands.describe(limit="Number of goals to show (default: 10)")
+async def goals_command(interaction: discord.Interaction, limit: int = 10) -> None:
+    """Show goals."""
+    await interaction.response.defer()
+
+    try:
+        from cognitex.services.tasks import get_goal_service
+
+        goal_service = get_goal_service()
+        goals = await goal_service.list(limit=limit)
+
+        if not goals:
+            await interaction.followup.send("No goals found.")
+            return
+
+        lines = [f"**🎯 Goals ({len(goals)})**\n"]
+        for i, goal in enumerate(goals, 1):
+            title = goal.get("title", "Untitled")
+            timeframe = goal.get("timeframe", "")
+            status = goal.get("status", "active")
+            tf_str = f" [{timeframe}]" if timeframe else ""
+            lines.append(f"{i}. **{title}**{tf_str} - {status}")
+
+        await interaction.followup.send("\n".join(lines))
+
+    except Exception as e:
+        logger.error("Goals command failed", error=str(e))
+        await interaction.followup.send(f"Error fetching goals: {str(e)[:100]}")
+
+
+@app_commands.command(name="goal-parse", description="Parse and create a goal from natural language")
+@app_commands.describe(description="Natural language goal description")
+async def goal_parse_command(interaction: discord.Interaction, description: str) -> None:
+    """Parse a goal description and create structured entities."""
+    await interaction.response.defer()
+
+    try:
+        from cognitex.services.goal_parser import parse_and_create_goal
+
+        result = await parse_and_create_goal(
+            description,
+            create_projects=True,
+            create_tasks=True,
+            link_people=True,
+            dry_run=False,
+        )
+
+        parsed = result["parsed"]
+        created = result["created"]
+
+        embed = discord.Embed(
+            title=f"🎯 Goal Created: {parsed['title'][:50]}",
+            color=discord.Color.green(),
+            timestamp=datetime.now(),
+        )
+
+        if parsed.get("timeframe"):
+            embed.add_field(name="Timeframe", value=parsed["timeframe"], inline=True)
+        if parsed.get("target_date"):
+            embed.add_field(name="Target", value=parsed["target_date"], inline=True)
+        if parsed.get("themes"):
+            embed.add_field(name="Themes", value=", ".join(parsed["themes"]), inline=True)
+
+        # Created summary
+        summary = []
+        if created.get("goal"):
+            summary.append(f"✅ Goal: `{created['goal']['id'][:12]}...`")
+        if created.get("projects"):
+            summary.append(f"📁 {len(created['projects'])} project(s)")
+        if created.get("tasks"):
+            summary.append(f"📋 {len(created['tasks'])} task(s)")
+        if created.get("people_linked"):
+            summary.append(f"👥 {len(created['people_linked'])} person(s) linked")
+
+        embed.add_field(name="Created", value="\n".join(summary) or "Goal only", inline=False)
+
+        if parsed.get("projects"):
+            proj_names = [p["title"] for p in parsed["projects"][:5]]
+            embed.add_field(name="Projects", value="\n".join(f"• {p}" for p in proj_names), inline=False)
+
+        embed.set_footer(text=f"Confidence: {parsed.get('confidence', 0):.0%}")
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        logger.error("Goal parse command failed", error=str(e))
+        await interaction.followup.send(f"Error parsing goal: {str(e)[:100]}")
 
 
 @app_commands.command(name="today", description="Show today's schedule and priorities")
