@@ -712,7 +712,7 @@ async def get_tasks_by_email_thread(
     """
     query = """
     MATCH (e:Email {thread_id: $thread_id})<-[:ORIGINATED_FROM]-(t:Task)
-    WHERE t.status IN ['pending', 'in_progress']
+    WHERE t.status IN ['pending', 'in_progress', 'waiting']
     RETURN t.id as id, t.title as title, t.status as status,
            t.priority as priority, t.description as description,
            e.gmail_id as source_email_id, e.subject as source_subject
@@ -739,7 +739,7 @@ async def get_tasks_by_source_email(
     query = """
     MATCH (t:Task)
     WHERE t.source_type = 'email' AND t.source_id = $gmail_id
-      AND t.status IN ['pending', 'in_progress']
+      AND t.status IN ['pending', 'in_progress', 'waiting']
     RETURN t.id as id, t.title as title, t.status as status,
            t.priority as priority, t.description as description
     ORDER BY t.created_at DESC

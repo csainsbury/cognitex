@@ -206,7 +206,7 @@ Respond with a JSON object:
 Use task numbers (1-indexed) from the list above. Return empty array if no tasks are completed."""
 
     try:
-        response = await llm.generate(prompt)
+        response = await llm.complete(prompt)
 
         # Parse JSON response
         import json
