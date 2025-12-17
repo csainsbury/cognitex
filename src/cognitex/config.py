@@ -46,8 +46,8 @@ class Settings(BaseSettings):
         description="Executor model for structured tasks (email drafting, etc)",
     )
     together_model_embedding: str = Field(
-        default="togethercomputer/m2-bert-80M-8k-retrieval",
-        description="Model for generating embeddings",
+        default="BAAI/bge-base-en-v1.5",
+        description="Model for generating embeddings (768 dimensions)",
     )
     # Legacy aliases for backward compatibility
     together_model_primary: str = Field(default="")

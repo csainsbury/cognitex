@@ -23,7 +23,14 @@
     <td>
         <input type="date" name="due_date" value="{{ task.due[:10] if task.due else '' }}" form="task-edit-{{ task.id }}">
     </td>
-    <td>{{ task.project or '-' }}</td>
+    <td>
+        <select name="project_id" form="task-edit-{{ task.id }}">
+            <option value="">None</option>
+            {% for project in projects %}
+            <option value="{{ project.id }}" {% if task.project_id == project.id %}selected{% endif %}>{{ project.title }}</option>
+            {% endfor %}
+        </select>
+    </td>
     <td colspan="2">
         <div class="people-picker" data-form-id="task-edit-{{ task.id }}" data-initial='{{ task.people_full | default([]) | tojson }}'></div>
     </td>

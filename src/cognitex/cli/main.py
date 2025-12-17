@@ -7,6 +7,9 @@ from datetime import datetime, timedelta
 import structlog
 import typer
 from rich.console import Console
+
+logger = structlog.get_logger()
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.prompt import Prompt, Confirm
 from rich.table import Table
 
@@ -3153,6 +3156,7 @@ def github_sync(
     repo_name: str = typer.Argument(..., help="Repository to sync (e.g., 'owner/repo')"),
     index_code: bool = typer.Option(True, "--index/--no-index", help="Index code files for semantic search"),
     link_project: str = typer.Option(None, "--project", "-p", help="Link to existing project ID"),
+    skip_embeddings: bool = typer.Option(False, "--skip-embeddings", help="Store code but skip embedding generation"),
 ) -> None:
     """Sync a GitHub repository to the graph and optionally index code."""
     async def sync_repo():
@@ -3191,14 +3195,12 @@ def github_sync(
             await create_repository(
                 session,
                 repo_id=repo["id"],
-                full_name=repo["full_name"],
                 name=repo["name"],
-                owner=repo["owner"],
-                description=repo["description"],
+                full_name=repo["full_name"],
                 url=repo["url"],
+                description=repo["description"],
+                primary_language=repo["language"],
                 default_branch=repo["default_branch"],
-                language=repo["language"],
-                is_private=repo["is_private"],
             )
             console.print("[green]✓[/green] Repository node created")
 
@@ -3248,11 +3250,10 @@ def github_sync(
                                     name=file_info["name"],
                                     repository_id=repo["id"],
                                     language=_detect_language(file_info["name"]),
-                                    size_bytes=file_info.get("size"),
                                 )
                                 break
 
-                            # Generate embedding for semantic search
+                            # Store content and optionally generate embedding
                             try:
                                 async for pg_session in get_session():
                                     from cognitex.services.ingestion import index_code_content
@@ -3262,6 +3263,7 @@ def github_sync(
                                         path=file_info["path"],
                                         content=content,
                                         repo_name=repo_name,
+                                        skip_embedding=skip_embeddings,
                                     )
                                     break
                                 indexed_count += 1
@@ -3270,7 +3272,10 @@ def github_sync(
 
                         progress.advance(task)
 
-                console.print(f"[green]✓[/green] Indexed {indexed_count} files with embeddings")
+                if skip_embeddings:
+                    console.print(f"[green]✓[/green] Indexed {indexed_count} files (embeddings skipped)")
+                else:
+                    console.print(f"[green]✓[/green] Indexed {indexed_count} files with embeddings")
 
                 await close_postgres()
 
@@ -3279,6 +3284,115 @@ def github_sync(
         console.print(f"\n[bold green]Repository synced successfully![/bold green]")
 
     asyncio.run(sync_repo())
+
+
+@app.command("github-embeddings")
+def github_embeddings(
+    repo: str = typer.Option(None, "--repo", "-r", help="Limit to specific repo (owner/repo)"),
+    limit: int = typer.Option(0, "--limit", "-l", help="Max files to process (0 = all)"),
+    max_failures: int = typer.Option(3, "--max-failures", help="Stop after N consecutive failures"),
+) -> None:
+    """Generate embeddings for indexed code that doesn't have them yet."""
+    async def generate_embeddings():
+        from cognitex.db.postgres import init_postgres, close_postgres, get_session
+        from cognitex.services.llm import get_llm_service
+        from sqlalchemy import text
+
+        await init_postgres()
+        llm = get_llm_service()
+
+        # Find code files without embeddings
+        query = text("""
+            SELECT cc.file_id, cc.path, cc.content, cc.repo_name, cc.content_hash
+            FROM code_content cc
+            LEFT JOIN embeddings e ON e.entity_type = 'code' AND e.entity_id = cc.file_id
+            WHERE e.id IS NULL
+            """ + ("AND cc.repo_name = :repo" if repo else "") + """
+            ORDER BY cc.indexed_at
+            """ + (f"LIMIT {limit}" if limit > 0 else ""))
+
+        async for session in get_session():
+            params = {"repo": repo} if repo else {}
+            result = await session.execute(query, params)
+            files = result.fetchall()
+            break
+
+        if not files:
+            console.print("[green]All indexed code has embeddings.[/green]")
+            return
+
+        console.print(f"Found {len(files)} files without embeddings")
+
+        generated = 0
+        failed = 0
+        consecutive_failures = 0
+        last_error = None
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Generating embeddings...", total=len(files))
+
+            for file_row in files:
+                file_id, path, content, repo_name, content_hash = file_row
+                progress.update(task, description=f"Embedding {path[:40]}...")
+
+                # Truncate to ~350 tokens (~1200 chars) for bge-base-en-v1.5 (512 token limit)
+                embedding_text = f"File: {path}\n\n{content[:1100]}"
+
+                try:
+                    embedding = await llm.generate_embedding(embedding_text)
+                    # Convert list to pgvector string format
+                    embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
+
+                    async for session in get_session():
+                        # Use raw SQL with proper casting for pgvector
+                        embed_query = text("""
+                            INSERT INTO embeddings (entity_type, entity_id, content_hash, embedding)
+                            VALUES ('code', :file_id, :content_hash, CAST(:embedding AS vector))
+                            ON CONFLICT (entity_type, entity_id) DO UPDATE SET
+                                content_hash = EXCLUDED.content_hash,
+                                embedding = EXCLUDED.embedding,
+                                created_at = NOW()
+                        """)
+                        await session.execute(embed_query, {
+                            "file_id": file_id,
+                            "content_hash": content_hash,
+                            "embedding": embedding_str,
+                        })
+                        await session.commit()
+                        break
+
+                    generated += 1
+                    consecutive_failures = 0  # Reset on success
+                except Exception as e:
+                    last_error = str(e)
+                    logger.debug("Failed to generate embedding", file=path, error=last_error)
+                    failed += 1
+                    consecutive_failures += 1
+
+                    # Fail fast if API is consistently failing
+                    if consecutive_failures >= max_failures:
+                        progress.stop()
+                        console.print(f"\n[red]Stopping after {consecutive_failures} consecutive failures[/red]")
+                        console.print(f"[red]Last error: {last_error[:200]}[/red]")
+                        break
+
+                progress.advance(task)
+
+        await close_postgres()
+
+        console.print(f"\n[green]✓[/green] Generated {generated} embeddings")
+        if failed:
+            console.print(f"[yellow]⚠[/yellow] Failed: {failed}")
+            if last_error:
+                console.print(f"[dim]Last error: {last_error[:150]}...[/dim]")
+
+    asyncio.run(generate_embeddings())
 
 
 @app.command("github-search")
@@ -3323,6 +3437,93 @@ def github_search(
             await close_postgres()
 
     asyncio.run(search_code())
+
+
+@app.command("repo-link")
+def repo_link(
+    repo_name: str = typer.Argument(..., help="Repository name (owner/repo or just repo name)"),
+    project: str = typer.Option(None, "--project", "-p", help="Project ID or title to link to"),
+) -> None:
+    """Link a repository to a project."""
+    async def link_repo():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
+        from cognitex.db.graph_schema import link_project_to_repository
+
+        await init_neo4j()
+
+        async for session in get_neo4j_session():
+            # Find the repository
+            if "/" in repo_name:
+                result = await session.run(
+                    "MATCH (r:Repository {full_name: $name}) RETURN r.id as id, r.full_name as name",
+                    name=repo_name
+                )
+            else:
+                result = await session.run(
+                    "MATCH (r:Repository) WHERE r.name = $name OR r.full_name CONTAINS $name RETURN r.id as id, r.full_name as name",
+                    name=repo_name
+                )
+            repos = await result.data()
+
+            if not repos:
+                console.print(f"[red]Repository not found: {repo_name}[/red]")
+                console.print("[dim]Use 'cognitex github-repos' to see available repos[/dim]")
+                await close_neo4j()
+                return
+
+            repo = repos[0]
+
+            # Find or select project
+            if project:
+                # Try to match by ID or title
+                result = await session.run(
+                    "MATCH (p:Project) WHERE p.id = $q OR toLower(p.title) CONTAINS toLower($q) RETURN p.id as id, p.title as title",
+                    q=project
+                )
+                projects = await result.data()
+            else:
+                # List all projects for selection
+                result = await session.run("MATCH (p:Project) RETURN p.id as id, p.title as title ORDER BY p.title")
+                projects = await result.data()
+
+                if not projects:
+                    console.print("[yellow]No projects found. Create one first with the web dashboard.[/yellow]")
+                    await close_neo4j()
+                    return
+
+                console.print(f"\n[bold]Link {repo['name']} to which project?[/bold]")
+                for i, p in enumerate(projects, 1):
+                    console.print(f"  [cyan]{i}[/cyan]. {p['title']}")
+
+                choice = Prompt.ask("Select project", default="1")
+                try:
+                    idx = int(choice) - 1
+                    if 0 <= idx < len(projects):
+                        projects = [projects[idx]]
+                    else:
+                        console.print("[red]Invalid selection[/red]")
+                        await close_neo4j()
+                        return
+                except ValueError:
+                    console.print("[red]Invalid selection[/red]")
+                    await close_neo4j()
+                    return
+
+            if not projects:
+                console.print(f"[red]Project not found: {project}[/red]")
+                await close_neo4j()
+                return
+
+            proj = projects[0]
+
+            # Create the link
+            await link_project_to_repository(session, proj['id'], repo['id'])
+            console.print(f"[green]✓[/green] Linked [bold]{repo['name']}[/bold] to project [bold]{proj['title']}[/bold]")
+            break
+
+        await close_neo4j()
+
+    asyncio.run(link_repo())
 
 
 def _detect_language(filename: str) -> str | None:

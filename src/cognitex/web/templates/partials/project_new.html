@@ -23,7 +23,15 @@
             {% endfor %}
         </select>
     </td>
-    <td colspan="2">
+    <td>
+        <select name="repository_id" form="project-create-form">
+            <option value="">None</option>
+            {% for repo in repos %}
+            <option value="{{ repo.id }}">{{ repo.full_name }}</option>
+            {% endfor %}
+        </select>
+    </td>
+    <td>
         <div class="people-picker" data-form-id="project-create-form" data-initial="[]"></div>
     </td>
     <td class="actions">

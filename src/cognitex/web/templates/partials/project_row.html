@@ -9,7 +9,14 @@
     <td>{{ project.target_date[:10] if project.target_date else '-' }}</td>
     <td>{{ project.done_count|default(0) }}/{{ project.task_count|default(0) }}</td>
     <td>{{ project.goal or '-' }}</td>
-    <td colspan="2">
+    <td>
+        {% if project.repositories %}
+        <span class="repo-list">{{ project.repositories | join(', ') }}</span>
+        {% else %}
+        -
+        {% endif %}
+    </td>
+    <td>
         {% if project.people %}
         <span class="people-list">{{ project.people | join(', ') }}</span>
         {% else %}

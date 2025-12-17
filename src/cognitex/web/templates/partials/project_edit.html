@@ -19,7 +19,15 @@
     </td>
     <td>{{ project.done_count|default(0) }}/{{ project.task_count|default(0) }}</td>
     <td>{{ project.goal or '-' }}</td>
-    <td colspan="2">
+    <td>
+        <select name="repository_id" form="project-edit-{{ project.id }}">
+            <option value="">None</option>
+            {% for repo in repos %}
+            <option value="{{ repo.id }}" {% if repo.full_name in (project.repositories or []) %}selected{% endif %}>{{ repo.full_name }}</option>
+            {% endfor %}
+        </select>
+    </td>
+    <td>
         <div class="people-picker" data-form-id="project-edit-{{ project.id }}" data-initial='{{ project.people_full | default([]) | tojson }}'></div>
     </td>
     <td class="actions">

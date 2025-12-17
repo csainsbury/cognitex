@@ -845,8 +845,13 @@ async def get_task(
     people_display = [p.get("name") or p.get("email") for p in people]
     people_emails = [p.get("email") for p in people if p.get("email")]
 
+    # Add due date alias (templates use 'due')
+    due_date = task_data.get("due_date")
+    due_str = str(due_date) if due_date else None
+
     return {
         **task_data,
+        "due": due_str,  # Alias for template compatibility
         "source_email": record["source_email"] if record["source_email"] and record["source_email"].get("gmail_id") else None,
         "source_event": record["source_event"] if record["source_event"] and record["source_event"].get("gcal_id") else None,
         "projects": projects,
@@ -914,15 +919,29 @@ async def get_tasks(
     """
     result = await session.run(query, **params)
     records = await result.data()
-    return [
-        {
-            **dict(r["t"]),
+
+    tasks = []
+    for r in records:
+        task_data = dict(r["t"])
+        # Add convenience alias for due_date (templates use 'due')
+        due_date = task_data.get("due_date")
+        if due_date:
+            # Convert Neo4j datetime to string if needed
+            due_str = str(due_date) if due_date else None
+        else:
+            due_str = None
+
+        tasks.append({
+            **task_data,
+            "due": due_str,  # Alias for template compatibility
             "source_subject": r["source_subject"],
+            "project": r["project_name"],  # Alias for template compatibility
             "project_name": r["project_name"],
+            "people": [a for a in r["assignees"] if a],  # Alias for template
             "assignees": [a for a in r["assignees"] if a],
-        }
-        for r in records
-    ]
+        })
+
+    return tasks
 
 
 async def delete_task(
@@ -1431,8 +1450,14 @@ async def get_project(
             people_full.append(p)
     people_emails = [p["email"] for p in people_full]
 
+    project_data = dict(record["p"])
+    # Convert target_date DateTime to string for template compatibility
+    target_date = project_data.get("target_date")
+    if target_date:
+        project_data["target_date"] = str(target_date)
+
     return {
-        **dict(record["p"]),
+        **project_data,
         "goal_ids": [g for g in record["goal_ids"] if g],
         "owner_email": owner_email,
         "stakeholders": [s["email"] for s in stakeholders],
@@ -1470,10 +1495,21 @@ async def get_projects(
     {where_clause}
     OPTIONAL MATCH (t:Task)-[:PART_OF]->(p)
     OPTIONAL MATCH (p)-[:ACHIEVES]->(g:Goal)
+    OPTIONAL MATCH (p)-[:OWNED_BY]->(owner:Person)
+    OPTIONAL MATCH (p)<-[:STAKEHOLDER]-(stakeholder:Person)
+    OPTIONAL MATCH (p)-[:USES_REPO]->(r:Repository)
+    WITH p, g, owner, r,
+         count(DISTINCT t) as task_count,
+         sum(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) as completed_tasks,
+         collect(DISTINCT stakeholder) as stakeholders
     RETURN p,
-           count(DISTINCT t) as task_count,
-           sum(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) as completed_tasks,
-           collect(DISTINCT g.title)[0] as goal_name
+           task_count,
+           completed_tasks,
+           collect(DISTINCT g.title)[0] as goal_name,
+           owner.email as owner_email,
+           owner.name as owner_name,
+           [s IN stakeholders | {{email: s.email, name: s.name}}] as stakeholder_list,
+           collect(DISTINCT r.full_name) as repositories
     ORDER BY
         CASE p.status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,
         p.target_date ASC,
@@ -1482,15 +1518,42 @@ async def get_projects(
     """
     result = await session.run(query, **params)
     records = await result.data()
-    return [
-        {
-            **dict(r["p"]),
+
+    projects = []
+    for r in records:
+        # Combine owner and stakeholders for display
+        owner_email = r.get("owner_email")
+        owner_name = r.get("owner_name")
+        stakeholders = [s for s in (r.get("stakeholder_list") or []) if s.get("email")]
+        all_people = ([{"email": owner_email, "name": owner_name}] if owner_email else []) + stakeholders
+
+        # Deduplicate by email while preserving order
+        seen = set()
+        people_full = []
+        for person in all_people:
+            if person.get("email") and person["email"] not in seen:
+                seen.add(person["email"])
+                people_full.append(person)
+        people_emails = [person["email"] for person in people_full]
+
+        project_data = dict(r["p"])
+        # Convert target_date DateTime to string for template compatibility
+        target_date = project_data.get("target_date")
+        if target_date:
+            project_data["target_date"] = str(target_date)
+
+        projects.append({
+            **project_data,
             "task_count": r["task_count"],
             "completed_tasks": r["completed_tasks"],
             "goal_name": r["goal_name"],
-        }
-        for r in records
-    ]
+            "goal": r["goal_name"],  # Alias for template compatibility
+            "people": people_emails,
+            "people_full": people_full,
+            "repositories": [repo for repo in (r.get("repositories") or []) if repo],
+        })
+
+    return projects
 
 
 async def link_project_to_goal(

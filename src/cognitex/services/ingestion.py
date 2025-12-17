@@ -1072,6 +1072,7 @@ async def index_code_content(
     path: str,
     content: str,
     repo_name: str,
+    skip_embedding: bool = False,
 ) -> int | None:
     """
     Store code file content and generate embedding for semantic search.
@@ -1123,29 +1124,38 @@ async def index_code_content(
         "char_count": len(content),
     })
 
+    # Skip embedding generation if requested
+    if skip_embedding:
+        await pg_session.commit()
+        logger.debug("Indexed code content (no embedding)", file_id=file_id, chars=len(content))
+        return None
+
     # Generate embedding (truncate content if too long)
     llm = get_llm_service()
 
     # Create a summary for embedding that includes path context
-    embedding_text = f"File: {path}\nRepository: {repo_name}\n\n{content[:7500]}"
+    # Truncate to ~350 tokens (~1200 chars) for bge-base-en-v1.5 (512 token limit)
+    embedding_text = f"File: {path}\n\n{content[:1100]}"
 
     try:
         embedding = await llm.generate_embedding(embedding_text)
+        # Convert list to pgvector string format
+        embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
 
         # Store embedding
         embedding_query = text("""
             INSERT INTO embeddings (entity_type, entity_id, content_hash, embedding)
-            VALUES ('code', :file_id, :content_hash, :embedding)
+            VALUES ('code', :file_id, :content_hash, CAST(:embedding AS vector))
             ON CONFLICT (entity_type, entity_id) DO UPDATE SET
-                content_hash = :content_hash,
-                embedding = :embedding,
+                content_hash = EXCLUDED.content_hash,
+                embedding = EXCLUDED.embedding,
                 created_at = NOW()
             RETURNING id
         """)
         result = await pg_session.execute(embedding_query, {
             "file_id": file_id,
             "content_hash": content_hash,
-            "embedding": embedding,
+            "embedding": embedding_str,
         })
         row = result.fetchone()
         embedding_id = row.id if row else None
@@ -1185,8 +1195,10 @@ async def search_code_semantic(
 
     # Generate query embedding
     query_embedding = await llm.generate_embedding(query)
+    # Convert list to pgvector string format
+    query_embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
 
-    # Build search query
+    # Build search query - use CAST for asyncpg compatibility
     if repo_filter:
         search_query = text("""
             SELECT
@@ -1194,16 +1206,16 @@ async def search_code_semantic(
                 cc.repo_name,
                 cc.path,
                 cc.content,
-                1 - (e.embedding <=> :query_embedding::vector) as similarity
+                1 - (e.embedding <=> CAST(:query_embedding AS vector)) as similarity
             FROM embeddings e
             JOIN code_content cc ON cc.file_id = e.entity_id
             WHERE e.entity_type = 'code'
               AND cc.repo_name = :repo_filter
-            ORDER BY e.embedding <=> :query_embedding::vector
+            ORDER BY e.embedding <=> CAST(:query_embedding AS vector)
             LIMIT :limit
         """)
         params = {
-            "query_embedding": query_embedding,
+            "query_embedding": query_embedding_str,
             "repo_filter": repo_filter,
             "limit": limit,
         }
@@ -1214,15 +1226,15 @@ async def search_code_semantic(
                 cc.repo_name,
                 cc.path,
                 cc.content,
-                1 - (e.embedding <=> :query_embedding::vector) as similarity
+                1 - (e.embedding <=> CAST(:query_embedding AS vector)) as similarity
             FROM embeddings e
             JOIN code_content cc ON cc.file_id = e.entity_id
             WHERE e.entity_type = 'code'
-            ORDER BY e.embedding <=> :query_embedding::vector
+            ORDER BY e.embedding <=> CAST(:query_embedding AS vector)
             LIMIT :limit
         """)
         params = {
-            "query_embedding": query_embedding,
+            "query_embedding": query_embedding_str,
             "limit": limit,
         }
 

@@ -13,6 +13,7 @@ from fastapi.templating import Jinja2Templates
 from cognitex.services.tasks import (
     get_goal_service,
     get_project_service,
+    get_repository_service,
     get_task_service,
 )
 
@@ -166,6 +167,22 @@ async def api_people_create(
 
 
 # -------------------------------------------------------------------
+# Repositories API
+# -------------------------------------------------------------------
+
+
+@app.get("/api/repositories")
+async def api_repositories():
+    """List all repositories for dropdowns."""
+    repo_service = get_repository_service()
+    repos = await repo_service.list(limit=100)
+    return JSONResponse([
+        {"id": r["id"], "full_name": r["full_name"], "name": r["name"]}
+        for r in repos
+    ])
+
+
+# -------------------------------------------------------------------
 # Tasks
 # -------------------------------------------------------------------
 
@@ -258,6 +275,7 @@ async def task_update(
     priority: Annotated[str, Form()],
     due_date: Annotated[str | None, Form()] = None,
     description: Annotated[str | None, Form()] = None,
+    project_id: Annotated[str | None, Form()] = None,
     people: Annotated[list[str] | None, Form()] = None,
 ):
     """Update a task and return the updated row."""
@@ -275,21 +293,29 @@ async def task_update(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    # Handle people linking
+    # Handle relationships
     from cognitex.db.neo4j import get_neo4j_session
-    from cognitex.db.graph_schema import link_task_to_person
+    from cognitex.db.graph_schema import link_task_to_person, link_task_to_project
 
     async for session in get_neo4j_session():
-        # Remove old relationships first
+        # Remove old people relationships
         await session.run(
             "MATCH (t:Task {id: $task_id})-[r:INVOLVES|ASSIGNED_TO]->(:Person) DELETE r",
             {"task_id": task_id}
         )
-        # Add new relationships
+        # Add new people relationships
         if people:
             for email in people:
                 if email:
                     await link_task_to_person(session, task_id, email, relationship_type="INVOLVES")
+
+        # Update project link (remove old, add new if specified)
+        await session.run(
+            "MATCH (t:Task {id: $task_id})-[r:PART_OF]->(:Project) DELETE r",
+            {"task_id": task_id}
+        )
+        if project_id:
+            await link_task_to_project(session, task_id, project_id)
         break
 
     # Re-fetch to get relationships
@@ -393,12 +419,14 @@ async def projects_page(request: Request, status: str | None = None):
 async def project_new_form(request: Request):
     """Return new project form (HTMX partial)."""
     goal_service = get_goal_service()
+    repo_service = get_repository_service()
     goals = await goal_service.list(limit=100)
+    repos = await repo_service.list(limit=100)
     people = await get_people()
 
     return templates.TemplateResponse(
         "partials/project_new.html",
-        {"request": request, "goals": goals, "people": people},
+        {"request": request, "goals": goals, "repos": repos, "people": people},
     )
 
 
@@ -413,17 +441,19 @@ async def project_edit_form(request: Request, project_id: str):
     """Return inline edit form for a project (HTMX partial)."""
     project_service = get_project_service()
     goal_service = get_goal_service()
+    repo_service = get_repository_service()
 
     project = await project_service.get(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
     goals = await goal_service.list(limit=100)
+    repos = await repo_service.list(limit=100)
     people = await get_people()
 
     return templates.TemplateResponse(
         "partials/project_edit.html",
-        {"request": request, "project": project, "goals": goals, "people": people},
+        {"request": request, "project": project, "goals": goals, "repos": repos, "people": people},
     )
 
 
@@ -450,6 +480,7 @@ async def project_update(
     status: Annotated[str, Form()],
     target_date: Annotated[str | None, Form()] = None,
     description: Annotated[str | None, Form()] = None,
+    repository_id: Annotated[str | None, Form()] = None,
     people: Annotated[list[str] | None, Form()] = None,
 ):
     """Update a project and return the updated row."""
@@ -466,21 +497,33 @@ async def project_update(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Handle people linking
+    # Handle relationships
     from cognitex.db.neo4j import get_neo4j_session
-    from cognitex.db.graph_schema import link_project_to_person
+    from cognitex.db.graph_schema import link_project_to_person, link_project_to_repository
 
     async for session in get_neo4j_session():
-        # Remove old relationships first
+        # Remove old people relationships (both directions)
         await session.run(
-            "MATCH (p:Project {id: $project_id})-[r:INVOLVES|OWNED_BY|STAKEHOLDER]->(:Person) DELETE r",
+            "MATCH (p:Project {id: $project_id})-[r:OWNED_BY]->(:Person) DELETE r",
             {"project_id": project_id}
         )
-        # Add new relationships
+        await session.run(
+            "MATCH (p:Project {id: $project_id})<-[r:STAKEHOLDER]-(:Person) DELETE r",
+            {"project_id": project_id}
+        )
+        # Add new people relationships
         if people:
             for email in people:
                 if email:
                     await link_project_to_person(session, project_id, email, role="stakeholder")
+
+        # Update repository link (remove old, add new if specified)
+        await session.run(
+            "MATCH (p:Project {id: $project_id})-[r:USES_REPO]->(:Repository) DELETE r",
+            {"project_id": project_id}
+        )
+        if repository_id:
+            await link_project_to_repository(session, project_id, repository_id)
         break
 
     project = await project_service.get(project_id)
@@ -507,6 +550,7 @@ async def project_create(
     target_date: Annotated[str | None, Form()] = None,
     description: Annotated[str | None, Form()] = None,
     goal_id: Annotated[str | None, Form()] = None,
+    repository_id: Annotated[str | None, Form()] = None,
     people: Annotated[list[str] | None, Form()] = None,
 ):
     """Create a new project."""
@@ -525,15 +569,18 @@ async def project_create(
         owner_email=owner_email,
     )
 
-    # Link additional people as stakeholders
-    if len(people_emails) > 1:
-        from cognitex.db.neo4j import get_neo4j_session
-        from cognitex.db.graph_schema import link_project_to_person
+    from cognitex.db.neo4j import get_neo4j_session
+    from cognitex.db.graph_schema import link_project_to_person, link_project_to_repository
 
-        async for session in get_neo4j_session():
-            for email in people_emails[1:]:
-                await link_project_to_person(session, project["id"], email, role="stakeholder")
-            break
+    async for session in get_neo4j_session():
+        # Link repository if specified
+        if repository_id:
+            await link_project_to_repository(session, project["id"], repository_id)
+
+        # Link additional people as stakeholders
+        for email in people_emails[1:]:
+            await link_project_to_person(session, project["id"], email, role="stakeholder")
+        break
 
     project = await project_service.get(project["id"])
 
