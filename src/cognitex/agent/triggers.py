@@ -372,7 +372,7 @@ class TriggerSystem:
 
         try:
             # Fetch actual changes from Drive API
-            from cognitex.services.drive import DriveService
+            from cognitex.services.drive import DriveService, PRIORITY_FOLDERS
 
             drive = DriveService()
 
@@ -393,36 +393,85 @@ class TriggerSystem:
                 logger.debug("No new Drive changes found")
                 return
 
-            # Filter for files in indexed folders (priority folders)
-            from cognitex.config import get_settings
-            settings = get_settings()
-            priority_folders = getattr(settings, 'drive_priority_folders', [])
+            # Get priority folder IDs
+            priority_folder_ids = set()
+            for folder_name in PRIORITY_FOLDERS:
+                folder_id = drive.get_folder_id_by_name(folder_name)
+                if folder_id:
+                    priority_folder_ids.add(folder_id)
 
             relevant_changes = []
+            files_to_index = []
+
             for change in changes.get('changes', []):
                 file_info = change.get('file', {})
+                file_id = file_info.get('id')
                 file_name = file_info.get('name', 'Unknown')
+                mime_type = file_info.get('mimeType', '')
                 parents = file_info.get('parents', [])
+                is_removed = change.get('removed', False)
 
-                # Check if file is in a priority folder
-                if any(folder_id in parents for folder_id in priority_folders):
+                # Check if file is in a priority folder (direct or nested)
+                in_priority_folder = any(pid in priority_folder_ids for pid in parents)
+
+                if in_priority_folder or self._is_in_priority_tree(drive, parents, priority_folder_ids):
                     relevant_changes.append({
+                        'id': file_id,
                         'name': file_name,
-                        'mime_type': file_info.get('mimeType'),
+                        'mime_type': mime_type,
                         'modified': file_info.get('modifiedTime'),
-                        'change_type': 'removed' if change.get('removed') else 'modified',
+                        'change_type': 'removed' if is_removed else 'modified',
                     })
 
+                    # Queue for indexing if not removed
+                    if not is_removed and file_id:
+                        files_to_index.append({
+                            'id': file_id,
+                            'name': file_name,
+                            'mime_type': mime_type,
+                        })
+
+            # Auto-index changed files
+            indexed_files = []
+            if files_to_index:
+                from cognitex.services.ingestion import auto_index_drive_file
+
+                for file_data in files_to_index:
+                    logger.info(
+                        "Auto-indexing changed file",
+                        file=file_data['name'],
+                        mime_type=file_data['mime_type']
+                    )
+                    result = await auto_index_drive_file(
+                        file_id=file_data['id'],
+                        file_name=file_data['name'],
+                        mime_type=file_data['mime_type'],
+                    )
+                    if result.get('indexed'):
+                        indexed_files.append({
+                            'name': file_data['name'],
+                            'chunks': result.get('chunks_created', 0),
+                            'topics': result.get('topics_created', 0),
+                        })
+
             if relevant_changes:
-                # Notify about relevant changes
+                # Build summary for agent
                 change_summary = "\n".join(
                     f"- {c['name']} ({c['change_type']})"
                     for c in relevant_changes[:5]
                 )
 
+                index_summary = ""
+                if indexed_files:
+                    index_summary = "\n\nI've automatically indexed these files:\n" + "\n".join(
+                        f"- {f['name']}: {f['chunks']} chunks, {f['topics']} topics"
+                        for f in indexed_files
+                    )
+
                 response = await self.agent.chat(
-                    f"Files changed in your priority folders:\n{change_summary}\n\n"
-                    "Should I update my index or is there anything I should note about these changes?"
+                    f"Files changed in your priority folders:\n{change_summary}"
+                    f"{index_summary}\n\n"
+                    "Is there anything notable about these changes I should be aware of?"
                 )
 
                 if response:
@@ -438,6 +487,20 @@ class TriggerSystem:
 
         except Exception as e:
             logger.error("Drive change processing failed", error=str(e))
+
+    def _is_in_priority_tree(self, drive, parent_ids: list, priority_folder_ids: set) -> bool:
+        """Check if any parent is in the priority folder tree (for nested files)."""
+        # Simple depth-limited check to avoid infinite loops
+        for parent_id in parent_ids:
+            try:
+                parent_info = drive.get_file_metadata(parent_id)
+                if parent_info:
+                    grandparents = parent_info.get('parents', [])
+                    if any(gp in priority_folder_ids for gp in grandparents):
+                        return True
+            except Exception:
+                pass
+        return False
 
     # =========================================================================
     # Utilities

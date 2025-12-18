@@ -1214,6 +1214,78 @@ def deep_index(
     asyncio.run(run_indexing())
 
 
+@app.command("index-file")
+def index_file(
+    file_id: str = typer.Argument(..., help="Google Drive file ID to index"),
+    file_name: str = typer.Option("", "--name", "-n", help="File name (optional, for display)"),
+) -> None:
+    """
+    Index a single Drive file with chunking and graph analysis.
+
+    Useful for testing auto-indexing or manually re-indexing a specific file.
+    """
+    from cognitex.config import get_settings
+
+    settings = get_settings()
+    if not settings.together_api_key.get_secret_value():
+        console.print("[red]TOGETHER_API_KEY not configured in .env[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold]Auto-indexing file: {file_id}[/bold]")
+
+    async def run_auto_index():
+        from cognitex.services.drive import get_drive_service
+        from cognitex.services.ingestion import auto_index_drive_file
+
+        drive = get_drive_service()
+
+        # Get file metadata if name not provided
+        name = file_name
+        mime_type = None
+        if not name:
+            metadata = drive.get_file_metadata(file_id)
+            if not metadata:
+                console.print("[red]File not found in Drive[/red]")
+                return
+            name = metadata.get("name", file_id)
+            mime_type = metadata.get("mimeType", "")
+            console.print(f"  Name: {name}")
+            console.print(f"  MIME type: {mime_type}")
+        else:
+            # Still need to get MIME type
+            metadata = drive.get_file_metadata(file_id)
+            if metadata:
+                mime_type = metadata.get("mimeType", "")
+
+        if not mime_type:
+            console.print("[red]Could not determine file type[/red]")
+            return
+
+        console.print("\n[dim]Indexing...[/dim]")
+
+        stats = await auto_index_drive_file(
+            file_id=file_id,
+            file_name=name,
+            mime_type=mime_type,
+        )
+
+        if stats.get("error"):
+            console.print(f"[red]Error: {stats['error']}[/red]")
+            return
+
+        if stats.get("indexed"):
+            console.print("\n[bold green]File indexed successfully![/bold green]")
+            console.print(f"  Chunks created: {stats['chunks_created']}")
+            console.print(f"  Embeddings: {stats['embeddings_created']}")
+            console.print(f"  Chunks analyzed: {stats['chunks_analyzed']}")
+            console.print(f"  Topics created: {stats['topics_created']}")
+            console.print(f"  Concepts created: {stats['concepts_created']}")
+        else:
+            console.print("[yellow]File was not indexed (possibly skipped)[/yellow]")
+
+    asyncio.run(run_auto_index())
+
+
 @app.command("chunk-search")
 def chunk_search(
     query: str = typer.Argument(..., help="Search query"),

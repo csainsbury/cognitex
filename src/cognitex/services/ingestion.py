@@ -1848,3 +1848,170 @@ async def analyze_chunks_batch(
             stats["errors"] += 1
 
     return stats
+
+
+async def auto_index_drive_file(
+    file_id: str,
+    file_name: str,
+    mime_type: str,
+    max_file_size: int = 10_000_000,
+) -> dict:
+    """
+    Automatically index a single Drive file with chunking and graph analysis.
+
+    Called by Drive change webhooks when files are added or modified.
+
+    Args:
+        file_id: Google Drive file ID
+        file_name: File name for logging
+        mime_type: MIME type of the file
+        max_file_size: Skip files larger than this (bytes)
+
+    Returns:
+        Indexing stats
+    """
+    from cognitex.services.drive import get_drive_service
+    from cognitex.db.postgres import init_postgres, close_postgres, get_session
+    from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
+
+    # MIME types we can meaningfully index
+    indexable_types = {
+        'application/vnd.google-apps.document',
+        'application/vnd.google-apps.spreadsheet',
+        'text/plain',
+        'text/csv',
+        'text/markdown',
+        'application/pdf',
+        'application/json',
+        'text/x-python',
+        'application/javascript',
+    }
+
+    stats = {
+        "file_id": file_id,
+        "file_name": file_name,
+        "indexed": False,
+        "chunks_created": 0,
+        "embeddings_created": 0,
+        "chunks_analyzed": 0,
+        "topics_created": 0,
+        "concepts_created": 0,
+        "error": None,
+    }
+
+    # Check if file type is indexable
+    if mime_type not in indexable_types and not mime_type.startswith('text/'):
+        stats["error"] = f"Non-indexable MIME type: {mime_type}"
+        logger.info("Skipping non-indexable file", file=file_name, mime_type=mime_type)
+        return stats
+
+    try:
+        drive = get_drive_service()
+
+        # Get file metadata to check size
+        file_data = drive.get_file_metadata(file_id)
+        if not file_data:
+            stats["error"] = "File not found in Drive"
+            return stats
+
+        file_size = int(file_data.get("size", 0))
+        if file_size > max_file_size:
+            stats["error"] = f"File too large: {file_size} bytes"
+            logger.info("Skipping large file", file=file_name, size=file_size)
+            return stats
+
+        # Extract content
+        content = drive.get_file_content(file_id, mime_type)
+        if not content or len(content.strip()) < 100:
+            stats["error"] = "No meaningful content found"
+            return stats
+
+        logger.info("Auto-indexing Drive file", file=file_name, chars=len(content))
+
+        # Initialize database connections
+        await init_postgres()
+        await init_neo4j()
+
+        try:
+            # Index with chunking
+            async for pg_session in get_session():
+                # First, delete old chunks for this file (in case of update)
+                delete_query = text("""
+                    DELETE FROM document_chunks WHERE drive_id = :drive_id
+                """)
+                await pg_session.execute(delete_query, {"drive_id": file_id})
+
+                # Also delete old embeddings for those chunks
+                delete_emb_query = text("""
+                    DELETE FROM embeddings
+                    WHERE entity_type = 'chunk'
+                    AND entity_id LIKE :pattern
+                """)
+                await pg_session.execute(delete_emb_query, {"pattern": f"{file_id}:%"})
+                await pg_session.commit()
+
+                # Now index with chunking
+                result = await index_document_chunked(
+                    pg_session,
+                    drive_id=file_id,
+                    content=content,
+                    mime_type=mime_type,
+                )
+
+                stats["indexed"] = True
+                stats["chunks_created"] = result["chunks_created"]
+                stats["embeddings_created"] = result["embeddings_created"]
+
+                # Also update the document node in Neo4j
+                async for neo4j_session in get_neo4j_session():
+                    # Mark document as indexed
+                    await mark_document_indexed(neo4j_session, file_id)
+
+                    # Clean up old chunk nodes for this document
+                    cleanup_query = """
+                    MATCH (d:Document {drive_id: $drive_id})-[:HAS_CHUNK]->(c:Chunk)
+                    DETACH DELETE c
+                    """
+                    await neo4j_session.run(cleanup_query, drive_id=file_id)
+
+                    # Analyze chunks and create graph relationships
+                    chunks_query = text("""
+                        SELECT chunk_index FROM document_chunks
+                        WHERE drive_id = :drive_id
+                        ORDER BY chunk_index
+                    """)
+                    chunks_result = await pg_session.execute(chunks_query, {"drive_id": file_id})
+
+                    for row in chunks_result.fetchall():
+                        chunk_id = f"{file_id}:{row.chunk_index}"
+                        try:
+                            analysis = await analyze_chunk_for_graph(
+                                pg_session, neo4j_session, chunk_id, file_name
+                            )
+                            if "error" not in analysis:
+                                stats["chunks_analyzed"] += 1
+                                stats["topics_created"] += analysis.get("topics", 0)
+                                stats["concepts_created"] += analysis.get("concepts", 0)
+                        except Exception as e:
+                            logger.warning("Chunk analysis failed", chunk_id=chunk_id, error=str(e))
+
+                    break
+                break
+
+        finally:
+            await close_postgres()
+            await close_neo4j()
+
+        logger.info(
+            "Auto-indexing complete",
+            file=file_name,
+            chunks=stats["chunks_created"],
+            analyzed=stats["chunks_analyzed"],
+            topics=stats["topics_created"],
+        )
+
+    except Exception as e:
+        stats["error"] = str(e)
+        logger.error("Auto-indexing failed", file=file_name, error=str(e))
+
+    return stats
