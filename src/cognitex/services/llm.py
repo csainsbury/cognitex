@@ -365,6 +365,85 @@ Return ONLY valid JSON, no other text. Use null for unknown fields."""
         )
         return response.data[0].embedding
 
+    async def extract_entities_from_chunk(
+        self,
+        content: str,
+        document_name: str,
+        chunk_index: int,
+    ) -> dict:
+        """
+        Extract entities and semantic information from a document chunk.
+
+        Args:
+            content: The chunk text content
+            document_name: Name of the source document
+            chunk_index: Position of chunk in document
+
+        Returns:
+            Dict with people, topics, concepts, summary, and key_facts
+        """
+        # Truncate content if too long
+        content = content[:3000]
+
+        prompt = f"""Analyze this document chunk and extract structured information.
+
+Document: {document_name}
+Chunk #{chunk_index}
+Content:
+{content}
+
+Extract the following as JSON:
+
+1. "people": List of people mentioned (names or email addresses). Include full names when available.
+
+2. "topics": List of 2-5 main topics/themes discussed. Use concise labels like "diabetes management", "project timeline", "budget planning".
+
+3. "concepts": List of important domain concepts, technical terms, or entities mentioned (e.g., "HbA1c", "blood pressure", "Q4 deadline", "API endpoint").
+
+4. "summary": A 1-2 sentence summary of what this chunk is about.
+
+5. "key_facts": List of specific factual claims or data points (dates, numbers, decisions, etc.).
+
+6. "content_type": One of: "data", "narrative", "code", "mixed", "correspondence", "notes"
+
+Return ONLY valid JSON, no markdown formatting."""
+
+        try:
+            response = await self.complete(
+                prompt,
+                model=self.fast_model,
+                max_tokens=1024,
+                temperature=0.1,
+            )
+
+            response = response.strip()
+            if response.startswith("```"):
+                response = response.split("\n", 1)[1]
+                response = response.rsplit("```", 1)[0]
+
+            result = json.loads(response)
+
+            return {
+                "people": result.get("people", []),
+                "topics": result.get("topics", []),
+                "concepts": result.get("concepts", []),
+                "summary": result.get("summary", ""),
+                "key_facts": result.get("key_facts", []),
+                "content_type": result.get("content_type", "mixed"),
+            }
+
+        except json.JSONDecodeError as e:
+            logger.warning("Failed to parse entity extraction response", error=str(e))
+            return {
+                "people": [],
+                "topics": [],
+                "concepts": [],
+                "summary": "",
+                "key_facts": [],
+                "content_type": "unknown",
+                "parse_error": str(e),
+            }
+
     async def enrich_contact(
         self,
         email_address: str,

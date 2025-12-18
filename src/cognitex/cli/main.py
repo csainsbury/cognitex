@@ -366,8 +366,8 @@ def sync(
         try:
             if clear:
                 console.print("[yellow]Clearing existing email data...[/yellow]")
-                driver = get_driver()
-                async with driver.session() as session:
+                from cognitex.db.neo4j import get_neo4j_session
+                async for session in get_neo4j_session():
                     await session.run("MATCH (e:Email) DETACH DELETE e")
                     await session.run("MATCH (p:Person) WHERE NOT (p)--() DELETE p")
                 console.print("[green]Cleared.[/green]")
@@ -418,8 +418,8 @@ def calendar(
         try:
             if clear:
                 console.print("[yellow]Clearing existing event data...[/yellow]")
-                driver = get_driver()
-                async with driver.session() as session:
+                from cognitex.db.neo4j import get_neo4j_session
+                async for session in get_neo4j_session():
                     await session.run("MATCH (ev:Event) DETACH DELETE ev")
                 console.print("[green]Cleared.[/green]")
 
@@ -1151,6 +1151,136 @@ def doc_search(
                         if doc_link:
                             console.print(f"   [dim]{doc_link}[/dim]")
                         console.print(f"   [dim]{result['content_preview'][:200]}...[/dim]\n")
+
+        finally:
+            await close_postgres()
+            await close_neo4j()
+
+    asyncio.run(run_search())
+
+
+@app.command("deep-index")
+def deep_index(
+    limit: int = typer.Option(100, "--limit", "-l", help="Max documents to index"),
+    max_size: int = typer.Option(10, "--max-size", "-s", help="Max file size in MB"),
+) -> None:
+    """
+    Deep index documents with semantic chunking.
+
+    Splits documents into overlapping chunks for comprehensive understanding.
+    Each chunk gets its own embedding, enabling passage-level retrieval.
+    """
+    from cognitex.config import get_settings
+
+    settings = get_settings()
+    if not settings.together_api_key.get_secret_value():
+        console.print("[red]TOGETHER_API_KEY not configured in .env[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold]Starting deep document indexing...[/bold]")
+    console.print(f"  Limit: {limit} documents")
+    console.print(f"  Max file size: {max_size}MB\n")
+
+    async def run_indexing():
+        from cognitex.db.postgres import init_postgres, close_postgres, get_session
+        from cognitex.services.ingestion import run_deep_document_indexing
+
+        await init_postgres()
+
+        try:
+            async for pg_session in get_session():
+                stats = await run_deep_document_indexing(
+                    pg_session,
+                    limit=limit,
+                    max_file_size=max_size * 1_000_000,
+                )
+
+                console.print("\n[bold green]Deep indexing complete![/bold green]")
+                console.print(f"  Documents processed: {stats['documents_processed']}")
+                console.print(f"  Total chunks: {stats['chunks_total']}")
+                console.print(f"  Total embeddings: {stats['embeddings_total']}")
+                console.print(f"  Skipped (size): {stats['skipped_size']}")
+                console.print(f"  Skipped (type): {stats['skipped_type']}")
+                console.print(f"  Failed: {stats['failed']}")
+
+                if stats["by_folder"]:
+                    console.print("\n[bold]By folder:[/bold]")
+                    for folder, fs in stats["by_folder"].items():
+                        console.print(f"    {folder}: {fs['docs']} docs, {fs['chunks']} chunks")
+
+        finally:
+            await close_postgres()
+
+    asyncio.run(run_indexing())
+
+
+@app.command("chunk-search")
+def chunk_search(
+    query: str = typer.Argument(..., help="Search query"),
+    limit: int = typer.Option(10, "--limit", "-l", help="Maximum results"),
+) -> None:
+    """
+    Search document chunks using semantic similarity.
+
+    Returns the most relevant passages from across all indexed documents.
+    Use this for more precise retrieval than whole-document search.
+    """
+    from cognitex.config import get_settings
+
+    settings = get_settings()
+    if not settings.together_api_key.get_secret_value():
+        console.print("[red]TOGETHER_API_KEY not configured in .env[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold]Searching chunks for:[/bold] {query}\n")
+
+    async def run_search():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
+        from cognitex.db.postgres import init_postgres, close_postgres, get_session
+        from cognitex.services.ingestion import search_chunks_semantic
+
+        await init_neo4j()
+        await init_postgres()
+
+        try:
+            async for pg_session in get_session():
+                results = await search_chunks_semantic(pg_session, query, limit=limit)
+
+                if not results:
+                    console.print("[yellow]No matching chunks found.[/yellow]")
+                    console.print("[dim]Try running 'cognitex deep-index' first.[/dim]")
+                    return
+
+                # Group results by document
+                docs_seen = {}
+                async for neo_session in get_neo4j_session():
+                    for i, result in enumerate(results, 1):
+                        drive_id = result["drive_id"]
+                        similarity = result["similarity"]
+
+                        # Get doc name from Neo4j (cache lookups)
+                        if drive_id not in docs_seen:
+                            doc_query = "MATCH (d:Document {drive_id: $drive_id}) RETURN d.name as name, d.web_link as link"
+                            doc_result = await neo_session.run(doc_query, drive_id=drive_id)
+                            doc_record = await doc_result.single()
+                            docs_seen[drive_id] = {
+                                "name": doc_record["name"] if doc_record else drive_id,
+                                "link": doc_record["link"] if doc_record else None,
+                            }
+
+                        doc_info = docs_seen[drive_id]
+                        chunk_idx = result["chunk_index"]
+
+                        console.print(f"[bold cyan]{i}. {doc_info['name']}[/bold cyan] [dim](chunk {chunk_idx})[/dim]")
+                        console.print(f"   Similarity: [green]{similarity:.2%}[/green]")
+                        if doc_info["link"]:
+                            console.print(f"   [dim]{doc_info['link']}[/dim]")
+
+                        # Show chunk content (truncated)
+                        content = result["content"]
+                        if len(content) > 300:
+                            content = content[:300] + "..."
+                        console.print(f"   [dim]{content}[/dim]\n")
 
         finally:
             await close_postgres()
@@ -3561,6 +3691,657 @@ def _detect_language(filename: str) -> str | None:
     from pathlib import Path
     ext = Path(filename).suffix.lower()
     return ext_map.get(ext)
+
+
+# =============================================================================
+# Decision Memory Commands
+# =============================================================================
+
+@app.command("decision-traces")
+def decision_traces(
+    limit: int = typer.Option(20, "--limit", "-l", help="Number of traces to show"),
+    status: str = typer.Option(None, "--status", "-s", help="Filter by status (pending/approved/edited/rejected/auto_executed)"),
+    action: str = typer.Option(None, "--action", "-a", help="Filter by action type"),
+) -> None:
+    """Show recent decision traces for behavioral learning."""
+    async def show_traces():
+        from cognitex.db.postgres import init_postgres, close_postgres
+        from cognitex.agent.decision_memory import init_decision_memory
+
+        await init_postgres()
+
+        try:
+            decision_memory = await init_decision_memory()
+            traces = await decision_memory.traces.get_recent_traces(
+                limit=limit,
+                status=status,
+                action_type=action,
+            )
+
+            if not traces:
+                console.print("[yellow]No decision traces found.[/yellow]")
+                return
+
+            table = Table(title=f"Decision Traces ({len(traces)} most recent)")
+            table.add_column("ID", style="dim", width=15)
+            table.add_column("Trigger", style="cyan", width=12)
+            table.add_column("Action", style="green", width=15)
+            table.add_column("Status", width=12)
+            table.add_column("Quality", justify="right", width=8)
+            table.add_column("Created", style="dim", width=16)
+
+            for t in traces:
+                # Color status
+                status_style = {
+                    "pending": "yellow",
+                    "approved": "green",
+                    "auto_executed": "blue",
+                    "edited": "magenta",
+                    "rejected": "red",
+                }.get(t["status"], "white")
+
+                quality = f"{t['quality_score']:.2f}" if t["quality_score"] is not None else "-"
+
+                # Format created time
+                created = t["created_at"][:16] if t["created_at"] else "-"
+
+                table.add_row(
+                    t["id"][:15],
+                    t["trigger_type"],
+                    t["action_type"],
+                    f"[{status_style}]{t['status']}[/{status_style}]",
+                    quality,
+                    created,
+                )
+
+            console.print(table)
+
+            # Show summary
+            console.print(f"\n[dim]Filter by status: --status pending|approved|edited|rejected|auto_executed[/dim]")
+
+        finally:
+            await close_postgres()
+
+    asyncio.run(show_traces())
+
+
+@app.command("decision-trace")
+def decision_trace_detail(
+    trace_id: str = typer.Argument(..., help="Trace ID to show details for"),
+) -> None:
+    """Show detailed information about a specific decision trace."""
+    async def show_detail():
+        from cognitex.db.postgres import init_postgres, close_postgres
+        from cognitex.agent.decision_memory import init_decision_memory
+        import json
+
+        await init_postgres()
+
+        try:
+            decision_memory = await init_decision_memory()
+            trace = await decision_memory.traces.get_trace(trace_id)
+
+            if not trace:
+                console.print(f"[red]Trace not found: {trace_id}[/red]")
+                return
+
+            console.print(f"\n[bold]Decision Trace: {trace['id']}[/bold]\n")
+
+            # Basic info
+            console.print(f"[cyan]Trigger:[/cyan] {trace['trigger_type']}")
+            if trace.get('trigger_summary'):
+                console.print(f"[cyan]Summary:[/cyan] {trace['trigger_summary']}")
+            console.print(f"[cyan]Action:[/cyan] {trace['action_type']}")
+            console.print(f"[cyan]Status:[/cyan] {trace['status']}")
+            if trace.get('quality_score') is not None:
+                console.print(f"[cyan]Quality Score:[/cyan] {trace['quality_score']:.2f}")
+
+            # Reasoning
+            if trace.get('reasoning'):
+                console.print(f"\n[bold]Reasoning:[/bold]")
+                console.print(f"  {trace['reasoning']}")
+
+            # Proposed action
+            if trace.get('proposed_action'):
+                console.print(f"\n[bold]Proposed Action:[/bold]")
+                console.print(json.dumps(trace['proposed_action'], indent=2, default=str))
+
+            # Final action (if different)
+            if trace.get('final_action') and trace['final_action'] != trace.get('proposed_action'):
+                console.print(f"\n[bold]Final Action (after edits):[/bold]")
+                console.print(json.dumps(trace['final_action'], indent=2, default=str))
+
+            # Feedback
+            if trace.get('explicit_feedback'):
+                console.print(f"\n[bold]User Feedback:[/bold]")
+                console.print(f"  {trace['explicit_feedback']}")
+
+            # Context (truncated)
+            if trace.get('context'):
+                console.print(f"\n[bold]Context:[/bold] [dim](truncated)[/dim]")
+                ctx = trace['context']
+                if isinstance(ctx, str):
+                    import json as json_module
+                    try:
+                        ctx = json_module.loads(ctx)
+                    except:
+                        pass
+                console.print(json.dumps(ctx, indent=2, default=str)[:500] + "...")
+
+            # Timestamps
+            console.print(f"\n[dim]Created: {trace.get('created_at', '-')}[/dim]")
+            if trace.get('resolved_at'):
+                console.print(f"[dim]Resolved: {trace['resolved_at']}[/dim]")
+
+        finally:
+            await close_postgres()
+
+    asyncio.run(show_detail())
+
+
+@app.command("training-stats")
+def training_stats() -> None:
+    """Show statistics about available training data for fine-tuning."""
+    async def show_stats():
+        from cognitex.db.postgres import init_postgres, close_postgres
+        from cognitex.agent.decision_memory import init_decision_memory
+
+        await init_postgres()
+
+        try:
+            decision_memory = await init_decision_memory()
+            stats = await decision_memory.exporter.get_training_stats()
+
+            console.print("\n[bold]Training Data Statistics[/bold]\n")
+
+            table = Table()
+            table.add_column("Metric", style="cyan")
+            table.add_column("Value", justify="right", style="green")
+
+            table.add_row("Total Traces", str(stats["total_traces"]))
+            table.add_row("High Quality (≥0.8)", str(stats["high_quality"]))
+            table.add_row("Medium Quality (0.6-0.8)", str(stats["medium_quality"]))
+            table.add_row("Low Quality (<0.6)", str(stats["low_quality"]))
+            table.add_row("Trainable Examples", f"[bold]{stats['trainable']}[/bold]")
+            table.add_row("Average Quality", f"{stats['avg_quality']:.2f}")
+
+            console.print(table)
+
+            if stats["trainable"] > 0:
+                console.print(f"\n[green]✓ {stats['trainable']} examples ready for fine-tuning[/green]")
+                console.print("[dim]Export with: cognitex training-export --output training_data.jsonl[/dim]")
+            else:
+                console.print("\n[yellow]No training data available yet.[/yellow]")
+                console.print("[dim]Decision traces are captured automatically as you interact with the agent.[/dim]")
+
+        finally:
+            await close_postgres()
+
+    asyncio.run(show_stats())
+
+
+@app.command("training-export")
+def training_export(
+    output: str = typer.Option("training_data.jsonl", "--output", "-o", help="Output file path"),
+    min_quality: float = typer.Option(0.6, "--min-quality", "-q", help="Minimum quality score to include"),
+    limit: int = typer.Option(None, "--limit", "-l", help="Maximum number of examples to export"),
+) -> None:
+    """Export training data for fine-tuning in JSONL format."""
+    async def export_data():
+        from cognitex.db.postgres import init_postgres, close_postgres
+        from cognitex.agent.decision_memory import init_decision_memory
+        import json
+
+        await init_postgres()
+
+        try:
+            decision_memory = await init_decision_memory()
+            examples = await decision_memory.exporter.export_training_data(
+                min_quality=min_quality,
+                limit=limit,
+            )
+
+            if not examples:
+                console.print("[yellow]No training data to export.[/yellow]")
+                return
+
+            # Write JSONL
+            with open(output, "w") as f:
+                for example in examples:
+                    f.write(json.dumps(example, default=str) + "\n")
+
+            console.print(f"[green]✓ Exported {len(examples)} training examples to {output}[/green]")
+
+            # Show quality distribution
+            high = sum(1 for e in examples if e["quality_score"] >= 0.8)
+            med = sum(1 for e in examples if 0.6 <= e["quality_score"] < 0.8)
+            console.print(f"[dim]  High quality (≥0.8): {high}[/dim]")
+            console.print(f"[dim]  Medium quality (0.6-0.8): {med}[/dim]")
+
+        finally:
+            await close_postgres()
+
+    asyncio.run(export_data())
+
+
+@app.command("comm-patterns")
+def communication_patterns(
+    email: str = typer.Option(None, "--email", "-e", help="Show pattern for specific email address"),
+) -> None:
+    """Show learned communication patterns for contacts."""
+    async def show_patterns():
+        from cognitex.db.postgres import init_postgres, close_postgres, get_session
+        from cognitex.agent.decision_memory import init_decision_memory
+        from sqlalchemy import text
+
+        await init_postgres()
+
+        try:
+            decision_memory = await init_decision_memory()
+
+            if email:
+                # Show specific pattern
+                pattern = await decision_memory.patterns.get_pattern(email)
+                if not pattern:
+                    console.print(f"[yellow]No pattern found for: {email}[/yellow]")
+                    return
+
+                console.print(f"\n[bold]Communication Pattern: {email}[/bold]\n")
+
+                table = Table()
+                table.add_column("Attribute", style="cyan")
+                table.add_column("Value", style="green")
+
+                for key, value in pattern.items():
+                    if value and key not in ["person_email"]:
+                        if isinstance(value, list):
+                            value = ", ".join(str(v) for v in value[:5])
+                        table.add_row(key.replace("_", " ").title(), str(value))
+
+                console.print(table)
+            else:
+                # List all patterns
+                async for session in get_session():
+                    result = await session.execute(text("""
+                        SELECT person_email, person_name, relationship_type,
+                               preferred_tone, interaction_count, pattern_confidence
+                        FROM communication_patterns
+                        ORDER BY interaction_count DESC
+                        LIMIT 50
+                    """))
+
+                    rows = result.fetchall()
+                    if not rows:
+                        console.print("[yellow]No communication patterns learned yet.[/yellow]")
+                        return
+
+                    table = Table(title="Communication Patterns")
+                    table.add_column("Email", style="cyan")
+                    table.add_column("Name", style="green")
+                    table.add_column("Relationship")
+                    table.add_column("Tone")
+                    table.add_column("Interactions", justify="right")
+                    table.add_column("Confidence", justify="right")
+
+                    for row in rows:
+                        table.add_row(
+                            row.person_email[:30],
+                            (row.person_name or "-")[:20],
+                            row.relationship_type or "-",
+                            row.preferred_tone or "-",
+                            str(row.interaction_count),
+                            f"{row.pattern_confidence:.2f}" if row.pattern_confidence else "-",
+                        )
+
+                    console.print(table)
+                    break
+
+        finally:
+            await close_postgres()
+
+    asyncio.run(show_patterns())
+
+
+@app.command("extract-rules")
+def extract_rules(
+    min_occurrences: int = typer.Option(3, "--min", "-m", help="Minimum occurrences to create rule"),
+) -> None:
+    """Extract preference rules from decision patterns."""
+    async def extract():
+        from cognitex.db.postgres import init_postgres, close_postgres
+        from cognitex.agent.decision_memory import init_decision_memory
+
+        await init_postgres()
+
+        try:
+            decision_memory = await init_decision_memory()
+            console.print("[bold]Analyzing decision patterns...[/bold]\n")
+
+            rule_ids = await decision_memory.extract_rules_from_patterns(
+                min_occurrences=min_occurrences
+            )
+
+            if rule_ids:
+                console.print(f"[green]Created/reinforced {len(rule_ids)} preference rules[/green]")
+
+                # Show the rules
+                rules = await decision_memory.rules.get_matching_rules({})
+                if rules:
+                    table = Table(title="Active Preference Rules")
+                    table.add_column("Name", style="cyan")
+                    table.add_column("Type")
+                    table.add_column("Condition")
+                    table.add_column("Preference")
+                    table.add_column("Confidence", justify="right")
+
+                    for rule in rules[:10]:
+                        cond_str = ", ".join(f"{k}={v}" for k, v in (rule.get("condition") or {}).items())
+                        pref_str = ", ".join(f"{k}={v}" for k, v in (rule.get("preference") or {}).items())
+                        table.add_row(
+                            rule.get("rule_name", "")[:40],
+                            rule.get("rule_type", "-"),
+                            cond_str[:30],
+                            pref_str[:40],
+                            f"{rule.get('confidence', 0):.0%}",
+                        )
+
+                    console.print(table)
+            else:
+                console.print("[yellow]No patterns found meeting criteria.[/yellow]")
+                console.print(f"Need at least {min_occurrences} similar decisions with quality >= 0.6")
+
+        finally:
+            await close_postgres()
+
+    asyncio.run(extract())
+
+
+@app.command("pref-rules")
+def preference_rules() -> None:
+    """Show learned preference rules."""
+    async def show_rules():
+        from cognitex.db.postgres import init_postgres, close_postgres, get_session
+        from cognitex.agent.decision_memory import init_decision_memory
+        from sqlalchemy import text
+
+        await init_postgres()
+
+        try:
+            decision_memory = await init_decision_memory()
+
+            async for session in get_session():
+                result = await session.execute(text("""
+                    SELECT id, rule_type, rule_name, condition, preference,
+                           confidence, evidence_count, user_confirmed, created_at
+                    FROM preference_rules
+                    WHERE is_active = true
+                    ORDER BY confidence DESC, evidence_count DESC
+                    LIMIT 30
+                """))
+
+                rows = result.fetchall()
+                if not rows:
+                    console.print("[yellow]No preference rules learned yet.[/yellow]")
+                    console.print("Rules are extracted from consistent decision patterns.")
+                    console.print("Run: cognitex extract-rules")
+                    return
+
+                table = Table(title="Preference Rules")
+                table.add_column("Name", style="cyan")
+                table.add_column("Type")
+                table.add_column("Confidence", justify="right")
+                table.add_column("Evidence", justify="right")
+                table.add_column("Confirmed")
+
+                for row in rows:
+                    table.add_row(
+                        (row.rule_name or "-")[:45],
+                        row.rule_type or "-",
+                        f"{row.confidence:.0%}" if row.confidence else "-",
+                        str(row.evidence_count),
+                        "Yes" if row.user_confirmed else "No",
+                    )
+
+                console.print(table)
+                break
+
+        finally:
+            await close_postgres()
+
+    asyncio.run(show_rules())
+
+
+@app.command("analyze-chunks")
+def analyze_chunks(
+    limit: int = typer.Option(50, "--limit", "-n", help="Number of chunks to analyze"),
+) -> None:
+    """Analyze document chunks and integrate into semantic graph."""
+    async def analyze():
+        from cognitex.db.postgres import init_postgres, close_postgres, get_session
+        from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
+        from cognitex.db.graph_schema import init_graph_schema
+        from cognitex.services.ingestion import analyze_chunks_batch
+
+        await init_postgres()
+        await init_neo4j()
+        await init_graph_schema()
+
+        console.print(f"[bold]Analyzing up to {limit} chunks for semantic graph...[/bold]")
+
+        try:
+            async for pg_session in get_session():
+                async for neo4j_session in get_neo4j_session():
+                    stats = await analyze_chunks_batch(pg_session, neo4j_session, limit=limit)
+
+                    console.print()
+                    console.print("[green]Analysis complete![/green]")
+                    console.print(f"  Chunks processed: {stats['processed']}")
+                    console.print(f"  Chunks skipped (already done): {stats['skipped']}")
+                    console.print(f"  Topics linked: {stats['topics_created']}")
+                    console.print(f"  Concepts linked: {stats['concepts_created']}")
+                    console.print(f"  People linked: {stats['people_linked']}")
+                    if stats['errors'] > 0:
+                        console.print(f"  [red]Errors: {stats['errors']}[/red]")
+                    break
+                break
+
+        finally:
+            await close_postgres()
+            await close_neo4j()
+
+    asyncio.run(analyze())
+
+
+@app.command("topics")
+def list_topics(
+    limit: int = typer.Option(30, "--limit", "-n", help="Number of topics to show"),
+) -> None:
+    """List extracted topics from document analysis."""
+    async def show():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
+        from cognitex.db.graph_schema import get_topics
+
+        await init_neo4j()
+
+        try:
+            async for session in get_neo4j_session():
+                topics = await get_topics(session, limit=limit)
+
+                if not topics:
+                    console.print("[yellow]No topics found. Run 'cognitex analyze-chunks' first.[/yellow]")
+                    return
+
+                table = Table(title=f"Topics ({len(topics)} shown)")
+                table.add_column("Topic", style="cyan")
+                table.add_column("Mentions", justify="right")
+                table.add_column("Chunks", justify="right")
+                table.add_column("Documents", justify="right")
+
+                for t in topics:
+                    table.add_row(
+                        t["name"],
+                        str(t.get("mention_count", 0)),
+                        str(t.get("chunk_count", 0)),
+                        str(t.get("document_count", 0)),
+                    )
+
+                console.print(table)
+                break
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(show())
+
+
+@app.command("concepts")
+def list_concepts(
+    limit: int = typer.Option(30, "--limit", "-n", help="Number of concepts to show"),
+) -> None:
+    """List extracted concepts from document analysis."""
+    async def show():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
+        from cognitex.db.graph_schema import get_concepts
+
+        await init_neo4j()
+
+        try:
+            async for session in get_neo4j_session():
+                concepts = await get_concepts(session, limit=limit)
+
+                if not concepts:
+                    console.print("[yellow]No concepts found. Run 'cognitex analyze-chunks' first.[/yellow]")
+                    return
+
+                table = Table(title=f"Concepts ({len(concepts)} shown)")
+                table.add_column("Concept", style="cyan")
+                table.add_column("Mentions", justify="right")
+                table.add_column("Chunks", justify="right")
+                table.add_column("Documents", justify="right")
+
+                for c in concepts:
+                    table.add_row(
+                        c["name"][:50],
+                        str(c.get("mention_count", 0)),
+                        str(c.get("chunk_count", 0)),
+                        str(c.get("document_count", 0)),
+                    )
+
+                console.print(table)
+                break
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(show())
+
+
+@app.command("topic-explore")
+def explore_topic(
+    topic: str = typer.Argument(..., help="Topic name to explore"),
+) -> None:
+    """Explore connections for a specific topic."""
+    async def explore():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
+        from cognitex.db.graph_schema import get_topic_connections, find_chunks_by_topic
+
+        await init_neo4j()
+
+        try:
+            async for session in get_neo4j_session():
+                connections = await get_topic_connections(session, topic)
+                chunks = await find_chunks_by_topic(session, topic, limit=5)
+
+                if not chunks and not any(connections.values()):
+                    console.print(f"[yellow]Topic '{topic}' not found.[/yellow]")
+                    return
+
+                console.print(f"\n[bold cyan]Topic: {topic}[/bold cyan]\n")
+
+                if connections["related_topics"]:
+                    console.print("[bold]Related Topics:[/bold]")
+                    for t in connections["related_topics"][:10]:
+                        console.print(f"  - {t}")
+
+                if connections["related_concepts"]:
+                    console.print("\n[bold]Related Concepts:[/bold]")
+                    for c in connections["related_concepts"][:10]:
+                        console.print(f"  - {c}")
+
+                if connections["mentioned_people"]:
+                    console.print("\n[bold]People Mentioned:[/bold]")
+                    for p in connections["mentioned_people"][:10]:
+                        console.print(f"  - {p}")
+
+                if connections["documents"]:
+                    console.print("\n[bold]Documents:[/bold]")
+                    for d in connections["documents"][:10]:
+                        console.print(f"  - {d}")
+
+                if chunks:
+                    console.print("\n[bold]Sample Chunks:[/bold]")
+                    for c in chunks[:3]:
+                        console.print(f"  [{c['document_name']}]")
+                        if c.get('summary'):
+                            console.print(f"    {c['summary'][:150]}...")
+                        console.print()
+
+                break
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(explore())
+
+
+@app.command("semantic-stats")
+def semantic_stats() -> None:
+    """Show statistics about the semantic graph."""
+    async def show():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
+        from cognitex.db.postgres import init_postgres, close_postgres, get_session
+        from cognitex.db.graph_schema import get_semantic_graph_stats
+        from sqlalchemy import text
+
+        await init_postgres()
+        await init_neo4j()
+
+        try:
+            # Get PostgreSQL chunk stats
+            async for pg_session in get_session():
+                result = await pg_session.execute(text("""
+                    SELECT COUNT(*) as chunks,
+                           COUNT(DISTINCT drive_id) as documents
+                    FROM document_chunks
+                """))
+                pg_stats = result.fetchone()
+                break
+
+            # Get Neo4j graph stats
+            async for neo4j_session in get_neo4j_session():
+                graph_stats = await get_semantic_graph_stats(neo4j_session)
+                break
+
+            console.print("\n[bold]Semantic Graph Statistics[/bold]\n")
+            console.print(f"PostgreSQL:")
+            console.print(f"  Chunks stored: {pg_stats.chunks}")
+            console.print(f"  Documents chunked: {pg_stats.documents}")
+            console.print()
+            console.print(f"Neo4j Graph:")
+            console.print(f"  Chunk nodes: {graph_stats['chunks']}")
+            console.print(f"  Chunks analyzed: {graph_stats['analyzed']}")
+            console.print(f"  Topics: {graph_stats['topics']}")
+            console.print(f"  Concepts: {graph_stats['concepts']}")
+
+            if pg_stats.chunks > 0:
+                pct = (graph_stats['analyzed'] / pg_stats.chunks) * 100
+                console.print(f"\n  [cyan]Analysis progress: {pct:.1f}%[/cyan]")
+
+        finally:
+            await close_postgres()
+            await close_neo4j()
+
+    asyncio.run(show())
 
 
 if __name__ == "__main__":

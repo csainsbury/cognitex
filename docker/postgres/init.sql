@@ -187,3 +187,23 @@ CREATE INDEX IF NOT EXISTS idx_code_content_path ON code_content(path);
 
 -- Full-text search index on code content
 CREATE INDEX IF NOT EXISTS idx_code_content_fts ON code_content USING gin(to_tsvector('english', content));
+
+-- Document chunks for semantic search with overlapping context
+CREATE TABLE IF NOT EXISTS document_chunks (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    drive_id VARCHAR(255) NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    content_hash VARCHAR(64) NOT NULL,
+    start_char INTEGER NOT NULL,
+    end_char INTEGER NOT NULL,
+    char_count INTEGER NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(drive_id, chunk_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_document_chunks_drive_id ON document_chunks(drive_id);
+CREATE INDEX IF NOT EXISTS idx_document_chunks_hash ON document_chunks(content_hash);
+CREATE INDEX IF NOT EXISTS idx_document_chunks_fts ON document_chunks USING gin(to_tsvector('english', content));
+
+COMMENT ON TABLE document_chunks IS 'Stores document chunks for semantic search with overlap';

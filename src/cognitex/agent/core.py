@@ -10,6 +10,7 @@ from together import Together
 
 from cognitex.config import get_settings
 from cognitex.agent.memory import Memory, init_memory, get_memory
+from cognitex.agent.decision_memory import DecisionMemory, init_decision_memory, get_decision_memory
 from cognitex.agent.tools import ToolRisk, ToolResult, get_tool_registry
 
 logger = structlog.get_logger()
@@ -33,6 +34,7 @@ class ReactTrace:
     steps: list[ThoughtAction] = field(default_factory=list)
     final_response: str = ""
     pending_approvals: list[str] = field(default_factory=list)
+    decision_trace_ids: list[str] = field(default_factory=list)  # IDs of decision traces created
 
 
 class Agent:
@@ -48,6 +50,7 @@ class Agent:
 
     def __init__(self):
         self.memory: Memory | None = None
+        self.decision_memory: DecisionMemory | None = None
         self.tool_registry = get_tool_registry()
         self._initialized = False
         self._client = None
@@ -70,6 +73,9 @@ class Agent:
 
         # Initialize memory
         self.memory = await init_memory()
+
+        # Initialize decision memory for behavioral learning
+        self.decision_memory = await init_decision_memory()
 
         self._initialized = True
         logger.info("Agent initialized")
@@ -100,7 +106,14 @@ class Agent:
 
         tools_text = "\n".join(tool_descriptions)
 
+        # Get current date/time for context
+        now = datetime.now()
+        current_date = now.strftime("%A, %B %d, %Y")
+        current_time = now.strftime("%H:%M")
+
         return f"""You are Cognitex, a personal assistant with access to a knowledge graph containing emails, tasks, calendar events, contacts, and documents.
+
+**Current date and time: {current_date} at {current_time}**
 
 Your job is to help the user by reasoning through their request, gathering information, and taking actions when needed.
 
@@ -157,6 +170,84 @@ Example queries:
 - Recent emails: MATCH (e:Email) WHERE e.date > datetime() - duration('P7D') RETURN e ORDER BY e.date DESC LIMIT 10
 - Person's communication history: MATCH (p:Person {{email: $email}})<-[:SENT_BY]-(e:Email) RETURN e ORDER BY e.date DESC LIMIT 5"""
 
+    async def _get_learned_context(self, message: str) -> str | None:
+        """
+        Build learned context from past decisions, patterns, and rules.
+
+        This queries the decision memory to find:
+        1. Similar past decisions (RAG retrieval)
+        2. Active preference rules
+        3. Communication patterns for mentioned people
+
+        Returns formatted context to append to system prompt.
+        """
+        if not self.decision_memory:
+            return None
+
+        sections = []
+
+        try:
+            # Find similar past decisions via RAG
+            similar_decisions = await self.decision_memory.traces.find_similar_decisions(
+                query_text=message,
+                min_quality=0.6,
+                limit=3,
+            )
+
+            if similar_decisions:
+                examples = []
+                for d in similar_decisions:
+                    if d["similarity"] > 0.3:  # Only include reasonably similar
+                        action_desc = d.get("final_action") or d.get("proposed_action")
+                        status_note = ""
+                        if d["status"] == "edited":
+                            status_note = " (user edited this)"
+                        elif d["status"] == "rejected":
+                            status_note = " (user rejected this)"
+
+                        examples.append(
+                            f"- Similar request: {d.get('trigger_summary', 'N/A')}\n"
+                            f"  Action taken: {d['action_type']}{status_note}\n"
+                            f"  Quality: {d['quality_score']:.0%}"
+                        )
+
+                if examples:
+                    sections.append(
+                        "## Relevant Past Decisions\n"
+                        "Use these as reference for how to handle similar requests:\n\n"
+                        + "\n".join(examples)
+                    )
+
+            # Get active preference rules
+            matching_rules = await self.decision_memory.rules.get_matching_rules(
+                context={"trigger_type": "user_request"},
+                rule_type=None,
+            )
+
+            if matching_rules:
+                rules_text = []
+                for rule in matching_rules[:5]:  # Top 5 rules
+                    if rule["confidence"] >= 0.3:
+                        pref = rule.get("preference", {})
+                        rules_text.append(
+                            f"- {rule['rule_name']}: {pref} (confidence: {rule['confidence']:.0%})"
+                        )
+
+                if rules_text:
+                    sections.append(
+                        "## User Preferences\n"
+                        "Learned preferences from past interactions:\n\n"
+                        + "\n".join(rules_text)
+                    )
+
+        except Exception as e:
+            logger.warning("Failed to get learned context", error=str(e))
+            return None
+
+        if sections:
+            return "\n\n".join(sections)
+        return None
+
     async def chat(self, message: str) -> str:
         """
         Handle a conversational message using ReAct loop.
@@ -166,6 +257,19 @@ Example queries:
 
         Returns:
             Agent's response
+        """
+        response, _ = await self.chat_with_approvals(message)
+        return response
+
+    async def chat_with_approvals(self, message: str) -> tuple[str, list[str]]:
+        """
+        Handle a conversational message and return both response and new approval IDs.
+
+        Args:
+            message: User's message
+
+        Returns:
+            Tuple of (response text, list of new approval IDs created in this interaction)
         """
         self._ensure_initialized()
 
@@ -185,7 +289,7 @@ Example queries:
         if trace.pending_approvals:
             response += f"\n\n_(Staged {len(trace.pending_approvals)} action(s) for your approval)_"
 
-        return response
+        return response, trace.pending_approvals
 
     async def _react_loop(self, message: str) -> ReactTrace:
         """Execute the ReAct reasoning loop."""
@@ -193,6 +297,11 @@ Example queries:
 
         # Build conversation for the LLM
         system_prompt = self._build_system_prompt()
+
+        # Add learned context from past decisions
+        learned_context = await self._get_learned_context(message)
+        if learned_context:
+            system_prompt += f"\n\n{learned_context}"
 
         # Start with system prompt
         conversation = [
@@ -251,14 +360,19 @@ Example queries:
                     break
 
                 # Execute the action
-                observation, approval_id = await self._execute_action(
+                observation, approval_id, trace_id = await self._execute_action(
                     step.action,
-                    step.action_input
+                    step.action_input,
+                    thought=step.thought,
+                    message_context=message,
                 )
                 step.observation = observation
 
                 if approval_id:
                     trace.pending_approvals.append(approval_id)
+
+                if trace_id:
+                    trace.decision_trace_ids.append(trace_id)
 
                 trace.steps.append(step)
 
@@ -312,31 +426,83 @@ Example queries:
 
             return result
 
-    async def _execute_action(self, action: str, action_input: dict) -> tuple[str, str | None]:
+    async def _execute_action(
+        self,
+        action: str,
+        action_input: dict,
+        thought: str = "",
+        message_context: str = "",
+    ) -> tuple[str, str | None, str | None]:
         """
         Execute a tool action and return the observation.
 
+        Args:
+            action: Tool name to execute
+            action_input: Parameters for the tool
+            thought: Agent's reasoning for this action (for decision trace)
+            message_context: Original user message (for decision trace)
+
         Returns:
-            Tuple of (observation string, approval_id if approval needed)
+            Tuple of (observation string, approval_id if approval needed, trace_id if decision traced)
         """
         tool = self.tool_registry.get(action)
         if not tool:
-            return f"Error: Unknown tool '{action}'. Available tools: {[t.name for t in self.tool_registry.all()]}", None
+            return f"Error: Unknown tool '{action}'. Available tools: {[t.name for t in self.tool_registry.all()]}", None, None
+
+        # Determine if this action should be traced
+        # Trace: approval-required actions, task/event creation, email drafting
+        should_trace = tool.risk == ToolRisk.APPROVAL or action in [
+            "create_task", "update_task", "complete_task",
+            "create_event", "draft_email", "send_email",
+        ]
+        trace_id = None
 
         try:
             result = await tool.execute(**action_input)
 
             if result.success:
+                # Create decision trace for significant actions
+                if should_trace and self.decision_memory:
+                    try:
+                        trace_id = await self.decision_memory.traces.create_trace(
+                            trigger_type="user_request",
+                            action_type=action,
+                            proposed_action=action_input,
+                            context={
+                                "user_message": message_context,
+                                "tool_parameters": action_input,
+                            },
+                            trigger_summary=message_context[:100] if message_context else None,
+                            reasoning=thought,
+                            metadata={
+                                "tool_name": action,
+                                "tool_risk": tool.risk.value,
+                                "needs_approval": result.needs_approval,
+                                "approval_id": result.approval_id,  # Link trace to approval
+                            },
+                        )
+
+                        # If auto-executed, record immediate feedback
+                        if not result.needs_approval:
+                            await self.decision_memory.traces.record_feedback(
+                                trace_id,
+                                status="auto_executed",
+                                final_action=action_input,
+                                implicit_signals={"auto_executed": True},
+                            )
+                    except Exception as e:
+                        logger.warning("Failed to create decision trace", error=str(e))
+
                 # Format the observation
                 if result.needs_approval:
-                    return f"Action staged for approval (ID: {result.approval_id}). Details: {result.data}", result.approval_id
+                    return f"Action staged for approval (ID: {result.approval_id}). Details: {result.data}", result.approval_id, trace_id
 
                 # Format data nicely for observation
                 if result.data is None:
-                    return "Success (no data returned)", None
+                    return "Success (no data returned)", None, trace_id
                 elif isinstance(result.data, list):
                     if len(result.data) == 0:
-                        return "No results found", None
+                        return "No results found", None, trace_id
                     # Format list results
                     items = []
                     for item in result.data[:15]:  # Limit to 15 items
@@ -350,17 +516,17 @@ Example queries:
                     obs = f"Found {len(result.data)} results:\n" + "\n".join(items)
                     if len(result.data) > 15:
                         obs += f"\n  ... and {len(result.data) - 15} more"
-                    return obs, None
+                    return obs, None, trace_id
                 elif isinstance(result.data, dict):
-                    return f"Result: {json.dumps(result.data, indent=2, default=str)}", None
+                    return f"Result: {json.dumps(result.data, indent=2, default=str)}", None, trace_id
                 else:
-                    return f"Result: {result.data}", None
+                    return f"Result: {result.data}", None, trace_id
             else:
-                return f"Error: {result.error}", None
+                return f"Error: {result.error}", None, None
 
         except Exception as e:
             logger.error("Tool execution failed", tool=action, error=str(e))
-            return f"Error executing {action}: {str(e)}", None
+            return f"Error executing {action}: {str(e)}", None, None
 
     async def _generate_summary(self, original_message: str, trace: ReactTrace) -> str:
         """Generate a natural summary when hitting max iterations."""
@@ -404,8 +570,22 @@ Your response:"""
     # APPROVAL HANDLING
     # =========================================================================
 
-    async def handle_approval(self, approval_id: str, approved: bool, feedback: str | None = None) -> dict:
-        """Handle user approval or rejection of a staged action."""
+    async def handle_approval(
+        self,
+        approval_id: str,
+        approved: bool,
+        feedback: str | None = None,
+        edited_action: dict | None = None,
+    ) -> dict:
+        """
+        Handle user approval or rejection of a staged action.
+
+        Args:
+            approval_id: The approval to resolve
+            approved: Whether the action was approved
+            feedback: Optional explicit feedback from user
+            edited_action: If the user edited the action before approving
+        """
         self._ensure_initialized()
 
         logger.info("Handling approval", approval_id=approval_id, approved=approved)
@@ -417,9 +597,46 @@ Your response:"""
 
         result = {"success": True, "approval_id": approval_id, "action": approval["action_type"]}
 
+        # Record decision feedback for learning
+        if self.decision_memory:
+            try:
+                trace = await self.decision_memory.traces.find_by_approval_id(approval_id)
+                if trace:
+                    if approved:
+                        status = "edited" if edited_action else "approved"
+                    else:
+                        status = "rejected"
+
+                    await self.decision_memory.traces.record_feedback(
+                        trace["id"],
+                        status=status,
+                        final_action=edited_action or approval["params"],
+                        user_edits={"edited": bool(edited_action)} if edited_action else None,
+                        explicit_feedback=feedback,
+                        implicit_signals={
+                            "was_edited": bool(edited_action),
+                            "had_explicit_feedback": bool(feedback),
+                        },
+                    )
+                    logger.info("Recorded decision feedback", trace_id=trace["id"], status=status)
+
+                    # Learn from approved/edited actions
+                    if approved and approval["action_type"] == "send_email":
+                        await self._learn_from_email_approval(
+                            approval["params"],
+                            edited_action,
+                            trace["id"],
+                        )
+            except Exception as e:
+                logger.warning("Failed to record decision feedback", error=str(e))
+
         if approved:
             action_type = approval["action_type"]
-            params = approval["params"]
+            # Use edited action if provided, otherwise use original params
+            params = edited_action if edited_action else approval["params"]
+            # Preserve reply_to_id from original if not in edited_action
+            if edited_action and approval["params"].get("reply_to_id"):
+                params["reply_to_id"] = approval["params"]["reply_to_id"]
 
             if action_type == "send_email":
                 from cognitex.services.gmail import GmailSender
@@ -441,13 +658,19 @@ Your response:"""
                         )
                     result["sent"] = True
                     result["message_id"] = sent.get("id")
+                    if edited_action:
+                        result["was_edited"] = True
 
-                    await self.memory.episodic.store(
-                        content=f"Sent email to {params['to']}: {params['subject']}",
-                        memory_type="interaction",
-                        importance=4,
-                        entities=[params["to"]],
-                    )
+                    # Store to episodic memory (non-critical)
+                    try:
+                        await self.memory.episodic.store(
+                            content=f"Sent email to {params['to']}: {params['subject']}",
+                            memory_type="interaction",
+                            importance=4,
+                            entities=[params["to"]],
+                        )
+                    except Exception as mem_e:
+                        logger.warning("Failed to store email to episodic memory", error=str(mem_e))
 
                 except Exception as e:
                     result["success"] = False
@@ -458,6 +681,10 @@ Your response:"""
                 calendar = CalendarService()
 
                 try:
+                    # Preserve attendees from original if not in edited_action
+                    if edited_action and approval["params"].get("attendees") and not params.get("attendees"):
+                        params["attendees"] = approval["params"]["attendees"]
+
                     event = calendar.create_event(
                         title=params["title"],
                         start=params["start"],
@@ -467,12 +694,18 @@ Your response:"""
                     )
                     result["created"] = True
                     result["event_id"] = event.get("id")
+                    if edited_action:
+                        result["was_edited"] = True
 
-                    await self.memory.episodic.store(
-                        content=f"Created event: {params['title']} at {params['start']}",
-                        memory_type="interaction",
-                        importance=3,
-                    )
+                    # Store to episodic memory (non-critical)
+                    try:
+                        await self.memory.episodic.store(
+                            content=f"Created event: {params['title']} at {params['start']}",
+                            memory_type="interaction",
+                            importance=3,
+                        )
+                    except Exception as mem_e:
+                        logger.warning("Failed to store event to episodic memory", error=str(mem_e))
 
                 except Exception as e:
                     result["success"] = False
@@ -480,12 +713,15 @@ Your response:"""
 
         else:
             if feedback:
-                await self.memory.episodic.store(
-                    content=f"User rejected {approval['action_type']}: {feedback}",
-                    memory_type="feedback",
-                    importance=4,
-                    metadata={"approval_id": approval_id, "action_type": approval["action_type"]},
-                )
+                try:
+                    await self.memory.episodic.store(
+                        content=f"User rejected {approval['action_type']}: {feedback}",
+                        memory_type="feedback",
+                        importance=4,
+                        metadata={"approval_id": approval_id, "action_type": approval["action_type"]},
+                    )
+                except Exception as mem_e:
+                    logger.warning("Failed to store rejection to episodic memory", error=str(mem_e))
 
         return result
 
@@ -493,6 +729,116 @@ Your response:"""
         """Get all pending approval requests."""
         self._ensure_initialized()
         return await self.memory.working.get_pending_approvals()
+
+    # =========================================================================
+    # LEARNING FROM FEEDBACK
+    # =========================================================================
+
+    async def _learn_from_email_approval(
+        self,
+        original_params: dict,
+        edited_action: dict | None,
+        trace_id: str,
+    ) -> None:
+        """
+        Learn communication patterns from approved/edited email actions.
+
+        This extracts patterns like:
+        - Preferred tone for this recipient
+        - Typical response length
+        - Greeting/sign-off styles
+        """
+        if not self.decision_memory:
+            return
+
+        try:
+            recipient_email = original_params.get("to")
+            if not recipient_email:
+                return
+
+            # Use the final approved content
+            final_content = edited_action or original_params
+            body = final_content.get("body", "")
+
+            if not body:
+                return
+
+            # Analyze the email content to extract patterns
+            patterns = self._analyze_email_patterns(body)
+
+            if patterns:
+                # Update communication pattern for this recipient
+                await self.decision_memory.patterns.update_pattern(
+                    person_email=recipient_email,
+                    updates=patterns,
+                    increment_interaction=True,
+                )
+
+                # Add this trace as an example
+                await self.decision_memory.patterns.add_example_trace(
+                    person_email=recipient_email,
+                    trace_id=trace_id,
+                )
+
+                logger.info(
+                    "Learned communication pattern",
+                    recipient=recipient_email,
+                    patterns=list(patterns.keys()),
+                )
+
+        except Exception as e:
+            logger.warning("Failed to learn from email approval", error=str(e))
+
+    def _analyze_email_patterns(self, body: str) -> dict:
+        """
+        Analyze email body to extract communication patterns.
+
+        Returns dict with detected patterns like tone, greeting style, etc.
+        """
+        patterns = {}
+        body_lower = body.lower()
+        body_lines = body.strip().split('\n')
+
+        # Detect greeting style
+        first_line = body_lines[0].strip().lower() if body_lines else ""
+        if first_line.startswith(("dear ", "hello ", "good morning", "good afternoon")):
+            patterns["greeting_style"] = "formal_greeting"
+        elif first_line.startswith(("hi ", "hey ")):
+            patterns["greeting_style"] = "casual_greeting"
+        elif any(name in first_line for name in ["dr.", "mr.", "ms.", "mrs."]):
+            patterns["greeting_style"] = "formal_title"
+
+        # Detect sign-off style
+        last_lines = '\n'.join(body_lines[-3:]).lower() if len(body_lines) >= 3 else body_lower
+        if any(s in last_lines for s in ["best regards", "kind regards", "sincerely", "yours truly"]):
+            patterns["sign_off_style"] = "formal"
+        elif any(s in last_lines for s in ["thanks", "cheers", "best", "talk soon"]):
+            patterns["sign_off_style"] = "casual"
+
+        # Detect response length preference
+        word_count = len(body.split())
+        if word_count < 50:
+            patterns["typical_response_length"] = "brief"
+        elif word_count < 150:
+            patterns["typical_response_length"] = "moderate"
+        else:
+            patterns["typical_response_length"] = "detailed"
+
+        # Detect tone (simple heuristics)
+        formal_indicators = ["please", "kindly", "would you", "i would appreciate", "thank you for"]
+        casual_indicators = ["!", "awesome", "great", "cool", "sounds good", "no worries"]
+
+        formal_count = sum(1 for ind in formal_indicators if ind in body_lower)
+        casual_count = sum(1 for ind in casual_indicators if ind in body_lower)
+
+        if formal_count > casual_count + 1:
+            patterns["preferred_tone"] = "formal"
+        elif casual_count > formal_count + 1:
+            patterns["preferred_tone"] = "casual"
+        else:
+            patterns["preferred_tone"] = "professional"
+
+        return patterns
 
     # =========================================================================
     # SCHEDULED MODES (briefing, review, etc.)

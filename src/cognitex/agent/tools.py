@@ -215,7 +215,7 @@ class GetContactTool(BaseTool):
     """Get detailed information about a contact."""
 
     name = "get_contact"
-    description = "Get contact profile including relationship history, communication patterns."
+    description = "Get contact profile including relationship history and learned communication preferences (tone, greeting style, etc.)."
     risk = ToolRisk.READONLY
     parameters = {
         "email": {"type": "string", "description": "Contact's email address"},
@@ -243,13 +243,38 @@ class GetContactTool(BaseTool):
             } as contact
             """
 
+            contact_data = None
             async for session in get_neo4j_session():
                 result = await session.run(query, {"email": email})
                 record = await result.single()
 
                 if record:
-                    return ToolResult(success=True, data=record["contact"])
+                    contact_data = dict(record["contact"])
+                    break
+
+            if not contact_data:
                 return ToolResult(success=False, error=f"Contact not found: {email}")
+
+            # Enhance with learned communication patterns
+            try:
+                from cognitex.agent.decision_memory import get_decision_memory
+                decision_memory = get_decision_memory()
+                comm_pattern = await decision_memory.patterns.get_pattern(email)
+
+                if comm_pattern:
+                    contact_data["learned_preferences"] = {
+                        "preferred_tone": comm_pattern.get("preferred_tone"),
+                        "response_urgency": comm_pattern.get("response_urgency"),
+                        "typical_response_length": comm_pattern.get("typical_response_length"),
+                        "greeting_style": comm_pattern.get("greeting_style"),
+                        "sign_off_style": comm_pattern.get("sign_off_style"),
+                        "interaction_count": comm_pattern.get("interaction_count", 0),
+                        "pattern_confidence": comm_pattern.get("pattern_confidence", 0),
+                    }
+            except Exception as e:
+                logger.debug("Could not fetch communication pattern", email=email, error=str(e))
+
+            return ToolResult(success=True, data=contact_data)
         except Exception as e:
             logger.warning("Contact fetch failed", email=email, error=str(e))
             return ToolResult(success=False, error=str(e))
@@ -555,7 +580,9 @@ class DraftEmailTool(BaseTool):
         reasoning: str = "",
     ) -> ToolResult:
         from cognitex.agent.memory import get_memory
+        from cognitex.db.redis import get_redis
         import uuid
+        import json
 
         try:
             memory = get_memory()
@@ -572,6 +599,26 @@ class DraftEmailTool(BaseTool):
                 },
                 reasoning=reasoning,
             )
+
+            # Send notification to Discord with approval buttons
+            try:
+                redis = get_redis()
+                reasoning_line = f"\n_{reasoning}_" if reasoning else ""
+                notification = {
+                    "message": (
+                        f"**📧 Email Draft for Approval**\n\n"
+                        f"**To:** {to}\n"
+                        f"**Subject:** {subject}\n\n"
+                        f"**Body:**\n```\n{body[:800]}{'...' if len(body) > 800 else ''}\n```"
+                        f"{reasoning_line}"
+                    ),
+                    "urgency": "normal",
+                    "approval_id": approval_id,
+                }
+                await redis.publish("cognitex:notifications", json.dumps(notification))
+                logger.info("Approval notification sent", approval_id=approval_id)
+            except Exception as e:
+                logger.warning("Failed to send approval notification", error=str(e))
 
             logger.info("Email draft staged", approval_id=approval_id, to=to)
             return ToolResult(

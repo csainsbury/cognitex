@@ -39,12 +39,24 @@ async def close_neo4j() -> None:
         logger.info("Neo4j connection closed")
 
 
-async def get_neo4j_session() -> AsyncGenerator[AsyncSession, None]:
-    """Get a Neo4j session."""
+async def get_neo4j_session(
+    database: str = "neo4j",
+    access_mode: str = "WRITE",
+) -> AsyncGenerator[AsyncSession, None]:
+    """
+    Get a Neo4j session.
+
+    Args:
+        database: Database name (default: neo4j)
+        access_mode: "WRITE" or "READ" (default: WRITE for backwards compatibility)
+    """
+    from neo4j import WRITE_ACCESS, READ_ACCESS
+
     if _driver is None:
         raise RuntimeError("Neo4j not initialized. Call init_neo4j() first.")
 
-    async with _driver.session() as session:
+    mode = WRITE_ACCESS if access_mode == "WRITE" else READ_ACCESS
+    async with _driver.session(database=database, default_access_mode=mode) as session:
         yield session
 
 

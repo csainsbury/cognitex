@@ -4,7 +4,7 @@ import hashlib
 from datetime import datetime
 
 import structlog
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cognitex.db.neo4j import get_neo4j_session
@@ -898,16 +898,24 @@ async def index_document_content(
     # Calculate content hash
     content_hash = hashlib.sha256(content.encode()).hexdigest()[:64]
 
-    # Check if content already indexed with same hash
+    # Check if content already indexed with same hash AND embedding exists
     check_query = text("""
-        SELECT content_hash FROM document_content WHERE drive_id = :drive_id
+        SELECT dc.content_hash, e.id as embedding_id
+        FROM document_content dc
+        LEFT JOIN embeddings e ON e.entity_type = 'document' AND e.entity_id = dc.drive_id
+        WHERE dc.drive_id = :drive_id
     """)
     result = await pg_session.execute(check_query, {"drive_id": drive_id})
     existing = result.fetchone()
 
-    if existing and existing.content_hash == content_hash:
-        logger.debug("Document content unchanged, skipping", drive_id=drive_id)
-        return None
+    if existing and existing.content_hash == content_hash and existing.embedding_id:
+        logger.debug("Document content unchanged and embedding exists, skipping", drive_id=drive_id)
+        return str(existing.embedding_id)
+
+    # Truncate content to stay under PostgreSQL tsvector limit (~1MB)
+    # The FTS index trigger will fail for strings > 1048575 bytes
+    MAX_CONTENT_LENGTH = 500_000  # ~500KB to be safe with multi-byte chars
+    stored_content = content[:MAX_CONTENT_LENGTH] if len(content) > MAX_CONTENT_LENGTH else content
 
     # Store content
     upsert_query = text("""
@@ -921,35 +929,39 @@ async def index_document_content(
     """)
     await pg_session.execute(upsert_query, {
         "drive_id": drive_id,
-        "content": content,
+        "content": stored_content,
         "content_hash": content_hash,
-        "char_count": len(content),
+        "char_count": len(content),  # Store original length for reference
     })
 
-    # Generate embedding (truncate content if too long)
+    # Generate embedding (truncate to ~400 chars for bge-base-en-v1.5 512 token limit)
+    # CSV/code files have many small tokens, so we need a smaller char limit
     llm = get_llm_service()
-    embedding_text = content[:8000]  # m2-bert supports 8k tokens
+    embedding_text = content[:400]  # Conservative limit to stay under 512 tokens
 
     try:
         embedding = await llm.generate_embedding(embedding_text)
+        # Convert list to pgvector string format for asyncpg
+        embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
 
         # Store embedding
         embedding_query = text("""
             INSERT INTO embeddings (entity_type, entity_id, content_hash, embedding)
-            VALUES ('document', :drive_id, :content_hash, :embedding)
+            VALUES ('document', :drive_id, :content_hash, CAST(:embedding AS vector))
             ON CONFLICT (entity_type, entity_id) DO UPDATE SET
-                content_hash = :content_hash,
-                embedding = :embedding,
+                content_hash = EXCLUDED.content_hash,
+                embedding = EXCLUDED.embedding,
                 created_at = NOW()
             RETURNING id
         """)
         result = await pg_session.execute(embedding_query, {
             "drive_id": drive_id,
             "content_hash": content_hash,
-            "embedding": embedding,
+            "embedding": embedding_str,
         })
         row = result.fetchone()
-        embedding_id = row.id if row else None
+        # Convert UUID to string to avoid asyncpg type issues
+        embedding_id = str(row.id) if row else None
 
         await pg_session.commit()
 
@@ -1053,12 +1065,346 @@ async def run_priority_folder_indexing(
                     name=file_data["name"],
                     error=str(e),
                 )
+                # Rollback to recover from failed transaction
+                await pg_session.rollback()
 
         stats["by_folder"][folder_name] = folder_stats
 
     logger.info("Priority folder indexing complete", **stats)
 
     return stats
+
+
+# ============================================================================
+# Deep document indexing with chunking
+# ============================================================================
+
+
+async def index_document_chunked(
+    pg_session: AsyncSession,
+    drive_id: str,
+    content: str,
+    mime_type: str | None = None,
+) -> dict:
+    """
+    Index a document using semantic chunking for deep understanding.
+
+    Splits the document into overlapping chunks, generates embeddings for each,
+    and stores them for retrieval. This enables finding relevant passages
+    within large documents.
+
+    Args:
+        pg_session: PostgreSQL async session
+        drive_id: Drive file ID
+        content: Full document content
+        mime_type: MIME type hint for chunking strategy
+
+    Returns:
+        Dict with indexing stats (chunks_created, embeddings_created)
+    """
+    from cognitex.services.chunking import smart_chunk, compute_hash
+    from cognitex.services.llm import get_llm_service
+
+    stats = {"chunks_created": 0, "embeddings_created": 0, "skipped": 0}
+
+    # Calculate content hash for the full document
+    full_hash = compute_hash(content)
+
+    # Check if already indexed with same hash
+    check_query = text("""
+        SELECT COUNT(*) as chunk_count FROM document_chunks
+        WHERE drive_id = :drive_id
+    """)
+    result = await pg_session.execute(check_query, {"drive_id": drive_id})
+    existing = result.fetchone()
+
+    if existing and existing.chunk_count > 0:
+        # Check if content changed by comparing first chunk hash
+        hash_query = text("""
+            SELECT content_hash FROM document_chunks
+            WHERE drive_id = :drive_id AND chunk_index = 0
+        """)
+        hash_result = await pg_session.execute(hash_query, {"drive_id": drive_id})
+        first_chunk = hash_result.fetchone()
+
+        # Generate first chunk to compare
+        chunks = smart_chunk(content, mime_type)
+        if chunks and first_chunk and first_chunk.content_hash == chunks[0].content_hash:
+            logger.debug("Document unchanged, skipping", drive_id=drive_id, chunks=existing.chunk_count)
+            stats["skipped"] = existing.chunk_count
+            return stats
+
+        # Content changed - delete old chunks
+        delete_query = text("DELETE FROM document_chunks WHERE drive_id = :drive_id")
+        await pg_session.execute(delete_query, {"drive_id": drive_id})
+        delete_embeddings = text("""
+            DELETE FROM embeddings
+            WHERE entity_type = 'chunk' AND entity_id LIKE :pattern
+        """)
+        await pg_session.execute(delete_embeddings, {"pattern": f"{drive_id}:%"})
+    else:
+        chunks = smart_chunk(content, mime_type)
+
+    if not chunks:
+        logger.debug("No chunks generated", drive_id=drive_id)
+        return stats
+
+    llm = get_llm_service()
+
+    # Process chunks
+    for chunk in chunks:
+        # Store chunk
+        insert_chunk = text("""
+            INSERT INTO document_chunks
+                (drive_id, chunk_index, content, content_hash, start_char, end_char, char_count)
+            VALUES
+                (:drive_id, :chunk_index, :content, :content_hash, :start_char, :end_char, :char_count)
+            ON CONFLICT (drive_id, chunk_index) DO UPDATE SET
+                content = EXCLUDED.content,
+                content_hash = EXCLUDED.content_hash,
+                start_char = EXCLUDED.start_char,
+                end_char = EXCLUDED.end_char,
+                char_count = EXCLUDED.char_count
+        """)
+        await pg_session.execute(insert_chunk, {
+            "drive_id": drive_id,
+            "chunk_index": chunk.chunk_index,
+            "content": chunk.content,
+            "content_hash": chunk.content_hash,
+            "start_char": chunk.start_char,
+            "end_char": chunk.end_char,
+            "char_count": len(chunk.content),
+        })
+        stats["chunks_created"] += 1
+
+        # Generate embedding for chunk
+        # Use first 400 chars to stay within token limit
+        embedding_text = chunk.content[:400]
+        chunk_entity_id = f"{drive_id}:{chunk.chunk_index}"
+
+        try:
+            embedding = await llm.generate_embedding(embedding_text)
+            embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
+
+            insert_embedding = text("""
+                INSERT INTO embeddings (entity_type, entity_id, content_hash, embedding)
+                VALUES ('chunk', :entity_id, :content_hash, CAST(:embedding AS vector))
+                ON CONFLICT (entity_type, entity_id) DO UPDATE SET
+                    content_hash = EXCLUDED.content_hash,
+                    embedding = EXCLUDED.embedding,
+                    created_at = NOW()
+            """)
+            await pg_session.execute(insert_embedding, {
+                "entity_id": chunk_entity_id,
+                "content_hash": chunk.content_hash,
+                "embedding": embedding_str,
+            })
+            stats["embeddings_created"] += 1
+
+        except Exception as e:
+            logger.warning(
+                "Failed to embed chunk",
+                drive_id=drive_id,
+                chunk_index=chunk.chunk_index,
+                error=str(e),
+            )
+
+    await pg_session.commit()
+
+    logger.info(
+        "Indexed document with chunks",
+        drive_id=drive_id,
+        chunks=stats["chunks_created"],
+        embeddings=stats["embeddings_created"],
+    )
+
+    return stats
+
+
+async def run_deep_document_indexing(
+    pg_session: AsyncSession,
+    folder_names: list[str] | None = None,
+    limit: int = 100,
+    max_file_size: int = 10_000_000,  # 10MB default
+) -> dict:
+    """
+    Index documents with deep chunking for comprehensive understanding.
+
+    Memory-efficient: processes one document at a time, uses streaming.
+
+    Args:
+        pg_session: PostgreSQL async session
+        folder_names: Folders to index (defaults to PRIORITY_FOLDERS)
+        limit: Maximum documents to process
+        max_file_size: Skip files larger than this (bytes)
+
+    Returns:
+        Indexing stats
+    """
+    from cognitex.services.drive import get_drive_service, PRIORITY_FOLDERS
+
+    folder_names = folder_names or PRIORITY_FOLDERS
+    logger.info("Starting deep document indexing", folders=folder_names, limit=limit)
+
+    drive = get_drive_service()
+
+    stats = {
+        "documents_processed": 0,
+        "chunks_total": 0,
+        "embeddings_total": 0,
+        "skipped_size": 0,
+        "skipped_type": 0,
+        "failed": 0,
+        "by_folder": {},
+    }
+
+    # MIME types we can meaningfully index
+    indexable_types = {
+        'application/vnd.google-apps.document',
+        'application/vnd.google-apps.spreadsheet',
+        'text/plain',
+        'text/csv',
+        'text/markdown',
+        'application/pdf',
+        'application/json',
+        'text/x-python',
+        'application/javascript',
+    }
+
+    for folder_name in folder_names:
+        folder_stats = {"docs": 0, "chunks": 0, "skipped": 0, "failed": 0}
+
+        folder_id = drive.get_folder_id_by_name(folder_name)
+        if not folder_id:
+            logger.warning("Priority folder not found", folder=folder_name)
+            continue
+
+        for file_data in drive.list_files_in_folder(folder_id, recursive=True):
+            if stats["documents_processed"] >= limit:
+                break
+
+            # Skip folders
+            if file_data["mimeType"] == "application/vnd.google-apps.folder":
+                continue
+
+            # Skip large files
+            file_size = int(file_data.get("size", 0))
+            if file_size > max_file_size:
+                logger.debug("Skipping large file", name=file_data["name"], size=file_size)
+                stats["skipped_size"] += 1
+                folder_stats["skipped"] += 1
+                continue
+
+            # Skip non-indexable types
+            mime_type = file_data["mimeType"]
+            if mime_type not in indexable_types and not mime_type.startswith('text/'):
+                stats["skipped_type"] += 1
+                folder_stats["skipped"] += 1
+                continue
+
+            try:
+                # Extract content (this is the memory-intensive part)
+                content = drive.get_file_content(file_data["id"], mime_type)
+
+                if not content or len(content.strip()) < 100:
+                    folder_stats["skipped"] += 1
+                    continue
+
+                # Index with chunking
+                result = await index_document_chunked(
+                    pg_session,
+                    drive_id=file_data["id"],
+                    content=content,
+                    mime_type=mime_type,
+                )
+
+                stats["documents_processed"] += 1
+                stats["chunks_total"] += result["chunks_created"]
+                stats["embeddings_total"] += result["embeddings_created"]
+                folder_stats["docs"] += 1
+                folder_stats["chunks"] += result["chunks_created"]
+
+                # Free memory
+                del content
+
+            except Exception as e:
+                folder_stats["failed"] += 1
+                stats["failed"] += 1
+                logger.warning(
+                    "Failed to index document",
+                    drive_id=file_data["id"],
+                    name=file_data["name"],
+                    error=str(e),
+                )
+                await pg_session.rollback()
+
+        stats["by_folder"][folder_name] = folder_stats
+
+    logger.info("Deep document indexing complete", **stats)
+
+    return stats
+
+
+async def search_chunks_semantic(
+    pg_session: AsyncSession,
+    query: str,
+    limit: int = 10,
+) -> list[dict]:
+    """
+    Search document chunks using semantic similarity.
+
+    Returns the most relevant passages from across all indexed documents.
+
+    Args:
+        pg_session: PostgreSQL async session
+        query: Search query text
+        limit: Maximum results to return
+
+    Returns:
+        List of matching chunks with document info and similarity scores
+    """
+    from cognitex.services.llm import get_llm_service
+
+    llm = get_llm_service()
+
+    # Generate query embedding
+    query_embedding = await llm.generate_embedding(query)
+    query_embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
+
+    # Search chunks
+    search_query = text("""
+        SELECT
+            e.entity_id,
+            dc.drive_id,
+            dc.chunk_index,
+            dc.content,
+            dc.start_char,
+            dc.end_char,
+            1 - (e.embedding <=> CAST(:query_embedding AS vector)) as similarity
+        FROM embeddings e
+        JOIN document_chunks dc ON dc.drive_id || ':' || dc.chunk_index = e.entity_id
+        WHERE e.entity_type = 'chunk'
+        ORDER BY e.embedding <=> CAST(:query_embedding AS vector)
+        LIMIT :limit
+    """)
+
+    result = await pg_session.execute(search_query, {
+        "query_embedding": query_embedding_str,
+        "limit": limit,
+    })
+
+    results = []
+    for row in result.fetchall():
+        results.append({
+            "drive_id": row.drive_id,
+            "chunk_index": row.chunk_index,
+            "content": row.content,
+            "start_char": row.start_char,
+            "end_char": row.end_char,
+            "similarity": float(row.similarity),
+        })
+
+    return results
 
 
 # ============================================================================
@@ -1277,22 +1623,25 @@ async def search_documents_semantic(
     query_embedding = await llm.generate_embedding(query)
 
     # Search for similar documents
+    # Format embedding as PostgreSQL array literal for pgvector
+    embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
+
     search_query = text("""
         SELECT
             e.entity_id as drive_id,
             dc.content,
-            1 - (e.embedding <=> :query_embedding::vector) as similarity
+            1 - (e.embedding <=> CAST(:query_embedding AS vector)) as similarity
         FROM embeddings e
         JOIN document_content dc ON dc.drive_id = e.entity_id
         WHERE e.entity_type = 'document'
-        ORDER BY e.embedding <=> :query_embedding::vector
+        ORDER BY e.embedding <=> CAST(:query_embedding AS vector)
         LIMIT :limit
-    """)
+    """).bindparams(
+        bindparam("query_embedding", value=embedding_str),
+        bindparam("limit", value=limit),
+    )
 
-    result = await pg_session.execute(search_query, {
-        "query_embedding": query_embedding,
-        "limit": limit,
-    })
+    result = await pg_session.execute(search_query)
 
     results = []
     for row in result.fetchall():
@@ -1303,3 +1652,199 @@ async def search_documents_semantic(
         })
 
     return results
+
+
+# ============================================================================
+# Chunk analysis and graph integration
+# ============================================================================
+
+
+async def analyze_chunk_for_graph(
+    pg_session: AsyncSession,
+    neo4j_session,
+    chunk_id: str,
+    document_name: str,
+) -> dict:
+    """
+    Analyze a chunk using LLM and create graph relationships.
+
+    Args:
+        pg_session: PostgreSQL async session
+        neo4j_session: Neo4j async session
+        chunk_id: The chunk ID (drive_id:chunk_index)
+        document_name: Name of the parent document
+
+    Returns:
+        Dict with extraction results and counts
+    """
+    from cognitex.services.llm import get_llm_service
+    from cognitex.db.graph_schema import (
+        create_chunk,
+        link_chunk_to_topic,
+        link_chunk_to_concept,
+        link_chunk_to_person,
+    )
+
+    # Parse chunk_id
+    parts = chunk_id.rsplit(":", 1)
+    if len(parts) != 2:
+        logger.error("Invalid chunk_id format", chunk_id=chunk_id)
+        return {"error": "Invalid chunk_id format"}
+
+    drive_id, chunk_index_str = parts
+    chunk_index = int(chunk_index_str)
+
+    # Get chunk content from PostgreSQL
+    query = text("""
+        SELECT content FROM document_chunks
+        WHERE drive_id = :drive_id AND chunk_index = :chunk_index
+    """)
+    result = await pg_session.execute(query, {"drive_id": drive_id, "chunk_index": chunk_index})
+    row = result.fetchone()
+
+    if not row:
+        logger.warning("Chunk not found in database", chunk_id=chunk_id)
+        return {"error": "Chunk not found"}
+
+    content = row.content
+
+    # Extract entities using LLM
+    llm = get_llm_service()
+    entities = await llm.extract_entities_from_chunk(content, document_name, chunk_index)
+
+    # Create chunk node in graph
+    await create_chunk(
+        neo4j_session,
+        chunk_id=chunk_id,
+        drive_id=drive_id,
+        chunk_index=chunk_index,
+        summary=entities.get("summary"),
+        content_type=entities.get("content_type"),
+        key_facts=entities.get("key_facts", []),
+    )
+
+    # Link to topics
+    topics = entities.get("topics", [])
+    for topic in topics:
+        if topic:
+            await link_chunk_to_topic(neo4j_session, chunk_id, topic)
+
+    # Link to concepts
+    concepts = entities.get("concepts", [])
+    for concept in concepts:
+        if concept:
+            await link_chunk_to_concept(neo4j_session, chunk_id, concept)
+
+    # Link to people
+    people = entities.get("people", [])
+    for person in people:
+        if person:
+            await link_chunk_to_person(neo4j_session, chunk_id, person)
+
+    return {
+        "chunk_id": chunk_id,
+        "summary": entities.get("summary", ""),
+        "content_type": entities.get("content_type"),
+        "topics": len(topics),
+        "concepts": len(concepts),
+        "people": len(people),
+        "key_facts": len(entities.get("key_facts", [])),
+    }
+
+
+async def analyze_chunks_batch(
+    pg_session: AsyncSession,
+    neo4j_session,
+    limit: int = 50,
+) -> dict:
+    """
+    Analyze unanalyzed chunks in batch and create graph relationships.
+
+    Args:
+        pg_session: PostgreSQL async session
+        neo4j_session: Neo4j async session
+        limit: Maximum chunks to process
+
+    Returns:
+        Dict with processing statistics
+    """
+    # Get chunks that have embeddings - we'll check Neo4j for already-analyzed ones
+    simple_query = text("""
+        SELECT dc.drive_id, dc.chunk_index
+        FROM document_chunks dc
+        JOIN embeddings e ON e.entity_id = dc.drive_id || ':' || dc.chunk_index
+            AND e.entity_type = 'chunk'
+        ORDER BY dc.drive_id, dc.chunk_index
+        LIMIT :limit
+    """)
+
+    result = await pg_session.execute(simple_query, {"limit": limit * 2})  # Fetch extra to account for already-analyzed
+    chunks = result.fetchall()
+
+    # Get document names from Neo4j
+    doc_names = {}
+    stats = {
+        "processed": 0,
+        "skipped": 0,
+        "topics_created": 0,
+        "concepts_created": 0,
+        "people_linked": 0,
+        "errors": 0,
+    }
+
+    for row in chunks:
+        if stats["processed"] >= limit:
+            break
+
+        drive_id = row.drive_id
+        chunk_index = row.chunk_index
+        chunk_id = f"{drive_id}:{chunk_index}"
+
+        # Check if already analyzed in Neo4j
+        check_query = """
+        MATCH (c:Chunk {id: $chunk_id})
+        WHERE c.analyzed = true
+        RETURN c.id
+        """
+        check_result = await neo4j_session.run(check_query, chunk_id=chunk_id)
+        existing = await check_result.single()
+        if existing:
+            stats["skipped"] += 1
+            continue
+
+        # Get document name
+        if drive_id not in doc_names:
+            doc_query = """
+            MATCH (d:Document {drive_id: $drive_id})
+            RETURN d.name as name
+            """
+            doc_result = await neo4j_session.run(doc_query, drive_id=drive_id)
+            doc_record = await doc_result.single()
+            doc_names[drive_id] = doc_record["name"] if doc_record else "Unknown"
+
+        document_name = doc_names[drive_id]
+
+        try:
+            analysis = await analyze_chunk_for_graph(
+                pg_session, neo4j_session, chunk_id, document_name
+            )
+
+            if "error" not in analysis:
+                stats["processed"] += 1
+                stats["topics_created"] += analysis.get("topics", 0)
+                stats["concepts_created"] += analysis.get("concepts", 0)
+                stats["people_linked"] += analysis.get("people", 0)
+                logger.info(
+                    "Analyzed chunk",
+                    chunk_id=chunk_id,
+                    topics=analysis.get("topics", 0),
+                    concepts=analysis.get("concepts", 0),
+                )
+            else:
+                stats["errors"] += 1
+
+        except Exception as e:
+            logger.error("Error analyzing chunk", chunk_id=chunk_id, error=str(e))
+            stats["errors"] += 1
+
+    return stats

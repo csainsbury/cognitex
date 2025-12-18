@@ -1,0 +1,176 @@
+flowchart TB
+    subgraph Entry["Entry Points"]
+        CLI["CLI<br/>(Typer)"]
+        WebUI["Web Dashboard<br/>(FastAPI + HTMX)"]
+        Discord["Discord Bot<br/>(Slash Commands)"]
+        API["REST API<br/>(FastAPI)"]
+        Webhooks["Webhooks<br/>(Push Notifications)"]
+    end
+
+    subgraph Agent["Agent Core"]
+        ReAct["ReAct Loop<br/>(max 8 iterations)"]
+        Thought["1. Thought<br/>LLM Reasoning"]
+        Action["2. Action<br/>Tool Selection"]
+        Observation["3. Observation<br/>Tool Results"]
+        Response["Final Response"]
+
+        ReAct --> Thought
+        Thought --> Action
+        Action --> Observation
+        Observation -->|"Continue"| Thought
+        Observation -->|"action=null"| Response
+    end
+
+    subgraph Tools["Tool System"]
+        subgraph ReadOnly["READONLY Tools"]
+            GraphQuery["graph_query"]
+            SearchDocs["search_documents"]
+            SearchCode["search_code"]
+            GetCalendar["get_calendar"]
+            GetTasks["get_tasks"]
+            RecallMem["recall_memory"]
+            GetContacts["get_contact"]
+        end
+
+        subgraph AutoExec["AUTO Tools"]
+            CreateTask["create_task"]
+            UpdateTask["update_task"]
+            CreateProject["create_project"]
+            CreateGoal["create_goal"]
+            SendNotif["send_notification"]
+            AddMemory["add_memory"]
+        end
+
+        subgraph Approval["APPROVAL Tools"]
+            DraftEmail["draft_email"]
+            CreateEvent["create_event"]
+        end
+    end
+
+    subgraph Memory["Memory Systems"]
+        Working["Working Memory<br/>(Redis)<br/>• Conversations<br/>• Pending Approvals<br/>• 24h TTL"]
+        Episodic["Episodic Memory<br/>(PostgreSQL)<br/>• Past Decisions<br/>• Vector Search"]
+        Decision["Decision Memory<br/>(PostgreSQL)<br/>• Full Traces<br/>• Quality Scores<br/>• Training Data"]
+    end
+
+    subgraph Triggers["Trigger System"]
+        Scheduled["Scheduled<br/>(APScheduler)"]
+        EventDriven["Event-Driven<br/>(Redis Pub/Sub)"]
+
+        Morning["8am: Briefing"]
+        Evening["6pm: Review"]
+        Hourly["Hourly: Urgent Check"]
+
+        EmailEvent["Email Events"]
+        CalendarEvent["Calendar Events"]
+        TaskEvent["Task Events"]
+
+        Scheduled --> Morning
+        Scheduled --> Evening
+        Scheduled --> Hourly
+        EventDriven --> EmailEvent
+        EventDriven --> CalendarEvent
+        EventDriven --> TaskEvent
+    end
+
+    subgraph DataStores["Data Stores"]
+        Neo4j[("Neo4j<br/>Graph DB<br/>• People<br/>• Emails<br/>• Tasks<br/>• Events<br/>• Projects<br/>• Goals")]
+        Postgres[("PostgreSQL<br/>+ pgvector<br/>• Embeddings<br/>• Documents<br/>• Code<br/>• Memories")]
+        Redis[("Redis<br/>• Sessions<br/>• Pub/Sub<br/>• Cache")]
+    end
+
+    subgraph External["External Services"]
+        Gmail["Gmail API<br/>• Push Notifications<br/>• Send/Reply"]
+        GCal["Google Calendar<br/>• Watch API<br/>• Create Events"]
+        GDrive["Google Drive<br/>• File Indexing<br/>• Change Detection"]
+        GitHub["GitHub<br/>• Code Sync<br/>• Embeddings"]
+        TogetherAI["Together.ai<br/>• LLM Inference<br/>• Embeddings"]
+    end
+
+    subgraph ApprovalFlow["Approval Flow"]
+        Stage["Stage Approval"]
+        Pending["Pending in Redis"]
+        UserAction["User Approves/Rejects"]
+        Execute["Execute Action"]
+        RecordFeedback["Record Feedback"]
+    end
+
+    %% Entry to Agent
+    CLI --> ReAct
+    WebUI --> ReAct
+    Discord --> ReAct
+    API --> ReAct
+    Webhooks --> EventDriven
+
+    %% Agent to Tools
+    Action --> ReadOnly
+    Action --> AutoExec
+    Action --> Approval
+
+    %% Tool Results
+    ReadOnly --> Observation
+    AutoExec --> Observation
+    AutoExec --> Decision
+    Approval --> Stage
+
+    %% Approval Flow
+    Stage --> Pending
+    Pending --> UserAction
+    UserAction -->|"Approved"| Execute
+    UserAction -->|"Rejected"| RecordFeedback
+    Execute --> RecordFeedback
+    RecordFeedback --> Decision
+
+    %% Memory Connections
+    ReAct <--> Working
+    ReAct --> Episodic
+    AutoExec --> Decision
+    Approval --> Decision
+
+    %% Data Store Connections
+    GraphQuery --> Neo4j
+    SearchDocs --> Postgres
+    SearchCode --> Postgres
+    RecallMem --> Postgres
+    AddMemory --> Postgres
+    Working --> Redis
+    EventDriven --> Redis
+    SendNotif --> Redis
+
+    %% External Service Connections
+    DraftEmail --> Gmail
+    Execute -->|"send_email"| Gmail
+    CreateEvent --> GCal
+    Execute -->|"create_event"| GCal
+    GetCalendar --> GCal
+    SearchDocs --> GDrive
+    SearchCode --> GitHub
+    Thought --> TogetherAI
+
+    %% Trigger to Agent
+    Morning --> ReAct
+    Evening --> ReAct
+    Hourly --> ReAct
+    EmailEvent --> ReAct
+    CalendarEvent --> ReAct
+
+    %% Discord Notifications
+    SendNotif --> Discord
+    RecordFeedback --> Discord
+
+    %% Styling
+    classDef entry fill:#e1f5fe,stroke:#01579b
+    classDef agent fill:#fff3e0,stroke:#e65100
+    classDef tools fill:#f3e5f5,stroke:#7b1fa2
+    classDef memory fill:#e8f5e9,stroke:#2e7d32
+    classDef data fill:#fce4ec,stroke:#c2185b
+    classDef external fill:#e0f2f1,stroke:#00695c
+    classDef approval fill:#fff8e1,stroke:#f57f17
+
+    class CLI,WebUI,Discord,API,Webhooks entry
+    class ReAct,Thought,Action,Observation,Response agent
+    class GraphQuery,SearchDocs,SearchCode,GetCalendar,GetTasks,RecallMem,GetContacts,CreateTask,UpdateTask,CreateProject,CreateGoal,SendNotif,AddMemory,DraftEmail,CreateEvent tools
+    class Working,Episodic,Decision memory
+    class Neo4j,Postgres,Redis data
+    class Gmail,GCal,GDrive,GitHub,TogetherAI external
+    class Stage,Pending,UserAction,Execute,RecordFeedback approval

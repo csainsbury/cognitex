@@ -223,11 +223,15 @@ class CognitexBot(commands.Bot):
                         )
                         return
 
-                    # Get response from agent
-                    response = await self.agent.chat(content)
+                    # Get response from agent (with approval IDs from this interaction)
+                    response, new_approval_ids = await self.agent.chat_with_approvals(content)
 
                     # Format and send response
                     await self.send_agent_response(message.channel, response)
+
+                    # Send only the new approvals from this interaction with buttons
+                    if new_approval_ids:
+                        await self._send_approvals_by_ids(message.channel, new_approval_ids)
 
                 except Exception as e:
                     logger.error("Agent chat failed", error=str(e))
@@ -266,6 +270,64 @@ class CognitexBot(commands.Bot):
                 if i > 0:
                     await asyncio.sleep(0.5)  # Rate limiting
                 await channel.send(chunk)
+
+    async def _send_approvals_by_ids(self, channel, approval_ids: list[str]) -> None:
+        """Send specific approvals with buttons to the given channel."""
+        try:
+            if not self.agent:
+                return
+
+            for approval_id in approval_ids:
+                # Get the specific approval
+                approval = await self.agent.memory.working.get_approval(approval_id)
+                if not approval:
+                    continue
+
+                action_type = approval.get("action_type", "")
+                params = approval.get("params", {})
+                reasoning = approval.get("reasoning", "")
+
+                # Format based on action type
+                if action_type == "send_email":
+                    content = (
+                        f"**📧 Email Draft for Approval**\n\n"
+                        f"**To:** {params.get('to', '?')}\n"
+                        f"**Subject:** {params.get('subject', '?')}\n\n"
+                        f"**Body:**\n```\n{params.get('body', '')[:800]}{'...' if len(params.get('body', '')) > 800 else ''}\n```"
+                    )
+                    if reasoning:
+                        content += f"\n_{reasoning}_"
+                elif action_type == "create_event":
+                    content = (
+                        f"**📅 Calendar Event for Approval**\n\n"
+                        f"**Title:** {params.get('title', '?')}\n"
+                        f"**Time:** {params.get('start', '?')} - {params.get('end', '?')}\n"
+                    )
+                    if params.get("attendees"):
+                        content += f"**Attendees:** {', '.join(params['attendees'])}\n"
+                    if params.get("description"):
+                        content += f"\n{params['description']}"
+                    if reasoning:
+                        content += f"\n\n_{reasoning}_"
+                else:
+                    content = f"**Action for Approval: {action_type}**\n\n{json.dumps(params, indent=2)[:500]}"
+
+                # Create embed
+                embed = discord.Embed(
+                    description=content,
+                    color=discord.Color.orange(),
+                    timestamp=datetime.now(),
+                )
+                embed.set_footer(text=f"Approval ID: {approval_id}")
+
+                # Add approval buttons
+                view = ApprovalView(approval_id, self)
+
+                await channel.send(embed=embed, view=view)
+                logger.info("Sent approval request to channel", approval_id=approval_id, action_type=action_type)
+
+        except Exception as e:
+            logger.error("Failed to send approvals", error=str(e))
 
     async def send_notification(self, content: str) -> None:
         """Send a simple notification to the configured channel."""
@@ -409,6 +471,54 @@ class ApprovalView(discord.ui.View):
         except Exception as e:
             await interaction.followup.send(f"Error: {str(e)[:100]}", ephemeral=True)
 
+    @discord.ui.button(label="Edit & Approve", style=discord.ButtonStyle.blurple, emoji="✏️")
+    async def edit_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        """Handle edit button click - opens a modal to edit content."""
+        try:
+            # Get the approval details
+            approval = await self.bot.agent.memory.working.get_approval(self.approval_id)
+            if not approval:
+                await interaction.response.send_message("Approval not found or expired.", ephemeral=True)
+                return
+
+            action_type = approval.get("action_type", "")
+            params = approval.get("params", {})
+
+            if action_type == "send_email":
+                modal = EmailEditModal(
+                    approval_id=self.approval_id,
+                    bot=self.bot,
+                    view=self,
+                    original_to=params.get("to", ""),
+                    original_subject=params.get("subject", ""),
+                    original_body=params.get("body", ""),
+                )
+                await interaction.response.send_modal(modal)
+            elif action_type == "create_event":
+                modal = EventEditModal(
+                    approval_id=self.approval_id,
+                    bot=self.bot,
+                    view=self,
+                    original_title=params.get("title", ""),
+                    original_start=params.get("start", ""),
+                    original_end=params.get("end", ""),
+                    original_description=params.get("description", ""),
+                )
+                await interaction.response.send_modal(modal)
+            else:
+                await interaction.response.send_message(
+                    f"Edit not supported for action type: {action_type}",
+                    ephemeral=True,
+                )
+
+        except Exception as e:
+            logger.error("Edit button failed", error=str(e))
+            await interaction.response.send_message(f"Error: {str(e)[:100]}", ephemeral=True)
+
     @discord.ui.button(label="Reject", style=discord.ButtonStyle.red, emoji="❌")
     async def reject_button(
         self,
@@ -441,6 +551,208 @@ class ApprovalView(discord.ui.View):
         for item in self.children:
             if isinstance(item, discord.ui.Button):
                 item.disabled = True
+
+
+class EmailEditModal(discord.ui.Modal, title="Edit Email"):
+    """Modal for editing email before approval."""
+
+    def __init__(
+        self,
+        approval_id: str,
+        bot: CognitexBot,
+        view: ApprovalView,
+        original_to: str,
+        original_subject: str,
+        original_body: str,
+    ):
+        super().__init__()
+        self.approval_id = approval_id
+        self.bot = bot
+        self.view = view
+        self.original_params = {
+            "to": original_to,
+            "subject": original_subject,
+            "body": original_body,
+        }
+
+        # Add input fields with original values
+        self.to_field = discord.ui.TextInput(
+            label="To",
+            default=original_to,
+            required=True,
+            max_length=200,
+        )
+        self.add_item(self.to_field)
+
+        self.subject_field = discord.ui.TextInput(
+            label="Subject",
+            default=original_subject,
+            required=True,
+            max_length=200,
+        )
+        self.add_item(self.subject_field)
+
+        self.body_field = discord.ui.TextInput(
+            label="Body",
+            style=discord.TextStyle.paragraph,
+            default=original_body[:4000],  # Discord limit
+            required=True,
+            max_length=4000,
+        )
+        self.add_item(self.body_field)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        """Handle form submission - approve with edited content."""
+        await interaction.response.defer()
+
+        try:
+            # Build edited action with new values
+            edited_action = {
+                "to": self.to_field.value,
+                "subject": self.subject_field.value,
+                "body": self.body_field.value,
+            }
+
+            # Check what was changed for learning
+            changes = []
+            if self.to_field.value != self.original_params["to"]:
+                changes.append("recipient")
+            if self.subject_field.value != self.original_params["subject"]:
+                changes.append("subject")
+            if self.body_field.value != self.original_params["body"]:
+                changes.append("body")
+
+            # Approve with edited content
+            result = await self.bot.agent.handle_approval(
+                self.approval_id,
+                approved=True,
+                edited_action=edited_action,
+                feedback=f"User edited: {', '.join(changes)}" if changes else None,
+            )
+
+            if result.get("success"):
+                change_note = f" (edited: {', '.join(changes)})" if changes else ""
+                await interaction.followup.send(
+                    f"✅ **Approved with edits{change_note}**: Email sent successfully.",
+                    ephemeral=False,
+                )
+                # Disable buttons
+                self.view.disable_all_buttons()
+                await interaction.message.edit(view=self.view)
+            else:
+                await interaction.followup.send(
+                    f"❌ Failed: {result.get('error', 'Unknown error')}",
+                    ephemeral=True,
+                )
+
+        except Exception as e:
+            logger.error("Email edit submit failed", error=str(e))
+            await interaction.followup.send(f"Error: {str(e)[:100]}", ephemeral=True)
+
+
+class EventEditModal(discord.ui.Modal, title="Edit Calendar Event"):
+    """Modal for editing calendar event before approval."""
+
+    def __init__(
+        self,
+        approval_id: str,
+        bot: CognitexBot,
+        view: ApprovalView,
+        original_title: str,
+        original_start: str,
+        original_end: str,
+        original_description: str,
+    ):
+        super().__init__()
+        self.approval_id = approval_id
+        self.bot = bot
+        self.view = view
+        self.original_params = {
+            "title": original_title,
+            "start": original_start,
+            "end": original_end,
+            "description": original_description,
+        }
+
+        self.title_field = discord.ui.TextInput(
+            label="Title",
+            default=original_title,
+            required=True,
+            max_length=200,
+        )
+        self.add_item(self.title_field)
+
+        self.start_field = discord.ui.TextInput(
+            label="Start (ISO format: 2025-12-18T09:00:00)",
+            default=original_start,
+            required=True,
+            max_length=30,
+        )
+        self.add_item(self.start_field)
+
+        self.end_field = discord.ui.TextInput(
+            label="End (ISO format: 2025-12-18T10:00:00)",
+            default=original_end,
+            required=True,
+            max_length=30,
+        )
+        self.add_item(self.end_field)
+
+        self.description_field = discord.ui.TextInput(
+            label="Description",
+            style=discord.TextStyle.paragraph,
+            default=original_description[:1000] if original_description else "",
+            required=False,
+            max_length=1000,
+        )
+        self.add_item(self.description_field)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        """Handle form submission - approve with edited content."""
+        await interaction.response.defer()
+
+        try:
+            edited_action = {
+                "title": self.title_field.value,
+                "start": self.start_field.value,
+                "end": self.end_field.value,
+                "description": self.description_field.value,
+            }
+
+            changes = []
+            if self.title_field.value != self.original_params["title"]:
+                changes.append("title")
+            if self.start_field.value != self.original_params["start"]:
+                changes.append("start time")
+            if self.end_field.value != self.original_params["end"]:
+                changes.append("end time")
+            if self.description_field.value != self.original_params.get("description", ""):
+                changes.append("description")
+
+            result = await self.bot.agent.handle_approval(
+                self.approval_id,
+                approved=True,
+                edited_action=edited_action,
+                feedback=f"User edited: {', '.join(changes)}" if changes else None,
+            )
+
+            if result.get("success"):
+                change_note = f" (edited: {', '.join(changes)})" if changes else ""
+                await interaction.followup.send(
+                    f"✅ **Approved with edits{change_note}**: Event created successfully.",
+                    ephemeral=False,
+                )
+                self.view.disable_all_buttons()
+                await interaction.message.edit(view=self.view)
+            else:
+                await interaction.followup.send(
+                    f"❌ Failed: {result.get('error', 'Unknown error')}",
+                    ephemeral=True,
+                )
+
+        except Exception as e:
+            logger.error("Event edit submit failed", error=str(e))
+            await interaction.followup.send(f"Error: {str(e)[:100]}", ephemeral=True)
 
 
 # =============================================================================

@@ -9,11 +9,12 @@ services:
     env_file:
       - .env
     environment:
-      - DATABASE_URL=postgresql://cognitex:${POSTGRES_PASSWORD}@postgres:5432/cognitex
+      - DATABASE_URL=postgresql://cognitex:${POSTGRES_PASSWORD_URLENCODED}@postgres:5432/cognitex
       - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=${NEO4J_PASSWORD}
       - REDIS_URL=redis://redis:6379/0
+      - PYTHONPATH=/app/src
     ports:
       - "8000:8000"
     volumes:
@@ -40,11 +41,12 @@ services:
     env_file:
       - .env
     environment:
-      - DATABASE_URL=postgresql://cognitex:${POSTGRES_PASSWORD}@postgres:5432/cognitex
+      - DATABASE_URL=postgresql://cognitex:${POSTGRES_PASSWORD_URLENCODED}@postgres:5432/cognitex
       - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=${NEO4J_PASSWORD}
       - REDIS_URL=redis://redis:6379/0
+      - PYTHONPATH=/app/src
     volumes:
       - ./src:/app/src:ro
       - ./data:/app/data
@@ -69,11 +71,12 @@ services:
     env_file:
       - .env
     environment:
-      - DATABASE_URL=postgresql://cognitex:${POSTGRES_PASSWORD}@postgres:5432/cognitex
+      - DATABASE_URL=postgresql://cognitex:${POSTGRES_PASSWORD_URLENCODED}@postgres:5432/cognitex
       - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=${NEO4J_PASSWORD}
       - REDIS_URL=redis://redis:6379/0
+      - PYTHONPATH=/app/src
     volumes:
       - ./src:/app/src:ro
       - ./data:/app/data:ro

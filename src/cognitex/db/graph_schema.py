@@ -20,6 +20,10 @@ SCHEMA_STATEMENTS = [
     "CREATE CONSTRAINT repository_id IF NOT EXISTS FOR (r:Repository) REQUIRE r.id IS UNIQUE",
     "CREATE CONSTRAINT repository_full_name IF NOT EXISTS FOR (r:Repository) REQUIRE r.full_name IS UNIQUE",
     "CREATE CONSTRAINT codefile_id IF NOT EXISTS FOR (cf:CodeFile) REQUIRE cf.id IS UNIQUE",
+    # Chunk, Topic, Concept constraints for semantic graph
+    "CREATE CONSTRAINT chunk_id IF NOT EXISTS FOR (c:Chunk) REQUIRE c.id IS UNIQUE",
+    "CREATE CONSTRAINT topic_name IF NOT EXISTS FOR (t:Topic) REQUIRE t.name IS UNIQUE",
+    "CREATE CONSTRAINT concept_name IF NOT EXISTS FOR (c:Concept) REQUIRE c.name IS UNIQUE",
 
     # Additional indexes for common queries
     "CREATE INDEX person_name IF NOT EXISTS FOR (p:Person) ON (p.name)",
@@ -41,14 +45,21 @@ SCHEMA_STATEMENTS = [
     "CREATE INDEX repository_name IF NOT EXISTS FOR (r:Repository) ON (r.name)",
     "CREATE INDEX codefile_path IF NOT EXISTS FOR (cf:CodeFile) ON (cf.path)",
     "CREATE INDEX codefile_language IF NOT EXISTS FOR (cf:CodeFile) ON (cf.language)",
+    # Chunk indexes for semantic search
+    "CREATE INDEX chunk_drive_id IF NOT EXISTS FOR (c:Chunk) ON (c.drive_id)",
+    "CREATE INDEX chunk_index IF NOT EXISTS FOR (c:Chunk) ON (c.chunk_index)",
+    "CREATE INDEX chunk_content_type IF NOT EXISTS FOR (c:Chunk) ON (c.content_type)",
+    "CREATE INDEX chunk_analyzed IF NOT EXISTS FOR (c:Chunk) ON (c.analyzed)",
 ]
 
 
 async def init_graph_schema() -> None:
     """Initialize the Neo4j graph schema with constraints and indexes."""
+    from neo4j import WRITE_ACCESS
+
     driver = get_driver()
 
-    async with driver.session() as session:
+    async with driver.session(default_access_mode=WRITE_ACCESS) as session:
         for statement in SCHEMA_STATEMENTS:
             try:
                 await session.run(statement)
@@ -2157,3 +2168,412 @@ async def link_codefiles_import(
     MERGE (importer)-[:IMPORTS]->(imported)
     """
     await session.run(query, importer_id=importer_id, imported_id=imported_id)
+
+
+# ============================================================================
+# Chunk operations (Document semantic graph)
+# ============================================================================
+
+async def create_chunk(
+    session: AsyncSession,
+    chunk_id: str,
+    drive_id: str,
+    chunk_index: int,
+    summary: str | None = None,
+    content_type: str | None = None,
+    key_facts: list[str] | None = None,
+) -> dict:
+    """
+    Create a Chunk node in the graph linked to its parent Document.
+
+    Args:
+        chunk_id: Unique identifier (drive_id:chunk_index)
+        drive_id: Parent document's Drive ID
+        chunk_index: Position in document (0-indexed)
+        summary: LLM-generated summary
+        content_type: Type of content (data, narrative, code, etc.)
+        key_facts: List of key facts extracted
+    """
+    query = """
+    MERGE (c:Chunk {id: $chunk_id})
+    ON CREATE SET
+        c.drive_id = $drive_id,
+        c.chunk_index = $chunk_index,
+        c.summary = $summary,
+        c.content_type = $content_type,
+        c.key_facts = $key_facts,
+        c.analyzed = true,
+        c.created_at = datetime()
+    ON MATCH SET
+        c.summary = COALESCE($summary, c.summary),
+        c.content_type = COALESCE($content_type, c.content_type),
+        c.key_facts = COALESCE($key_facts, c.key_facts),
+        c.analyzed = true,
+        c.updated_at = datetime()
+    RETURN c
+    """
+    result = await session.run(
+        query,
+        chunk_id=chunk_id,
+        drive_id=drive_id,
+        chunk_index=chunk_index,
+        summary=summary,
+        content_type=content_type,
+        key_facts=key_facts or [],
+    )
+    record = await result.single()
+
+    # Link to parent document
+    if record:
+        link_query = """
+        MATCH (d:Document {drive_id: $drive_id})
+        MATCH (c:Chunk {id: $chunk_id})
+        MERGE (d)-[:HAS_CHUNK]->(c)
+        """
+        await session.run(link_query, drive_id=drive_id, chunk_id=chunk_id)
+
+        # Link to previous chunk for sequence
+        if chunk_index > 0:
+            prev_chunk_id = f"{drive_id}:{chunk_index - 1}"
+            seq_query = """
+            MATCH (prev:Chunk {id: $prev_chunk_id})
+            MATCH (curr:Chunk {id: $chunk_id})
+            MERGE (prev)-[:NEXT_CHUNK]->(curr)
+            """
+            await session.run(seq_query, prev_chunk_id=prev_chunk_id, chunk_id=chunk_id)
+
+    return dict(record["c"]) if record else {}
+
+
+async def create_topic(
+    session: AsyncSession,
+    name: str,
+) -> dict:
+    """
+    Create or get a Topic node (normalized label for themes/subjects).
+
+    Args:
+        name: Topic name (lowercase, normalized)
+    """
+    # Normalize topic name
+    normalized = name.lower().strip()
+
+    query = """
+    MERGE (t:Topic {name: $name})
+    ON CREATE SET
+        t.created_at = datetime(),
+        t.mention_count = 1
+    ON MATCH SET
+        t.mention_count = t.mention_count + 1
+    RETURN t
+    """
+    result = await session.run(query, name=normalized)
+    record = await result.single()
+    return dict(record["t"]) if record else {}
+
+
+async def create_concept(
+    session: AsyncSession,
+    name: str,
+) -> dict:
+    """
+    Create or get a Concept node (domain-specific terms, entities).
+
+    Args:
+        name: Concept name (preserved case for proper nouns)
+    """
+    # Light normalization - preserve case but trim
+    normalized = name.strip()
+
+    query = """
+    MERGE (c:Concept {name: $name})
+    ON CREATE SET
+        c.created_at = datetime(),
+        c.mention_count = 1
+    ON MATCH SET
+        c.mention_count = c.mention_count + 1
+    RETURN c
+    """
+    result = await session.run(query, name=normalized)
+    record = await result.single()
+    return dict(record["c"]) if record else {}
+
+
+async def link_chunk_to_topic(
+    session: AsyncSession,
+    chunk_id: str,
+    topic_name: str,
+) -> None:
+    """Create DISCUSSES relationship between Chunk and Topic."""
+    normalized = topic_name.lower().strip()
+    query = """
+    MATCH (c:Chunk {id: $chunk_id})
+    MERGE (t:Topic {name: $topic_name})
+    MERGE (c)-[:DISCUSSES]->(t)
+    """
+    await session.run(query, chunk_id=chunk_id, topic_name=normalized)
+
+
+async def link_chunk_to_concept(
+    session: AsyncSession,
+    chunk_id: str,
+    concept_name: str,
+) -> None:
+    """Create REFERENCES relationship between Chunk and Concept."""
+    normalized = concept_name.strip()
+    query = """
+    MATCH (c:Chunk {id: $chunk_id})
+    MERGE (con:Concept {name: $concept_name})
+    MERGE (c)-[:REFERENCES]->(con)
+    """
+    await session.run(query, chunk_id=chunk_id, concept_name=normalized)
+
+
+async def link_chunk_to_person(
+    session: AsyncSession,
+    chunk_id: str,
+    person_identifier: str,
+) -> None:
+    """
+    Create MENTIONS relationship between Chunk and Person.
+
+    Args:
+        chunk_id: The chunk ID
+        person_identifier: Email address or name to match/create person
+    """
+    # Check if it looks like an email
+    if "@" in person_identifier:
+        query = """
+        MATCH (c:Chunk {id: $chunk_id})
+        MERGE (p:Person {email: $identifier})
+        MERGE (c)-[:MENTIONS]->(p)
+        """
+    else:
+        # Try to match by name, create with generated email if not found
+        query = """
+        MATCH (c:Chunk {id: $chunk_id})
+        MERGE (p:Person {name: $identifier})
+        ON CREATE SET p.email = $identifier + '@unknown'
+        MERGE (c)-[:MENTIONS]->(p)
+        """
+    await session.run(query, chunk_id=chunk_id, identifier=person_identifier)
+
+
+async def get_unanalyzed_chunks(
+    session: AsyncSession,
+    limit: int = 100,
+) -> list[dict]:
+    """Get chunks that haven't been analyzed for entities yet."""
+    query = """
+    MATCH (d:Document)-[:HAS_CHUNK]->(c:Chunk)
+    WHERE c.analyzed IS NULL OR c.analyzed = false
+    RETURN c.id as chunk_id, c.drive_id as drive_id, c.chunk_index as chunk_index,
+           d.name as document_name
+    ORDER BY c.drive_id, c.chunk_index
+    LIMIT $limit
+    """
+    result = await session.run(query, limit=limit)
+    records = await result.data()
+    return records
+
+
+async def get_chunks_for_document(
+    session: AsyncSession,
+    drive_id: str,
+) -> list[dict]:
+    """Get all chunks for a document with their relationships."""
+    query = """
+    MATCH (d:Document {drive_id: $drive_id})-[:HAS_CHUNK]->(c:Chunk)
+    OPTIONAL MATCH (c)-[:DISCUSSES]->(t:Topic)
+    OPTIONAL MATCH (c)-[:REFERENCES]->(con:Concept)
+    OPTIONAL MATCH (c)-[:MENTIONS]->(p:Person)
+    RETURN c,
+           collect(DISTINCT t.name) as topics,
+           collect(DISTINCT con.name) as concepts,
+           collect(DISTINCT p.name) as people
+    ORDER BY c.chunk_index ASC
+    """
+    result = await session.run(query, drive_id=drive_id)
+    records = await result.data()
+    return [
+        {
+            **dict(r["c"]),
+            "topics": [t for t in r["topics"] if t],
+            "concepts": [c for c in r["concepts"] if c],
+            "people": [p for p in r["people"] if p],
+        }
+        for r in records
+    ]
+
+
+async def get_topics(
+    session: AsyncSession,
+    limit: int = 50,
+) -> list[dict]:
+    """Get all topics ordered by mention count."""
+    query = """
+    MATCH (t:Topic)
+    OPTIONAL MATCH (c:Chunk)-[:DISCUSSES]->(t)
+    OPTIONAL MATCH (c)-[:HAS_CHUNK]-(d:Document)
+    RETURN t.name as name,
+           t.mention_count as mention_count,
+           count(DISTINCT c) as chunk_count,
+           count(DISTINCT d) as document_count
+    ORDER BY t.mention_count DESC
+    LIMIT $limit
+    """
+    result = await session.run(query, limit=limit)
+    records = await result.data()
+    return records
+
+
+async def get_concepts(
+    session: AsyncSession,
+    limit: int = 50,
+) -> list[dict]:
+    """Get all concepts ordered by mention count."""
+    query = """
+    MATCH (c:Concept)
+    OPTIONAL MATCH (ch:Chunk)-[:REFERENCES]->(c)
+    OPTIONAL MATCH (ch)-[:HAS_CHUNK]-(d:Document)
+    RETURN c.name as name,
+           c.mention_count as mention_count,
+           count(DISTINCT ch) as chunk_count,
+           count(DISTINCT d) as document_count
+    ORDER BY c.mention_count DESC
+    LIMIT $limit
+    """
+    result = await session.run(query, limit=limit)
+    records = await result.data()
+    return records
+
+
+async def find_chunks_by_topic(
+    session: AsyncSession,
+    topic_name: str,
+    limit: int = 20,
+) -> list[dict]:
+    """Find chunks that discuss a specific topic."""
+    normalized = topic_name.lower().strip()
+    query = """
+    MATCH (c:Chunk)-[:DISCUSSES]->(t:Topic {name: $topic_name})
+    MATCH (d:Document)-[:HAS_CHUNK]->(c)
+    RETURN c.id as chunk_id,
+           c.summary as summary,
+           c.chunk_index as chunk_index,
+           d.drive_id as drive_id,
+           d.name as document_name
+    ORDER BY c.chunk_index ASC
+    LIMIT $limit
+    """
+    result = await session.run(query, topic_name=normalized, limit=limit)
+    records = await result.data()
+    return records
+
+
+async def find_chunks_by_concept(
+    session: AsyncSession,
+    concept_name: str,
+    limit: int = 20,
+) -> list[dict]:
+    """Find chunks that reference a specific concept."""
+    query = """
+    MATCH (c:Chunk)-[:REFERENCES]->(con:Concept {name: $concept_name})
+    MATCH (d:Document)-[:HAS_CHUNK]->(c)
+    RETURN c.id as chunk_id,
+           c.summary as summary,
+           c.chunk_index as chunk_index,
+           d.drive_id as drive_id,
+           d.name as document_name
+    ORDER BY c.chunk_index ASC
+    LIMIT $limit
+    """
+    result = await session.run(query, concept_name=concept_name, limit=limit)
+    records = await result.data()
+    return records
+
+
+async def find_chunks_mentioning_person(
+    session: AsyncSession,
+    person_email: str,
+    limit: int = 20,
+) -> list[dict]:
+    """Find chunks that mention a specific person."""
+    query = """
+    MATCH (c:Chunk)-[:MENTIONS]->(p:Person {email: $person_email})
+    MATCH (d:Document)-[:HAS_CHUNK]->(c)
+    RETURN c.id as chunk_id,
+           c.summary as summary,
+           c.chunk_index as chunk_index,
+           d.drive_id as drive_id,
+           d.name as document_name
+    ORDER BY c.chunk_index ASC
+    LIMIT $limit
+    """
+    result = await session.run(query, person_email=person_email, limit=limit)
+    records = await result.data()
+    return records
+
+
+async def get_topic_connections(
+    session: AsyncSession,
+    topic_name: str,
+) -> dict:
+    """Get all entities connected to a topic (for graph exploration)."""
+    normalized = topic_name.lower().strip()
+    query = """
+    MATCH (t:Topic {name: $topic_name})<-[:DISCUSSES]-(c:Chunk)
+    OPTIONAL MATCH (c)-[:REFERENCES]->(con:Concept)
+    OPTIONAL MATCH (c)-[:MENTIONS]->(p:Person)
+    OPTIONAL MATCH (c)-[:DISCUSSES]->(other_topic:Topic)
+    WHERE other_topic.name <> $topic_name
+    OPTIONAL MATCH (d:Document)-[:HAS_CHUNK]->(c)
+    RETURN
+        collect(DISTINCT con.name) as related_concepts,
+        collect(DISTINCT p.email) as mentioned_people,
+        collect(DISTINCT other_topic.name) as related_topics,
+        collect(DISTINCT d.name) as documents
+    """
+    result = await session.run(query, topic_name=normalized)
+    record = await result.single()
+    if not record:
+        return {"related_concepts": [], "mentioned_people": [], "related_topics": [], "documents": []}
+    return {
+        "related_concepts": [c for c in record["related_concepts"] if c],
+        "mentioned_people": [p for p in record["mentioned_people"] if p],
+        "related_topics": [t for t in record["related_topics"] if t],
+        "documents": [d for d in record["documents"] if d],
+    }
+
+
+async def get_semantic_graph_stats(session: AsyncSession) -> dict:
+    """Get statistics about the semantic graph (chunks, topics, concepts)."""
+    query = """
+    MATCH (c:Chunk)
+    WITH count(c) as chunk_count
+    MATCH (t:Topic)
+    WITH chunk_count, count(t) as topic_count
+    MATCH (con:Concept)
+    RETURN chunk_count, topic_count, count(con) as concept_count
+    """
+    result = await session.run(query)
+    record = await result.single()
+
+    if not record:
+        return {"chunks": 0, "topics": 0, "concepts": 0, "analyzed": 0}
+
+    # Get analyzed count
+    analyzed_query = """
+    MATCH (c:Chunk)
+    WHERE c.analyzed = true
+    RETURN count(c) as analyzed_count
+    """
+    analyzed_result = await session.run(analyzed_query)
+    analyzed_record = await analyzed_result.single()
+
+    return {
+        "chunks": record["chunk_count"],
+        "topics": record["topic_count"],
+        "concepts": record["concept_count"],
+        "analyzed": analyzed_record["analyzed_count"] if analyzed_record else 0,
+    }
