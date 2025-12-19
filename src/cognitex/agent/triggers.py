@@ -43,11 +43,24 @@ class TriggerSystem:
         # Start event listeners
         await self._start_event_listeners()
 
+        # Start context pack trigger system
+        await self._start_context_pack_triggers()
+
         # Start scheduler
         self.scheduler.start()
         self._running = True
 
         logger.info("Trigger system started")
+
+    async def _start_context_pack_triggers(self) -> None:
+        """Start the context pack trigger system."""
+        try:
+            from cognitex.agent.context_pack import get_context_pack_triggers
+            pack_triggers = get_context_pack_triggers()
+            await pack_triggers.start()
+            logger.info("Context pack triggers started")
+        except Exception as e:
+            logger.warning("Failed to start context pack triggers", error=str(e))
 
     async def stop(self) -> None:
         """Stop the trigger system."""
@@ -55,6 +68,14 @@ class TriggerSystem:
             return
 
         logger.info("Stopping trigger system")
+
+        # Stop context pack triggers
+        try:
+            from cognitex.agent.context_pack import get_context_pack_triggers
+            pack_triggers = get_context_pack_triggers()
+            await pack_triggers.stop()
+        except Exception:
+            pass
 
         # Stop scheduler
         self.scheduler.shutdown(wait=True)
@@ -130,6 +151,10 @@ class TriggerSystem:
         task = asyncio.create_task(self._event_listener(pubsub))
         self._event_tasks.append(task)
 
+        # Start Google Pub/Sub listener for Gmail (pull-based, no webhook needed)
+        pubsub_task = asyncio.create_task(self._gmail_pubsub_listener())
+        self._event_tasks.append(pubsub_task)
+
         logger.info("Event listeners started")
 
     async def _event_listener(self, pubsub) -> None:
@@ -167,6 +192,110 @@ class TriggerSystem:
         except asyncio.CancelledError:
             await pubsub.unsubscribe()
             raise
+
+    async def _gmail_pubsub_listener(self) -> None:
+        """Pull Gmail notifications from Google Cloud Pub/Sub (no webhook needed)."""
+        from cognitex.config import get_settings
+
+        settings = get_settings()
+        topic = settings.google_pubsub_topic
+
+        if not topic:
+            logger.info("No GOOGLE_PUBSUB_TOPIC configured, skipping Pub/Sub listener")
+            return
+
+        # Extract project and topic name from full path
+        # Format: projects/PROJECT_ID/topics/TOPIC_NAME
+        try:
+            parts = topic.split("/")
+            project_id = parts[1]
+            topic_name = parts[3]
+            subscription_name = f"{topic_name}-pull"
+        except (IndexError, ValueError):
+            logger.error("Invalid GOOGLE_PUBSUB_TOPIC format", topic=topic)
+            return
+
+        try:
+            from google.cloud import pubsub_v1
+            from google.api_core import retry
+        except ImportError:
+            logger.warning("google-cloud-pubsub not installed, skipping Pub/Sub listener")
+            return
+
+        subscriber = pubsub_v1.SubscriberClient()
+        subscription_path = subscriber.subscription_path(project_id, subscription_name)
+
+        # Try to create subscription if it doesn't exist
+        try:
+            subscriber.create_subscription(
+                request={
+                    "name": subscription_path,
+                    "topic": topic,
+                    "ack_deadline_seconds": 60,
+                }
+            )
+            logger.info("Created Pub/Sub subscription", subscription=subscription_name)
+        except Exception as e:
+            if "already exists" not in str(e).lower():
+                logger.debug("Subscription exists or error", error=str(e))
+
+        logger.info("Starting Gmail Pub/Sub listener", subscription=subscription_path)
+
+        while True:
+            try:
+                # Pull messages with a timeout
+                response = await asyncio.to_thread(
+                    subscriber.pull,
+                    request={"subscription": subscription_path, "max_messages": 10},
+                    retry=retry.Retry(deadline=30),
+                )
+
+                if response.received_messages:
+                    ack_ids = []
+                    for msg in response.received_messages:
+                        try:
+                            import base64
+                            import json
+
+                            # Decode the message data
+                            data = json.loads(msg.message.data.decode("utf-8"))
+                            email_address = data.get("emailAddress")
+                            history_id = data.get("historyId")
+
+                            logger.info(
+                                "Gmail notification received via Pub/Sub",
+                                email_address=email_address,
+                                history_id=history_id,
+                            )
+
+                            # Process as email event
+                            await self._on_new_email({
+                                "type": "gmail_push",
+                                "email_address": email_address,
+                                "history_id": history_id,
+                            })
+
+                            ack_ids.append(msg.ack_id)
+                        except Exception as e:
+                            logger.error("Failed to process Pub/Sub message", error=str(e))
+                            ack_ids.append(msg.ack_id)  # Ack anyway to avoid redelivery
+
+                    # Acknowledge processed messages
+                    if ack_ids:
+                        await asyncio.to_thread(
+                            subscriber.acknowledge,
+                            request={"subscription": subscription_path, "ack_ids": ack_ids},
+                        )
+
+                # Wait before next poll
+                await asyncio.sleep(5)
+
+            except asyncio.CancelledError:
+                logger.info("Gmail Pub/Sub listener cancelled")
+                raise
+            except Exception as e:
+                logger.error("Pub/Sub pull error", error=str(e))
+                await asyncio.sleep(30)  # Wait longer on error
 
     # =========================================================================
     # Scheduled trigger handlers
@@ -312,6 +441,18 @@ class TriggerSystem:
                     f"**New Email Alert**\n\n{response}",
                     urgency="normal"
                 )
+
+            # Trigger context pack refresh for related events
+            try:
+                from cognitex.agent.context_pack import get_context_pack_triggers
+                pack_triggers = get_context_pack_triggers()
+                for email in emails[:3]:  # Check first 3 emails
+                    await pack_triggers.on_email_received({
+                        "sender": email.get("sender_email", ""),
+                        "subject": email.get("subject", ""),
+                    })
+            except Exception as pack_err:
+                logger.warning("Context pack refresh failed", error=str(pack_err))
 
         except Exception as e:
             logger.error("Email processing failed", error=str(e))

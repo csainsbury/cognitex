@@ -1,0 +1,712 @@
+\documentclass[11pt,a4paper]{article}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{multirow}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage[margin=1in]{geometry}
+\usepackage{natbib}
+\usepackage{tikz}
+\usetikzlibrary{shapes,arrows,positioning,fit,backgrounds}
+
+% Code listing style
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    backgroundcolor=\color{gray!10},
+    keywordstyle=\color{blue},
+    commentstyle=\color{green!60!black},
+    stringstyle=\color{red!60!black},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    numbersep=5pt,
+    showstringspaces=false
+}
+
+% Custom commands
+\newcommand{\cognitex}{\textsc{Cognitex}}
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+
+\title{\cognitex{}: A Multi-Tier Personal Agent Architecture for Cognitive Load Management Through Semantic Knowledge Graphs and Risk-Stratified Autonomous Action}
+
+\author{
+    Chris Sainsbury\\
+    Independent Researcher\\
+    United Kingdom\\
+    \texttt{chris@sainsbury.im}
+}
+
+\date{December 2024}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We present \cognitex{}, a novel personal agent architecture designed to reduce cognitive overhead for knowledge workers by unifying email, calendar, document, and code repository data into a hybrid semantic knowledge graph. The system implements a hierarchical large language model (LLM) architecture with distinct reasoning and execution tiers, combined with a three-level risk stratification framework (read-only, auto-execute, approval-required) that balances autonomous operation with human agency. Our approach integrates three complementary knowledge representations: a Neo4j property graph capturing entities and relationships, PostgreSQL with pgvector extensions for 768-dimensional semantic embeddings, and Redis-backed working memory for session context. The agent employs a ReAct-style (Reason + Act) planning loop with decision trace capture, enabling learning from user feedback through retrieval-augmented generation over historical decisions. We describe the complete system architecture, including data ingestion pipelines, the semantic graph schema, the agent's tool ecosystem comprising 27 specialized tools, and the trigger system supporting both scheduled and event-driven activation. \cognitex{} represents a reference implementation for trustworthy personal AI systems that maintain transparency while providing meaningful cognitive assistance.
+\end{abstract}
+
+\noindent\textbf{Keywords:} Personal agents, Knowledge graphs, Large language models, Cognitive load management, Semantic search, ReAct agents, Human-AI collaboration
+
+\section{Introduction}
+
+\subsection{Motivation}
+
+Knowledge workers face an increasingly fragmented digital environment characterized by multiple communication channels, calendaring systems, document repositories, and project management tools. This fragmentation imposes substantial cognitive overhead: the mental effort required to track commitments, maintain relationship context, and synthesize information across disparate sources. Studies estimate that knowledge workers spend 28\% of their workweek managing email alone \citep{mckinsey2012social}, with significant additional time lost to context switching between applications.
+
+While general-purpose AI assistants have demonstrated impressive capabilities in natural language understanding and generation, they typically operate without persistent context about the user's specific professional network, commitments, and communication patterns. This limitation necessitates repeated context provision, undermining the efficiency gains such systems might otherwise provide.
+
+\subsection{Contributions}
+
+This paper presents \cognitex{}, a personal agent system that addresses these challenges through several novel contributions:
+
+\begin{enumerate}
+    \item \textbf{Hybrid Knowledge Representation}: We integrate property graphs (Neo4j), vector embeddings (PostgreSQL/pgvector), and key-value caching (Redis) to capture complementary aspects of personal knowledge---relationships, semantic similarity, and session context respectively.
+
+    \item \textbf{Risk-Stratified Tool Execution}: Our framework categorizes agent capabilities into three risk tiers (\texttt{READONLY}, \texttt{AUTO}, \texttt{APPROVAL}), enabling autonomous operation for safe actions while preserving human oversight for consequential decisions.
+
+    \item \textbf{Decision Trace Learning}: We capture complete decision contexts including triggers, proposed actions, and user feedback, enabling retrieval-augmented generation from similar historical decisions and providing infrastructure for behavioral fine-tuning.
+
+    \item \textbf{Hierarchical LLM Architecture}: The system employs specialized models for planning (reasoning about situations) versus execution (structured task completion), optimizing for both cognitive depth and operational efficiency.
+
+    \item \textbf{Multi-Modal Triggering}: The agent responds to scheduled events (morning briefings, periodic monitoring), external triggers (new emails, calendar changes), and direct user interaction through multiple interfaces (CLI, Discord, REST API).
+\end{enumerate}
+
+\subsection{Paper Organization}
+
+\Cref{sec:related} reviews related work in personal agents, knowledge graphs, and LLM-based systems. \Cref{sec:architecture} presents the system architecture, including data models and service integrations. \Cref{sec:agent} details the agent subsystem, covering the planner, executors, tools, and memory systems. \Cref{sec:graph} describes the semantic graph construction and query patterns. \Cref{sec:chunking} covers the document chunking and embedding pipeline. \Cref{sec:triggers} discusses the trigger and notification infrastructure. \Cref{sec:evaluation} presents preliminary evaluation results. \Cref{sec:discussion} discusses limitations and future directions, and \Cref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Personal Information Management}
+
+Personal information management (PIM) systems have evolved from simple contact databases to sophisticated knowledge organization tools. Semantic desktop initiatives \citep{sauermann2005semantic} proposed treating personal data as a knowledge graph, though adoption was limited by the manual effort required for ontology construction. More recent approaches leverage machine learning for automatic relationship extraction \citep{dong2014knowledge}, though typically focusing on enterprise rather than personal contexts.
+
+\subsection{LLM-Based Agents}
+
+The emergence of capable large language models has catalyzed research into autonomous agents. ReAct \citep{yao2022react} demonstrated the effectiveness of interleaved reasoning and action traces for tool-using agents. Subsequent work has explored tool learning \citep{qin2023toolllm}, self-reflection \citep{shinn2023reflexion}, and multi-agent collaboration \citep{park2023generative}. However, most systems target general-purpose assistance rather than the specialized domain of personal productivity with its requirements for persistent context and relationship awareness.
+
+\subsection{Knowledge Graph Construction}
+
+Automatic knowledge graph construction from unstructured text has received extensive attention \citep{nickel2016review}. Entity recognition, relation extraction, and entity linking form the core pipeline. For personal knowledge graphs specifically, challenges include handling the diversity of personal data sources and maintaining privacy constraints. Our approach differs by leveraging LLM capabilities for flexible entity extraction while maintaining structured schemas for core entity types.
+
+\subsection{Semantic Search and Retrieval}
+
+Dense retrieval methods using learned embeddings have largely superseded sparse retrieval for semantic search tasks \citep{karpukhin2020dense}. The integration of vector databases with traditional relational systems enables hybrid queries combining structured filters with semantic similarity. Our architecture employs this pattern, using PostgreSQL's pgvector extension for embedding storage alongside structured metadata.
+
+\section{System Architecture}
+\label{sec:architecture}
+
+\subsection{Overview}
+
+\cognitex{} implements a multi-tier architecture comprising data services, integration services, agent components, and user interfaces. The system operates as a set of containerized microservices orchestrated via Docker Compose. \Cref{fig:architecture} illustrates the high-level system design.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+    node distance=0.8cm,
+    box/.style={rectangle, draw, rounded corners, minimum width=2cm, minimum height=0.8cm, align=center, font=\small},
+    bigbox/.style={rectangle, draw, rounded corners, minimum width=4cm, minimum height=1cm, align=center},
+    layer/.style={rectangle, draw, dashed, rounded corners, inner sep=0.3cm},
+    arrow/.style={->, >=stealth, thick}
+]
+
+% User Interfaces Layer
+\node[box] (cli) {CLI\\(Typer)};
+\node[box, right=0.5cm of cli] (discord) {Discord\\Bot};
+\node[box, right=0.5cm of discord] (api) {REST API\\(FastAPI)};
+\node[layer, fit=(cli)(discord)(api), label=above:User Interfaces] (ui_layer) {};
+
+% Agent System Layer
+\node[box, below=1.5cm of cli] (planner) {Planner\\(DeepSeek)};
+\node[box, right=0.3cm of planner] (executors) {Executors};
+\node[box, right=0.3cm of executors] (tools) {Tools\\(27)};
+\node[box, below=0.5cm of executors] (memory) {Memory Systems};
+\node[box, below=0.5cm of memory] (triggers) {Trigger System};
+\node[layer, fit=(planner)(executors)(tools)(memory)(triggers), label=above:Agent System] (agent_layer) {};
+
+% Integration Services Layer
+\node[box, below=1.5cm of triggers, xshift=-2cm] (gmail) {Gmail};
+\node[box, right=0.3cm of gmail] (calendar) {Calendar};
+\node[box, right=0.3cm of calendar] (drive) {Drive};
+\node[box, right=0.3cm of drive] (github) {GitHub};
+\node[box, right=0.3cm of github] (llm) {LLM};
+\node[layer, fit=(gmail)(calendar)(drive)(github)(llm), label=above:Integration Services] (int_layer) {};
+
+% Data Services Layer
+\node[box, below=1.5cm of gmail, xshift=0.5cm] (postgres) {PostgreSQL\\+pgvector};
+\node[box, right=0.5cm of postgres] (neo4j) {Neo4j\\Graph};
+\node[box, right=0.5cm of neo4j] (redis) {Redis\\Cache};
+\node[layer, fit=(postgres)(neo4j)(redis), label=above:Data Services] (data_layer) {};
+
+% Arrows
+\draw[arrow] (ui_layer) -- (agent_layer);
+\draw[arrow] (agent_layer) -- (int_layer);
+\draw[arrow] (int_layer) -- (data_layer);
+
+\end{tikzpicture}
+\caption{High-level system architecture of \cognitex{} showing the four primary layers: user interfaces, agent system, integration services, and data services.}
+\label{fig:architecture}
+\end{figure}
+
+\subsection{Data Services}
+
+\subsubsection{PostgreSQL with pgvector}
+
+PostgreSQL serves as the primary relational store, extended with the pgvector extension for efficient similarity search over dense embeddings. The schema comprises 15 tables organized into functional groups:
+
+\paragraph{Task Management:}
+\begin{itemize}
+    \item \texttt{tasks}: Core task storage with status (pending, in\_progress, done), energy cost estimates, due dates, priority levels, and foreign keys to source entities
+    \item \texttt{goals}: Hierarchical goal management supporting quarterly and yearly timeframes with OKR-style key results stored as JSONB
+    \item \texttt{projects}: Project containers linking goals to executable tasks
+\end{itemize}
+
+\paragraph{Semantic Search:}
+\begin{itemize}
+    \item \texttt{embeddings}: Universal embedding storage with entity\_type discriminator, 768-dimensional vectors, and content hashes for deduplication
+    \item \texttt{document\_chunks}: Chunked document segments with positional metadata
+    \item \texttt{code\_content}: GitHub source code with repository and path metadata
+\end{itemize}
+
+\paragraph{Learning Infrastructure:}
+\begin{itemize}
+    \item \texttt{decision\_traces}: Complete decision context including trigger type, proposed action, final action, user feedback, and quality scores
+    \item \texttt{communication\_patterns}: Learned per-contact preferences
+    \item \texttt{preference\_rules}: Extracted behavioral patterns with conditions and confidence scores
+\end{itemize}
+
+The embedding index employs HNSW (Hierarchical Navigable Small World) for approximate nearest neighbor search:
+
+\begin{lstlisting}[language=SQL]
+CREATE INDEX idx_embeddings_vector
+ON embeddings USING hnsw (embedding vector_cosine_ops)
+WITH (m = 16, ef_construction = 64);
+\end{lstlisting}
+
+This configuration provides $O(\log n)$ query complexity with high recall at the cost of $O(n \log n)$ index construction time.
+
+\subsubsection{Neo4j Property Graph}
+
+Neo4j stores the semantic knowledge graph with 10 primary node types and 15 relationship types. \Cref{tab:node_types} summarizes the core entity nodes.
+
+\begin{table}[t]
+\centering
+\caption{Core node types in the \cognitex{} knowledge graph.}
+\label{tab:node_types}
+\begin{tabular}{lll}
+\toprule
+\textbf{Node Type} & \textbf{Key Properties} & \textbf{Description} \\
+\midrule
+Person & email, name, org, role & Contacts and collaborators \\
+Email & gmail\_id, subject, date & Email messages \\
+Event & gcal\_id, title, start, end & Calendar entries \\
+Task & id, title, status, priority & Action items \\
+Document & drive\_id, name, mime\_type & Drive files \\
+Project & id, title, status & Project containers \\
+Goal & id, title, timeframe & Strategic objectives \\
+Chunk & id, chunk\_index, summary & Document segments \\
+Topic & name & Extracted themes \\
+Concept & name & Domain concepts \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The graph captures relationships including communication (\texttt{SENT\_BY}, \texttt{RECEIVED\_BY}), ownership (\texttt{OWNS}, \texttt{SHARED\_WITH}), derivation (\texttt{DERIVED\_FROM}, \texttt{LINKED\_TO}), and inferred connections (\texttt{WORKS\_WITH}).
+
+\subsubsection{Redis}
+
+Redis provides three functions: (1) working memory with 24-hour TTL for session context, (2) approval queue for staged high-risk actions, and (3) pub/sub messaging for event-driven triggers.
+
+\subsection{Integration Services}
+
+\subsubsection{Gmail Service}
+
+The Gmail integration implements OAuth2 authentication with incremental synchronization. Initial synchronization fetches historical messages within a configurable date range. Subsequent syncs use Gmail's history API with stored \texttt{history\_id} to retrieve only new messages.
+
+\subsubsection{Calendar Service}
+
+Google Calendar integration supports full CRUD operations. Events are enriched with computed properties including \texttt{energy\_impact} (1--10 scale based on event type, duration, and attendee count) and \texttt{event\_type} classification.
+
+\subsubsection{Drive Service}
+
+Google Drive integration indexes document metadata and content. Content extraction supports Google Docs, PDFs (via pypdf), Microsoft Office documents, and plain text formats.
+
+\subsubsection{GitHub Service}
+
+GitHub integration enables code repository indexing with selective targeting of meaningful files while excluding generated artifacts.
+
+\subsubsection{LLM Service}
+
+The LLM service provides a unified interface to Together.ai's inference API. Model selection is task-specific:
+\begin{itemize}
+    \item \textbf{Planning}: DeepSeek V3 (671B parameters, MoE) for complex reasoning
+    \item \textbf{Execution}: DeepSeek V3 for structured task completion
+    \item \textbf{Embedding}: BAAI/bge-base-en-v1.5 for 768-dimensional semantic vectors
+\end{itemize}
+
+\section{Agent Subsystem}
+\label{sec:agent}
+
+\subsection{Architecture Overview}
+
+The agent subsystem implements a ReAct-style \citep{yao2022react} architecture with hierarchical control flow. The design separates high-level reasoning (what to do and why) from low-level execution (how to accomplish specific tasks), enabling specialized optimization of each tier.
+
+\subsection{Core Agent}
+
+The core agent orchestrates the reasoning loop, managing interactions between the planner, executors, tools, and memory systems. The primary interaction loop proceeds as follows:
+
+\begin{enumerate}
+    \item Record user message to working memory
+    \item Construct system prompt with available tools
+    \item Retrieve relevant historical decisions via RAG
+    \item Execute ReAct iterations (maximum 8):
+    \begin{itemize}
+        \item Generate LLM response with thought/action/observation structure
+        \item If action specified, execute tool and capture observation
+        \item If response specified, return to user
+    \end{itemize}
+    \item Record final response to episodic memory
+    \item Return response and any approval IDs created
+\end{enumerate}
+
+\subsection{Planner}
+
+The planner generates structured action plans from triggers. A plan consists of:
+
+\begin{lstlisting}[language=Python]
+@dataclass
+class Plan:
+    reasoning: str           # Analysis of situation
+    steps: list[PlanStep]    # Ordered actions
+    user_notification: str   # Optional message
+    follow_up: str          # Scheduled check-in
+    confidence: float       # Quality score (0-1)
+\end{lstlisting}
+
+The planner operates in distinct modes with mode-specific tool access, as shown in \Cref{tab:modes}.
+
+\begin{table}[t]
+\centering
+\caption{Planner modes and their tool access levels.}
+\label{tab:modes}
+\begin{tabular}{lll}
+\toprule
+\textbf{Mode} & \textbf{Description} & \textbf{Tool Access} \\
+\midrule
+BRIEFING & Morning summary & READONLY, AUTO \\
+REVIEW & Evening reflection & READONLY, AUTO \\
+MONITOR & Hourly check & READONLY, AUTO \\
+PROCESS\_EMAIL & New email analysis & READONLY, AUTO, APPROVAL \\
+CONVERSATION & User interaction & READONLY, AUTO, APPROVAL \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Tool Registry}
+
+The system provides 27 tools organized by risk level:
+
+\paragraph{READONLY Tools (10):} No side effects, always allowed. Includes \texttt{graph\_query}, \texttt{search\_documents}, \texttt{search\_code}, \texttt{get\_calendar}, \texttt{get\_tasks}, \texttt{get\_contact}, and \texttt{recall\_memory}.
+
+\paragraph{AUTO Tools (14):} Low-risk side effects, executed automatically. Includes \texttt{create\_task}, \texttt{update\_task}, \texttt{create\_project}, \texttt{create\_goal}, \texttt{send\_notification}, and \texttt{add\_memory}.
+
+\paragraph{APPROVAL Tools (3):} High-risk, require user confirmation. Includes \texttt{draft\_email}, \texttt{send\_email}, and \texttt{create\_event}.
+
+The risk stratification enables safe autonomous operation while preserving human agency for consequential actions.
+
+\subsection{Memory Systems}
+
+\subsubsection{Working Memory}
+
+Redis-backed short-term storage with 24-hour TTL maintains session context including recent interactions (last 50 messages), current focus topics, and pending approvals.
+
+\subsubsection{Episodic Memory}
+
+PostgreSQL-backed long-term storage captures interactions, decisions, and observations with associated importance scores and entity references.
+
+\subsubsection{Decision Memory}
+
+Specialized storage for learning from feedback captures:
+\begin{itemize}
+    \item \textbf{Trigger}: What prompted the decision
+    \item \textbf{Context}: Full situation snapshot (JSONB)
+    \item \textbf{Proposed Action}: What the agent intended
+    \item \textbf{Final Action}: What was executed (after edits)
+    \item \textbf{Quality Score}: Computed from approval status
+\end{itemize}
+
+Quality scoring follows: auto-executed (0.7), approved unchanged (0.9), approved with edits (0.85), rejected (0.3).
+
+\section{Semantic Graph Construction}
+\label{sec:graph}
+
+\subsection{Entity Extraction Pipeline}
+
+The ingestion pipeline transforms raw data from external sources into graph entities. \Cref{alg:email} presents the email processing algorithm.
+
+\begin{algorithm}[t]
+\caption{Email Ingestion Pipeline}
+\label{alg:email}
+\begin{algorithmic}[1]
+\Procedure{IngestEmail}{$email\_data$}
+    \State Create sender Person node
+    \For{each recipient in to $\cup$ cc}
+        \State Create recipient Person node
+    \EndFor
+    \State $classification \gets$ \Call{LLMClassify}{$email\_data$}
+    \State Create Email node with classification
+    \State Create SENT\_BY relationship
+    \For{each recipient}
+        \State Create RECEIVED\_BY relationship
+    \EndFor
+    \State \Call{InferWorksWithRelationships}{sender, recipients}
+    \If{$email\_data.action\_required$}
+        \State \Call{InferTasks}{$email\_data$}
+    \EndIf
+\EndProcedure
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Email Classification}
+
+The LLM classifies emails into four categories:
+\begin{itemize}
+    \item \textbf{actionable}: Requires user response or action
+    \item \textbf{delegable}: Could be handled by someone else
+    \item \textbf{fyi}: Informational only
+    \item \textbf{spam}: Unwanted/promotional
+\end{itemize}
+
+Additional properties extracted include urgency (low, medium, high), action\_required (boolean), and suggested\_action.
+
+\subsection{Relationship Inference}
+
+Beyond explicit relationships, the system infers latent connections. The \texttt{WORKS\_WITH} relationship is computed from email interactions:
+
+\begin{lstlisting}[language=SQL]
+MATCH (e:Email)-[:SENT_BY]->(sender:Person)
+MATCH (e)-[:RECEIVED_BY]->(recipient:Person)
+WHERE sender <> recipient
+MERGE (sender)-[r:WORKS_WITH]->(recipient)
+ON CREATE SET r.interaction_count = 1
+ON MATCH SET r.interaction_count = r.interaction_count + 1
+\end{lstlisting}
+
+\subsection{Semantic Chunk Analysis}
+
+Document chunks are analyzed for semantic content using LLM extraction:
+
+\begin{lstlisting}[language=Python]
+async def analyze_chunk_for_graph(chunk_id, document_name):
+    content = await get_chunk_content(chunk_id)
+    entities = await llm.extract_entities_from_chunk(content)
+    # Returns: {topics, concepts, people, summary, key_facts}
+
+    await create_chunk(chunk_id, summary=entities['summary'])
+    for topic in entities['topics']:
+        await create_topic(topic)
+        await link_chunk_to_topic(chunk_id, topic)
+    for concept in entities['concepts']:
+        await create_concept(concept)
+        await link_chunk_to_concept(chunk_id, concept)
+\end{lstlisting}
+
+\section{Document Chunking and Embedding Pipeline}
+\label{sec:chunking}
+
+\subsection{Chunking Strategy}
+
+Documents are split into overlapping chunks optimized for embedding model context windows. The configuration uses:
+
+\begin{itemize}
+    \item Chunk size: 1,200 characters ($\approx$300 tokens)
+    \item Overlap: 200 characters ($\approx$50 tokens)
+    \item Minimum chunk size: 100 characters
+\end{itemize}
+
+The chunking algorithm preserves semantic boundaries by splitting on paragraph boundaries first, then sentence boundaries for oversized paragraphs.
+
+\subsection{Embedding Generation}
+
+Chunks are embedded using BAAI/bge-base-en-v1.5, producing 768-dimensional vectors stored in PostgreSQL with pgvector.
+
+\subsection{Semantic Search}
+
+Search combines vector similarity with metadata filtering:
+
+\begin{lstlisting}[language=SQL]
+SELECT e.entity_id, dc.content, d.name,
+       1 - (e.embedding <=> $1::vector) as similarity
+FROM embeddings e
+JOIN document_chunks dc ON dc.drive_id || ':' ||
+     dc.chunk_index = e.entity_id
+JOIN documents d ON d.drive_id = dc.drive_id
+WHERE e.entity_type = 'chunk'
+ORDER BY e.embedding <=> $1::vector
+LIMIT $2
+\end{lstlisting}
+
+\subsection{Auto-Indexing Pipeline}
+
+When Drive files change, the system automatically re-indexes by extracting content, deleting old chunks and embeddings, generating new chunks with embeddings, and analyzing chunks for graph integration.
+
+\section{Trigger and Notification System}
+\label{sec:triggers}
+
+\subsection{Trigger Types}
+
+The system supports three trigger categories:
+
+\paragraph{Scheduled Triggers:} APScheduler provides cron-based scheduling for morning briefings (8:00 AM), evening reviews (6:00 PM), and hourly monitoring (9 AM--6 PM).
+
+\paragraph{Event-Driven Triggers:} Redis pub/sub enables reactive processing for new emails, calendar changes, task updates, and Drive modifications.
+
+\paragraph{User-Initiated Triggers:} Direct interaction via CLI, Discord, or REST API.
+
+\subsection{Approval Workflow}
+
+High-risk actions follow a staged approval process:
+
+\begin{enumerate}
+    \item Agent proposes action (e.g., send email)
+    \item Action staged in Redis with metadata
+    \item Notification published to Discord
+    \item User reviews and approves/edits/rejects
+    \item On approval: execute action, record decision trace
+    \item On rejection: store feedback for learning
+\end{enumerate}
+
+\section{Evaluation}
+\label{sec:evaluation}
+
+\subsection{System Metrics}
+
+The current deployment demonstrates the following characteristics:
+
+\paragraph{Data Scale:}
+\begin{itemize}
+    \item 153,108 documents indexed from Google Drive
+    \item 3,372 document chunks with embeddings
+    \item 50 documents with deep semantic analysis
+    \item $\approx$8,000 lines of application code
+\end{itemize}
+
+\paragraph{Performance:}
+\begin{itemize}
+    \item Embedding generation: $\approx$0.5s per chunk
+    \item Semantic search: $<$100ms for top-10 results
+    \item Graph queries: $<$50ms for typical traversals
+    \item Agent response: 3--15s depending on tool usage
+\end{itemize}
+
+\subsection{Qualitative Assessment}
+
+The system successfully demonstrates:
+\begin{enumerate}
+    \item \textbf{Context Persistence}: The agent maintains awareness of email threads, contacts, and commitments across sessions
+    \item \textbf{Relationship Inference}: WORKS\_WITH relationships accurately reflect collaboration patterns
+    \item \textbf{Risk Stratification}: Approval workflow prevents unintended actions while allowing autonomous task creation
+    \item \textbf{Semantic Search}: Document retrieval surfaces relevant content across diverse file types
+\end{enumerate}
+
+\subsection{Limitations}
+
+Current limitations include: (1) decision traces captured but not yet used for fine-tuning, (2) Gmail and Calendar use polling rather than push notifications, (3) limited automated testing, and (4) single-user deployment only.
+
+\section{Discussion and Future Work}
+\label{sec:discussion}
+
+\subsection{Design Decisions}
+
+Several architectural decisions warrant discussion:
+
+\paragraph{Hybrid Storage:} The combination of Neo4j, PostgreSQL, and Redis adds operational complexity but enables optimal data models for each use case. Graph traversal, vector similarity, and low-latency caching each have distinct requirements poorly served by a single database.
+
+\paragraph{Risk Stratification:} The three-tier risk model represents a pragmatic balance between autonomy and control. Future work may explore dynamic risk assessment based on context and learned user preferences.
+
+\paragraph{LLM Selection:} Using Together.ai provides cost-effective access to capable models. The hierarchical architecture enables future experimentation with model specialization.
+
+\subsection{Future Directions}
+
+Several extensions are planned:
+\begin{enumerate}
+    \item Behavioral fine-tuning using captured decision traces
+    \item Energy management implementation for cognitive load awareness
+    \item Push notifications via Google Cloud Pub/Sub
+    \item Multi-modal input processing (images, attachments)
+    \item Collaborative features for team environments
+    \item Granular privacy controls
+\end{enumerate}
+
+\subsection{Ethical Considerations}
+
+Personal agent systems raise important ethical questions around data privacy (broad access to personal communications), autonomy versus control (approval friction versus safety), transparency (decision trace accessibility), and dependency (reduced cognitive engagement from over-reliance).
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+\cognitex{} demonstrates a viable architecture for personal AI agents that balance autonomous capability with human oversight. The hybrid knowledge representation---combining property graphs, vector embeddings, and session caching---provides a robust foundation for personal information management. The risk-stratified tool system enables meaningful automation while preserving user agency for consequential actions.
+
+Key contributions include the decision trace framework for learning from user feedback, the semantic graph construction pipeline for automatic relationship inference, and the multi-modal trigger system supporting both proactive and reactive agent behavior.
+
+While significant work remains---particularly in leveraging captured feedback for behavioral improvement---the current implementation provides a functional reference architecture for trustworthy personal AI systems. We release the complete codebase to support further research in this domain.
+
+\section*{Acknowledgments}
+
+This work was developed independently with assistance from Claude (Anthropic) for code generation and architectural refinement.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{9}
+
+\bibitem[Dong et al.(2014)]{dong2014knowledge}
+Dong, X., Gabrilovich, E., Heitz, G., Horn, W., Lao, N., Murphy, K., Strohmann, T., Sun, S., \& Zhang, W. (2014).
+\newblock Knowledge vault: A web-scale approach to probabilistic knowledge fusion.
+\newblock In \emph{Proceedings of the 20th ACM SIGKDD International Conference on Knowledge Discovery and Data Mining} (pp. 601--610).
+
+\bibitem[Karpukhin et al.(2020)]{karpukhin2020dense}
+Karpukhin, V., Oguz, B., Min, S., Lewis, P., Wu, L., Edunov, S., Chen, D., \& Yih, W.-T. (2020).
+\newblock Dense passage retrieval for open-domain question answering.
+\newblock In \emph{Proceedings of the 2020 Conference on Empirical Methods in Natural Language Processing} (pp. 6769--6781).
+
+\bibitem[McKinsey(2012)]{mckinsey2012social}
+McKinsey Global Institute. (2012).
+\newblock The social economy: Unlocking value and productivity through social technologies.
+\newblock \emph{McKinsey \& Company}.
+
+\bibitem[Nickel et al.(2016)]{nickel2016review}
+Nickel, M., Murphy, K., Tresp, V., \& Gabrilovich, E. (2016).
+\newblock A review of relational machine learning for knowledge graphs.
+\newblock \emph{Proceedings of the IEEE}, 104(1), 11--33.
+
+\bibitem[Park et al.(2023)]{park2023generative}
+Park, J.~S., O'Brien, J.~C., Cai, C.~J., Morris, M.~R., Liang, P., \& Bernstein, M.~S. (2023).
+\newblock Generative agents: Interactive simulacra of human behavior.
+\newblock In \emph{Proceedings of the 36th Annual ACM Symposium on User Interface Software and Technology} (pp. 1--22).
+
+\bibitem[Qin et al.(2023)]{qin2023toolllm}
+Qin, Y., Liang, S., Ye, Y., Zhu, K., Yan, L., Lu, Y., Lin, Y., Cong, X., Tang, X., Qian, B., et al. (2023).
+\newblock ToolLLM: Facilitating large language models to master 16000+ real-world APIs.
+\newblock \emph{arXiv preprint arXiv:2307.16789}.
+
+\bibitem[Sauermann et al.(2005)]{sauermann2005semantic}
+Sauermann, L., Bernardi, A., \& Dengel, A. (2005).
+\newblock Overview and outlook on the semantic desktop.
+\newblock In \emph{Proceedings of the ISWC 2005 Workshop on the Semantic Desktop}.
+
+\bibitem[Shinn et al.(2023)]{shinn2023reflexion}
+Shinn, N., Cassano, F., Gopinath, A., Narasimhan, K., \& Yao, S. (2023).
+\newblock Reflexion: Language agents with verbal reinforcement learning.
+\newblock \emph{Advances in Neural Information Processing Systems}, 36.
+
+\bibitem[Yao et al.(2022)]{yao2022react}
+Yao, S., Zhao, J., Yu, D., Du, N., Shafran, I., Narasimhan, K., \& Cao, Y. (2022).
+\newblock ReAct: Synergizing reasoning and acting in language models.
+\newblock \emph{arXiv preprint arXiv:2210.03629}.
+
+\end{thebibliography}
+
+\appendix
+
+\section{Configuration Reference}
+\label{app:config}
+
+\begin{lstlisting}[language=bash,caption={Environment configuration variables}]
+# Database URLs
+DATABASE_URL=postgresql://cognitex:pass@localhost:5432/cognitex
+NEO4J_URI=bolt://localhost:7687
+NEO4J_PASSWORD=<secret>
+REDIS_URL=redis://localhost:6379/0
+
+# Together.ai LLM
+TOGETHER_API_KEY=<secret>
+TOGETHER_MODEL_PLANNER=deepseek-ai/DeepSeek-V3
+TOGETHER_MODEL_EXECUTOR=deepseek-ai/DeepSeek-V3
+TOGETHER_MODEL_EMBEDDING=BAAI/bge-base-en-v1.5
+
+# Google APIs
+GOOGLE_CLIENT_ID=<client_id>
+GOOGLE_CLIENT_SECRET=<secret>
+
+# Discord
+DISCORD_BOT_TOKEN=<secret>
+DISCORD_CHANNEL_ID=<channel_id>
+
+# GitHub
+GITHUB_TOKEN=<secret>
+\end{lstlisting}
+
+\section{CLI Command Reference}
+\label{app:cli}
+
+\begin{lstlisting}[language=bash,caption={Primary CLI commands}]
+# System
+cognitex status              # Configuration and memory stats
+cognitex auth                # OAuth2 authentication flow
+cognitex graph               # Neo4j statistics
+
+# Data Synchronization
+cognitex sync                # Incremental Gmail sync
+cognitex calendar            # Google Calendar sync
+cognitex drive-sync          # Drive metadata sync
+cognitex deep-index          # Document chunking and embedding
+
+# Queries
+cognitex tasks               # List tasks
+cognitex contacts            # List people
+cognitex doc-search "query"  # Semantic search
+
+# Agent
+cognitex agent-chat          # Interactive mode
+cognitex briefing            # Morning briefing
+cognitex approvals           # Pending approvals
+
+# Semantic Analysis
+cognitex analyze-chunks      # LLM analysis of chunks
+cognitex topics              # List extracted topics
+cognitex semantic-stats      # Analysis progress
+\end{lstlisting}
+
+\section{Neo4j Schema}
+\label{app:schema}
+
+\begin{lstlisting}[language=SQL,caption={Neo4j constraints and indexes}]
+// Constraints
+CREATE CONSTRAINT person_email_unique
+  FOR (p:Person) REQUIRE p.email IS UNIQUE;
+CREATE CONSTRAINT email_gmail_id_unique
+  FOR (e:Email) REQUIRE e.gmail_id IS UNIQUE;
+CREATE CONSTRAINT event_gcal_id_unique
+  FOR (ev:Event) REQUIRE ev.gcal_id IS UNIQUE;
+CREATE CONSTRAINT task_id_unique
+  FOR (t:Task) REQUIRE t.id IS UNIQUE;
+CREATE CONSTRAINT document_drive_id_unique
+  FOR (d:Document) REQUIRE d.drive_id IS UNIQUE;
+CREATE CONSTRAINT chunk_id_unique
+  FOR (c:Chunk) REQUIRE c.id IS UNIQUE;
+CREATE CONSTRAINT topic_name_unique
+  FOR (t:Topic) REQUIRE t.name IS UNIQUE;
+CREATE CONSTRAINT concept_name_unique
+  FOR (c:Concept) REQUIRE c.name IS UNIQUE;
+
+// Indexes
+CREATE INDEX person_name FOR (p:Person) ON (p.name);
+CREATE INDEX email_date FOR (e:Email) ON (e.date);
+CREATE INDEX task_status FOR (t:Task) ON (t.status);
+CREATE INDEX chunk_analyzed FOR (c:Chunk) ON (c.analyzed);
+\end{lstlisting}
+
+\end{document}

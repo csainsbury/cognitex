@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     # Discord
     discord_bot_token: SecretStr = Field(default=SecretStr(""))
     discord_channel_id: str = Field(default="")
+    discord_user_id: str = Field(
+        default="",
+        description="Your Discord user ID for DM notifications on urgent messages",
+    )
 
     # Google API
     google_client_id: str = Field(default="")
@@ -69,6 +73,16 @@ class Settings(BaseSettings):
     github_token: SecretStr = Field(
         default=SecretStr(""),
         description="GitHub personal access token for repo access",
+    )
+
+    # Push notifications
+    webhook_base_url: str = Field(
+        default="",
+        description="Public HTTPS URL for webhooks (e.g., https://your-domain.com)",
+    )
+    google_pubsub_topic: str = Field(
+        default="",
+        description="Google Cloud Pub/Sub topic for Gmail push (projects/PROJECT/topics/TOPIC)",
     )
 
     # Application behavior

@@ -1820,42 +1820,55 @@ def discord_test(
 
 @app.command("watch-setup")
 def watch_setup(
-    webhook_url: str = typer.Option(None, "--webhook", "-w", help="Public HTTPS webhook URL"),
-    pubsub_topic: str = typer.Option(None, "--pubsub", "-p", help="Google Cloud Pub/Sub topic for Gmail"),
+    webhook_url: str = typer.Option(None, "--webhook", "-w", help="Public HTTPS webhook URL (or set WEBHOOK_BASE_URL in .env)"),
+    pubsub_topic: str = typer.Option(None, "--pubsub", "-p", help="Google Cloud Pub/Sub topic for Gmail (or set GOOGLE_PUBSUB_TOPIC in .env)"),
     gmail: bool = typer.Option(True, "--gmail/--no-gmail", help="Set up Gmail watch"),
     calendar: bool = typer.Option(True, "--calendar/--no-calendar", help="Set up Calendar watch"),
     drive: bool = typer.Option(True, "--drive/--no-drive", help="Set up Drive watch"),
 ) -> None:
     """Set up Google push notification watches for real-time updates."""
+    from cognitex.config import get_settings
+    settings = get_settings()
+
+    # Use config values as fallback
+    effective_webhook_url = webhook_url or settings.webhook_base_url
+    effective_pubsub_topic = pubsub_topic or settings.google_pubsub_topic
+
     console.print("[bold]Setting up Google Push Notification Watches[/bold]\n")
 
-    if not webhook_url and (calendar or drive):
-        console.print("[yellow]Warning: No webhook URL provided. Calendar and Drive watches require a public HTTPS endpoint.[/yellow]")
-        console.print("[dim]Use --webhook https://your-domain.com or set up ngrok for development.[/dim]\n")
+    if effective_webhook_url:
+        console.print(f"  Webhook URL: [cyan]{effective_webhook_url}[/cyan]")
+    if effective_pubsub_topic:
+        console.print(f"  Pub/Sub Topic: [cyan]{effective_pubsub_topic}[/cyan]")
+    console.print()
+
+    if not effective_webhook_url and (calendar or drive):
+        console.print("[yellow]Warning: No webhook URL configured. Calendar and Drive watches require a public HTTPS endpoint.[/yellow]")
+        console.print("[dim]Use --webhook https://your-domain.com, set WEBHOOK_BASE_URL in .env, or set up ngrok for development.[/dim]\n")
 
     async def setup_watches():
         from cognitex.services.push_notifications import get_watch_manager
 
-        watch_manager = get_watch_manager(webhook_url)
+        watch_manager = get_watch_manager(effective_webhook_url)
         results = {}
 
         if gmail:
             console.print("[cyan]Setting up Gmail watch...[/cyan]")
-            if pubsub_topic:
-                result = await watch_manager.setup_gmail_watch(pubsub_topic)
+            if effective_pubsub_topic:
+                result = await watch_manager.setup_gmail_watch(effective_pubsub_topic)
             else:
-                console.print("  [yellow]Skipping Gmail - requires --pubsub topic[/yellow]")
+                console.print("  [yellow]Skipping Gmail - requires --pubsub topic or GOOGLE_PUBSUB_TOPIC in .env[/yellow]")
                 result = {"skipped": "No Pub/Sub topic"}
             results["Gmail"] = result
 
-        if calendar and webhook_url:
+        if calendar and effective_webhook_url:
             console.print("[cyan]Setting up Calendar watch...[/cyan]")
             result = await watch_manager.setup_calendar_watch()
             results["Calendar"] = result
         elif calendar:
             results["Calendar"] = {"skipped": "No webhook URL"}
 
-        if drive and webhook_url:
+        if drive and effective_webhook_url:
             console.print("[cyan]Setting up Drive watch...[/cyan]")
             result = await watch_manager.setup_drive_watch()
             results["Drive"] = result
@@ -3131,6 +3144,40 @@ def web(
     console.print(f"\n[dim]Press Ctrl+C to stop[/dim]\n")
 
     run_server(host=host, port=port)
+
+
+@app.command("api")
+def api(
+    host: str = typer.Option("0.0.0.0", "--host", "-h", help="Host to bind to"),
+    port: int = typer.Option(8000, "--port", "-p", help="Port to listen on"),
+) -> None:
+    """Start the API server for webhooks and REST endpoints.
+
+    This server receives push notifications from Google (Gmail, Calendar, Drive)
+    and routes them through Redis pub/sub to the Discord bot.
+
+    Webhook endpoints:
+      - POST /webhooks/google/gmail    - Gmail push notifications (via Pub/Sub)
+      - POST /webhooks/google/calendar - Calendar change notifications
+      - POST /webhooks/google/drive    - Drive change notifications
+
+    For development, use ngrok to expose the server:
+      ngrok http 8000
+
+    Then configure WEBHOOK_BASE_URL in .env with your ngrok URL.
+    """
+    import uvicorn
+
+    console.print(f"[bold]Starting Cognitex API Server[/bold]")
+    console.print(f"  URL: [cyan]http://{host}:{port}[/cyan]")
+    console.print(f"  Docs: [cyan]http://{host}:{port}/docs[/cyan]")
+    console.print(f"\n  Webhook endpoints:")
+    console.print(f"    POST /webhooks/google/gmail")
+    console.print(f"    POST /webhooks/google/calendar")
+    console.print(f"    POST /webhooks/google/drive")
+    console.print(f"\n[dim]Press Ctrl+C to stop[/dim]\n")
+
+    uvicorn.run("cognitex.api.main:app", host=host, port=port, reload=False)
 
 
 @app.command("agent-status")
@@ -4414,6 +4461,397 @@ def semantic_stats() -> None:
             await close_neo4j()
 
     asyncio.run(show())
+
+
+# =============================================================================
+# Phase 3: State Model, Decision Policy, Context Packs
+# =============================================================================
+
+
+@app.command("state")
+def show_state() -> None:
+    """Show current operating state and mode."""
+    async def show():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.agent.state_model import get_state_estimator, OperatingMode, ModeRules
+
+        await init_neo4j()
+
+        try:
+            estimator = get_state_estimator()
+            state = await estimator.get_current_state()
+
+            console.print("\n[bold]Current Operating State[/bold]\n")
+
+            # Mode with color coding
+            mode_colors = {
+                OperatingMode.DEEP_FOCUS: "green",
+                OperatingMode.FRAGMENTED: "yellow",
+                OperatingMode.OVERLOADED: "red",
+                OperatingMode.AVOIDANT: "magenta",
+                OperatingMode.HYPERFOCUS: "cyan",
+                OperatingMode.TRANSITION: "blue",
+            }
+            color = mode_colors.get(state.mode, "white")
+            console.print(f"Mode: [{color}]{state.mode.value}[/{color}]")
+
+            # Get mode rules
+            rules = ModeRules.get_rules(state.mode)
+            console.print(f"  {rules['description']}")
+
+            console.print("\n[bold]Signals:[/bold]")
+            signals = state.signals
+            console.print(f"  Available block: {signals.available_block_minutes or 'Unknown'} minutes")
+            console.print(f"  Time to next commitment: {signals.time_to_next_commitment_minutes or 'Unknown'} minutes")
+            console.print(f"  Interruption pressure: {signals.interruption_pressure:.0%}")
+            console.print(f"  Fatigue level: {signals.fatigue_level:.0%}")
+            console.print(f"  Focus score: {signals.focus_score or 'Unknown'}")
+
+            console.print("\n[bold]Mode Rules:[/bold]")
+            console.print(f"  Max task friction: {rules['max_task_friction']}")
+            console.print(f"  Notification gate: {rules['notification_gate']}")
+            console.print(f"  Allowed task types: {', '.join(rules['allowed_task_types'][:3])}...")
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(show())
+
+
+@app.command("state-set")
+def set_state(
+    mode: str = typer.Option(None, "--mode", "-m", help="Set operating mode"),
+    fatigue: float = typer.Option(None, "--fatigue", "-f", help="Set fatigue level (0-1)"),
+    focus: float = typer.Option(None, "--focus", help="Set focus score (0-1)"),
+) -> None:
+    """Update current operating state."""
+    async def update():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.agent.state_model import get_state_estimator, OperatingMode
+
+        await init_neo4j()
+
+        try:
+            estimator = get_state_estimator()
+
+            # Parse mode if provided
+            new_mode = None
+            if mode:
+                try:
+                    new_mode = OperatingMode(mode.lower())
+                except ValueError:
+                    console.print(f"[red]Invalid mode: {mode}[/red]")
+                    console.print("Valid modes: " + ", ".join(m.value for m in OperatingMode))
+                    return
+
+            # Calculate fatigue delta if provided
+            fatigue_delta = None
+            if fatigue is not None:
+                current = await estimator.get_current_state()
+                fatigue_delta = fatigue - current.signals.fatigue_level
+
+            # Update state
+            state = await estimator.update_state(
+                mode=new_mode,
+                fatigue_delta=fatigue_delta,
+                focus_score=focus,
+            )
+
+            console.print(f"[green]State updated[/green]")
+            console.print(f"  Mode: {state.mode.value}")
+            console.print(f"  Fatigue: {state.signals.fatigue_level:.0%}")
+            console.print(f"  Focus: {state.signals.focus_score or 'N/A'}")
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(update())
+
+
+@app.command("next-action")
+def next_action(
+    limit: int = typer.Option(3, "--limit", "-n", help="Number of recommendations"),
+) -> None:
+    """Get recommended next actions based on state and tasks."""
+    async def recommend():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
+        from cognitex.agent.decision_policy import (
+            get_decision_policy,
+            TaskContext,
+            TaskType,
+        )
+        from cognitex.services.tasks import get_task_service
+
+        await init_neo4j()
+
+        try:
+            # Get pending tasks
+            task_service = get_task_service()
+            tasks = await task_service.list(include_done=False, limit=20)
+
+            if not tasks:
+                console.print("[yellow]No pending tasks found[/yellow]")
+                return
+
+            # Convert to TaskContext objects
+            task_contexts = []
+            for t in tasks:
+                # Infer task type from priority/properties
+                task_type = TaskType.QUICK_WINS
+                if t.get("effort_estimate", 30) > 60:
+                    task_type = TaskType.DEEP_WORK
+                elif "email" in t.get("title", "").lower():
+                    task_type = TaskType.EMAIL
+                elif t.get("priority") == "high":
+                    task_type = TaskType.URGENT_ONLY
+
+                ctx = TaskContext(
+                    task_id=t["id"],
+                    title=t["title"],
+                    task_type=task_type,
+                    estimated_minutes=int(t.get("effort_estimate", 30)),
+                    start_friction=3 if t.get("energy_cost") == "high" else 2,
+                    urgency_score=0.8 if t.get("priority") == "critical" else 0.5,
+                    goal_alignment=0.7 if t.get("goal_id") else 0.3,
+                    project_id=t.get("project_id"),
+                    goal_id=t.get("goal_id"),
+                )
+                task_contexts.append(ctx)
+
+            # Get recommendations
+            policy = get_decision_policy()
+            recommendations = await policy.select_next_actions(
+                task_contexts,
+                max_recommendations=limit,
+            )
+
+            console.print("\n[bold]Recommended Next Actions[/bold]\n")
+
+            for i, rec in enumerate(recommendations, 1):
+                if rec.utility_score > 0:
+                    console.print(f"[cyan]{i}. {rec.task.title}[/cyan]")
+                    console.print(f"   Utility: {rec.utility_score:.2f} | {rec.reasoning}")
+                    if rec.mvs_action:
+                        console.print(f"   [green]Start with:[/green] {rec.mvs_action}")
+                    if rec.warnings:
+                        for w in rec.warnings:
+                            console.print(f"   [yellow]⚠ {w}[/yellow]")
+                    console.print()
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(recommend())
+
+
+@app.command("context-pack")
+def context_pack(
+    event_id: str = typer.Option(None, "--event", "-e", help="Calendar event ID"),
+    task_id: str = typer.Option(None, "--task", "-t", help="Task ID"),
+) -> None:
+    """Compile or show context pack for an event or task."""
+    async def compile():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
+        from cognitex.agent.context_pack import get_context_pack_compiler, BuildStage
+
+        if not event_id and not task_id:
+            console.print("[yellow]Specify --event or --task[/yellow]")
+            return
+
+        await init_neo4j()
+
+        try:
+            compiler = get_context_pack_compiler()
+
+            if event_id:
+                # Get event from calendar
+                from cognitex.services.calendar import get_calendar_service
+                cal = get_calendar_service()
+                event = await cal.get_event(event_id)
+                if not event:
+                    console.print(f"[red]Event not found: {event_id}[/red]")
+                    return
+
+                pack = await compiler.compile_for_event(event, BuildStage.T_24H)
+            else:
+                # Get task
+                from cognitex.services.tasks import get_task_service
+                task_service = get_task_service()
+                task = await task_service.get(task_id)
+                if not task:
+                    console.print(f"[red]Task not found: {task_id}[/red]")
+                    return
+
+                pack = await compiler.compile_for_task(task, BuildStage.T_24H)
+
+            # Display pack
+            console.print("\n[bold]Context Pack[/bold]\n")
+            console.print(f"Pack ID: {pack.pack_id}")
+            console.print(f"Objective: {pack.objective or 'Not set'}")
+            console.print(f"Build Stage: {pack.build_stage.value}")
+            console.print(f"Readiness: {pack.readiness_score:.0%}")
+
+            if pack.last_touch_recap:
+                console.print(f"\n[bold]Last Touch:[/bold] {pack.last_touch_recap}")
+
+            if pack.decision_list:
+                console.print("\n[bold]Decisions Needed:[/bold]")
+                for d in pack.decision_list:
+                    console.print(f"  • {d}")
+
+            if pack.dont_forget:
+                console.print("\n[bold]Don't Forget:[/bold]")
+                for r in pack.dont_forget:
+                    console.print(f"  ⚠ {r}")
+
+            if pack.missing_prerequisites:
+                console.print("\n[bold]Missing Prerequisites:[/bold]")
+                for m in pack.missing_prerequisites:
+                    console.print(f"  [red]✗[/red] {m}")
+
+            if pack.prep_tasks_needed:
+                console.print("\n[bold]Prep Tasks:[/bold]")
+                for p in pack.prep_tasks_needed:
+                    console.print(f"  • {p['task']} ({p['minutes']} min, {p['priority']})")
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(compile())
+
+
+@app.command("day-plan")
+def day_plan(
+    plan_b: bool = typer.Option(False, "--plan-b", "-b", help="Show Plan B (minimum viable)"),
+) -> None:
+    """Show today's day plan (Plan A or Plan B)."""
+    async def show():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.services.calendar import CalendarService
+        from cognitex.services.tasks import get_task_service
+        from cognitex.agent.context_pack import get_two_track_planner
+
+        await init_neo4j()
+
+        try:
+            # Get today's events
+            from datetime import timedelta as td
+            cal = CalendarService()
+            now = datetime.now()
+            tomorrow = now + td(days=1)
+            result = cal.list_events(time_max=tomorrow)
+            events = result.get("items", [])
+
+            # Get pending tasks
+            task_service = get_task_service()
+            tasks = await task_service.list(include_done=False, limit=50)
+
+            # Create plans
+            planner = get_two_track_planner()
+            plan_a, plan_b_plan = await planner.create_day_plans(events, tasks)
+
+            plan = plan_b_plan if plan_b else plan_a
+            plan_type = "B (Minimum Viable)" if plan_b else "A (Normal Capacity)"
+
+            console.print(f"\n[bold]Day Plan {plan_type}[/bold]\n")
+            console.print(f"Date: {plan.date.strftime('%Y-%m-%d')}")
+            console.print(f"Items: {len(plan.items)}")
+            console.print(f"Capacity used: {plan.capacity_used:.0%}")
+
+            console.print("\n[bold]Schedule:[/bold]")
+
+            for item in plan.items[:15]:
+                if "start" in item:
+                    # Calendar event - handle Google Calendar dict format
+                    start_raw = item.get("start", "")
+                    if isinstance(start_raw, dict):
+                        start_str = start_raw.get("dateTime") or start_raw.get("date", "")
+                    else:
+                        start_str = start_raw
+                    start = start_str[:16] if start_str else ""
+                    summary = item.get("summary", "Event")
+                    is_protected = item.get("id") in plan.protected_items
+                    marker = "🔒" if is_protected else "📅"
+                    console.print(f"  {marker} {start} - {summary}")
+                else:
+                    # Task
+                    title = item.get("title", "Task")
+                    est = item.get("effort_estimate", 30)
+                    console.print(f"  📋 {title} ({est} min)")
+
+            # Show switch recommendation if applicable
+            should_switch, reason = await planner.should_switch_to_plan_b()
+            if should_switch and not plan_b:
+                console.print(f"\n[yellow]⚠ Consider switching to Plan B: {reason}[/yellow]")
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(show())
+
+
+@app.command("inbox-queue")
+def inbox_queue(
+    queue: str = typer.Option("inbox", "--queue", "-q", help="Queue to show"),
+) -> None:
+    """Show captured inbox items awaiting processing."""
+    async def show():
+        from cognitex.agent.interruption_firewall import get_interruption_firewall
+
+        firewall = get_interruption_firewall()
+        items = await firewall.get_queued_items(queue=queue)
+
+        if not items:
+            console.print(f"[green]No items in {queue} queue[/green]")
+            return
+
+        console.print(f"\n[bold]Inbox Queue: {queue}[/bold] ({len(items)} items)\n")
+
+        for item in items[:20]:
+            urgency_colors = {
+                "critical": "red",
+                "urgent": "yellow",
+                "important": "cyan",
+                "normal": "white",
+                "low": "dim",
+            }
+            color = urgency_colors.get(item.urgency.value, "white")
+            console.print(f"[{color}]{item.urgency.value.upper()}[/{color}] {item.subject}")
+            console.print(f"  From: {item.sender or 'Unknown'} | {item.item_type}")
+            console.print(f"  Action: {item.suggested_action}")
+            console.print()
+
+    asyncio.run(show())
+
+
+@app.command("init-phase3")
+def init_phase3() -> None:
+    """Initialize Phase 3 schema (claims, state, context packs)."""
+    async def init():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.db.phase3_schema import init_phase3_schema
+
+        console.print("[bold]Initializing Phase 3 Schema...[/bold]")
+
+        await init_neo4j()
+
+        try:
+            await init_phase3_schema()
+            console.print("[green]✓ Phase 3 schema initialized[/green]")
+            console.print("\nNew entity types available:")
+            console.print("  • Claim - Atomic statements with evidence grading")
+            console.print("  • LiteratureItem - Bibliographic objects with DOI")
+            console.print("  • SpanAnchor - Immutable provenance anchors")
+            console.print("  • StateSnapshot - User operating state tracking")
+            console.print("  • ContextPack - Pre-compiled context for events/tasks")
+            console.print("  • Draft - Writing artifacts with citation links")
+            console.print("  • Run - Experiment/analysis registry")
+            console.print("  • ReviewerComment - Reviewer response management")
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(init())
 
 
 if __name__ == "__main__":

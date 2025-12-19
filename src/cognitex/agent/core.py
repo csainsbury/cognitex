@@ -845,11 +845,93 @@ Your response:"""
     # =========================================================================
 
     async def morning_briefing(self) -> str:
-        """Generate a morning briefing using ReAct."""
-        return await self.chat(
+        """Generate a morning briefing using ReAct, including context packs for today's events."""
+        # Get the base briefing from ReAct
+        briefing = await self.chat(
             "Give me a morning briefing: what's on my calendar today, what are my top priority tasks, "
             "any urgent emails I should know about, and any important deadlines coming up this week."
         )
+
+        # Add context packs for today's events
+        context_section = await self._get_todays_context_packs()
+        if context_section:
+            briefing += f"\n\n{context_section}"
+
+        return briefing
+
+    async def _get_todays_context_packs(self) -> str | None:
+        """Get context packs for today's events to include in briefing."""
+        try:
+            from cognitex.agent.context_pack import get_context_pack_compiler, BuildStage
+            from cognitex.services.calendar import CalendarService
+            from datetime import datetime, timedelta
+
+            calendar = CalendarService()
+            now = datetime.now()
+            end_of_day = now.replace(hour=23, minute=59, second=59)
+
+            # Get today's events
+            events = calendar.get_events(
+                time_min=now.isoformat() + "Z",
+                time_max=end_of_day.isoformat() + "Z",
+                max_results=10,
+            )
+
+            if not events:
+                return None
+
+            compiler = get_context_pack_compiler()
+            context_sections = []
+
+            for event in events[:5]:  # Limit to first 5 events
+                title = event.get("summary", "Untitled")
+                description = event.get("description", "")
+                start = event.get("start", {}).get("dateTime", "")
+                attendees = event.get("attendees", [])
+
+                # Only build packs for events with attendees (meetings)
+                if not attendees:
+                    continue
+
+                try:
+                    pack = await compiler.build_pack(
+                        event_id=event.get("id", ""),
+                        event_title=title,
+                        event_description=description,
+                        attendees=attendees,
+                        event_start=start,
+                        stage=BuildStage.T_24H,
+                    )
+
+                    if pack and (pack.attendee_briefs or pack.artifacts or pack.last_interaction):
+                        # Format a concise version for briefing
+                        pack_text = f"**{title}** ({start[:16] if start else 'TBD'})"
+
+                        if pack.last_interaction:
+                            pack_text += f"\n  • Last interaction: {pack.last_interaction[:100]}..."
+
+                        if pack.attendee_briefs:
+                            attendee_names = [a.name for a in pack.attendee_briefs[:3]]
+                            pack_text += f"\n  • With: {', '.join(attendee_names)}"
+
+                        if pack.artifacts:
+                            artifact_names = [a.get('title', a.get('name', 'doc'))[:30] for a in pack.artifacts[:3]]
+                            pack_text += f"\n  • Related docs: {', '.join(artifact_names)}"
+
+                        context_sections.append(pack_text)
+
+                except Exception as e:
+                    logger.debug("Failed to build context pack for event", event=title, error=str(e))
+                    continue
+
+            if context_sections:
+                return "---\n**📋 Meeting Context Packs**\n\n" + "\n\n".join(context_sections)
+
+            return None
+
+        except Exception as e:
+            logger.warning("Failed to get context packs for briefing", error=str(e))
+            return None
 
     async def evening_review(self) -> str:
         """Generate an evening review using ReAct."""

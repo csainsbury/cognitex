@@ -345,19 +345,10 @@ class CognitexBot(commands.Bot):
         urgency: str = "normal",
         approval_id: Optional[str] = None,
     ) -> None:
-        """Send a formatted notification with optional approval buttons."""
-        if not self.settings.discord_channel_id:
-            logger.warning("No Discord channel ID configured")
-            return
+        """Send a formatted notification with optional approval buttons.
 
-        channel = self.get_channel(int(self.settings.discord_channel_id))
-        if not channel:
-            logger.warning("Could not find Discord channel", channel_id=self.settings.discord_channel_id)
-            return
-        if not isinstance(channel, discord.TextChannel):
-            logger.warning("Channel is not a TextChannel", channel_type=type(channel).__name__)
-            return
-
+        For high urgency messages, also sends a DM to the configured user.
+        """
         # Create embed based on urgency
         color = {
             "high": discord.Color.red(),
@@ -383,7 +374,25 @@ class CognitexBot(commands.Bot):
             view = ApprovalView(approval_id, self)
             embed.set_footer(text=f"Approval ID: {approval_id}")
 
-        await channel.send(embed=embed, view=view)
+        # For high urgency, DM the user directly
+        if urgency == "high" and self.settings.discord_user_id:
+            try:
+                user = await self.fetch_user(int(self.settings.discord_user_id))
+                if user:
+                    dm_channel = await user.create_dm()
+                    await dm_channel.send(embed=embed, view=view)
+                    logger.info("Sent urgent DM notification", user_id=self.settings.discord_user_id)
+            except Exception as e:
+                logger.error("Failed to send DM notification", error=str(e))
+
+        # Also send to channel (for all urgency levels)
+        if self.settings.discord_channel_id:
+            channel = self.get_channel(int(self.settings.discord_channel_id))
+            if channel and isinstance(channel, discord.TextChannel):
+                await channel.send(embed=embed, view=view)
+                logger.info("Notification sent to Discord successfully", channel_id=self.settings.discord_channel_id, channel_name=channel.name)
+            else:
+                logger.warning("Could not find Discord channel", channel_id=self.settings.discord_channel_id, available_channels=[c.name for c in self.get_all_channels() if isinstance(c, discord.TextChannel)][:5])
 
     async def on_reaction_add(self, reaction: discord.Reaction, user: discord.User) -> None:
         """Handle reactions for quick approvals."""
