@@ -2505,8 +2505,8 @@ def task_show(
             if source_event:
                 console.print(f"\n[bold cyan]Origin: Calendar Event[/bold cyan]")
                 console.print(f"  Event: {source_event.get('title', 'Untitled')}")
-                if source_event.get('start_time'):
-                    console.print(f"  When: {str(source_event['start_time'])[:16]}")
+                if source_event.get('start'):
+                    console.print(f"  When: {str(source_event['start'])[:16]}")
 
             # Project and Goal context
             if task.get('projects'):
@@ -4648,17 +4648,119 @@ def next_action(
 def context_pack(
     event_id: str = typer.Option(None, "--event", "-e", help="Calendar event ID"),
     task_id: str = typer.Option(None, "--task", "-t", help="Task ID"),
+    show_pack: str = typer.Option(None, "--show", "-s", help="Show pack by ID (partial match ok)"),
+    list_packs: bool = typer.Option(False, "--list", "-l", help="List existing context packs"),
 ) -> None:
     """Compile or show context pack for an event or task."""
     async def compile():
         from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
         from cognitex.agent.context_pack import get_context_pack_compiler, BuildStage
 
-        if not event_id and not task_id:
-            console.print("[yellow]Specify --event or --task[/yellow]")
+        await init_neo4j()
+
+        # Show a specific pack by ID
+        if show_pack:
+            async for session in get_neo4j_session():
+                result = await session.run("""
+                    MATCH (p:ContextPack)
+                    WHERE p.id STARTS WITH $pack_id OR p.id = $pack_id
+                    RETURN p
+                    LIMIT 1
+                """, pack_id=show_pack)
+                record = await result.single()
+
+            if not record:
+                console.print(f"[red]Pack not found: {show_pack}[/red]")
+                await close_neo4j()
+                return
+
+            p = record["p"]
+            console.print("\n[bold]Context Pack[/bold]\n")
+            console.print(f"Pack ID: {p.get('id')}")
+            console.print(f"Objective: {p.get('objective') or 'Not set'}")
+            console.print(f"Build Stage: {p.get('build_stage')}")
+            console.print(f"Readiness: {(p.get('readiness_score') or 0):.0%}")
+
+            if p.get("last_touch_recap"):
+                console.print(f"\n[bold]Last Touch:[/bold] {p.get('last_touch_recap')}")
+
+            if p.get("decision_list"):
+                console.print("\n[bold]Decisions Needed:[/bold]")
+                for d in p.get("decision_list"):
+                    console.print(f"  • {d}")
+
+            if p.get("dont_forget"):
+                console.print("\n[bold]Don't Forget:[/bold]")
+                for r in p.get("dont_forget"):
+                    console.print(f"  ⚠ {r}")
+
+            if p.get("missing_prerequisites"):
+                console.print("\n[bold]Missing Prerequisites:[/bold]")
+                for m in p.get("missing_prerequisites"):
+                    console.print(f"  [red]✗[/red] {m}")
+
+            if p.get("artifact_links"):
+                console.print("\n[bold]Relevant Documents:[/bold]")
+                for a in p.get("artifact_links"):
+                    console.print(f"  📄 {a}")
+
+            await close_neo4j()
             return
 
-        await init_neo4j()
+        # List existing packs
+        if list_packs:
+            async for session in get_neo4j_session():
+                result = await session.run("""
+                    MATCH (p:ContextPack)
+                    OPTIONAL MATCH (e:CalendarEvent {gcal_id: p.event_id})
+                    OPTIONAL MATCH (t:Task {id: p.task_id})
+                    RETURN p.id as pack_id,
+                           p.build_stage as stage,
+                           p.readiness_score as readiness,
+                           p.objective as objective,
+                           e.summary as event_name,
+                           t.title as task_name,
+                           p.created_at as created
+                    ORDER BY p.created_at DESC
+                    LIMIT 20
+                """)
+                packs = await result.data()
+
+            if not packs:
+                console.print("[yellow]No context packs found[/yellow]")
+                await close_neo4j()
+                return
+
+            table = Table(title="Context Packs")
+            table.add_column("Pack ID", style="cyan")
+            table.add_column("For")
+            table.add_column("Stage")
+            table.add_column("Readiness")
+
+            for p in packs:
+                # Extract event/task name from objective if not found via join
+                target = p.get("event_name") or p.get("task_name")
+                if not target:
+                    obj = p.get("objective") or ""
+                    # Objective is often "Complete: <name>" format
+                    target = obj.replace("Complete: ", "").replace("Prepare for: ", "")[:40]
+                readiness = p.get("readiness") or 0
+                pack_id = p.get("pack_id") or "N/A"
+                table.add_row(
+                    pack_id[:16] + "..." if len(pack_id) > 16 else pack_id,
+                    target[:30] + "..." if len(target) > 30 else target,
+                    p.get("stage") or "?",
+                    f"{readiness:.0%}",
+                )
+
+            console.print(table)
+            await close_neo4j()
+            return
+
+        if not event_id and not task_id:
+            console.print("[yellow]Specify --event, --task, or --list[/yellow]")
+            await close_neo4j()
+            return
 
         try:
             compiler = get_context_pack_compiler()
@@ -4852,6 +4954,412 @@ def init_phase3() -> None:
             await close_neo4j()
 
     asyncio.run(init())
+
+
+# =============================================================================
+# Linking Commands
+# =============================================================================
+
+@app.command("link-folder")
+def link_folder_cmd(
+    folder_name: str = typer.Argument(..., help="Folder name to search for"),
+    project: str = typer.Option(..., "--project", "-p", help="Project short ID or title"),
+) -> None:
+    """Link a Drive folder to a project (all docs auto-link)."""
+    async def run():
+        from cognitex.db.postgres import init_postgres, close_postgres, get_session
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.services.linking import get_linking_service, init_linking_schema
+        from cognitex.services.drive import get_drive_service
+        from cognitex.services.tasks import get_project_service
+
+        await init_postgres()
+        await init_neo4j()
+
+        try:
+            # Initialize linking schema
+            async for session in get_session():
+                await init_linking_schema(session)
+
+            # Resolve project
+            project_svc = get_project_service()
+            projects = await project_svc.list()
+            project_id = None
+            project_title = None
+
+            # Try short ID first
+            try:
+                idx = int(project) - 1
+                if 0 <= idx < len(projects):
+                    project_id = projects[idx]["id"]
+                    project_title = projects[idx]["title"]
+            except ValueError:
+                # Try matching by title
+                for p in projects:
+                    if project.lower() in p["title"].lower():
+                        project_id = p["id"]
+                        project_title = p["title"]
+                        break
+
+            if not project_id:
+                console.print(f"[red]Project not found: {project}[/red]")
+                return
+
+            # Find folder in Drive
+            drive = get_drive_service()
+            folder_id = None
+            folder_path = None
+
+            # Search for folder by name
+            with console.status(f"Searching for folder '{folder_name}'..."):
+                for file in drive.list_all_files():
+                    if file.get("mimeType") == "application/vnd.google-apps.folder":
+                        if folder_name.lower() in file["name"].lower():
+                            folder_id = file["id"]
+                            folder_path = file.get("name")
+                            break
+
+            if not folder_id:
+                console.print(f"[red]Folder not found: {folder_name}[/red]")
+                return
+
+            # Create the mapping
+            linking = get_linking_service()
+            async for session in get_session():
+                await linking.add_folder_mapping(
+                    session,
+                    folder_id=folder_id,
+                    project_id=project_id,
+                    folder_name=folder_path,
+                    project_title=project_title,
+                    auto_link_new_files=True,
+                )
+
+                # Also link existing documents in this folder
+                count = await linking.link_folder_contents_to_project(
+                    session, folder_id, project_id
+                )
+
+            console.print(f"[green]✓ Linked folder '{folder_path}' to project '{project_title}'[/green]")
+            console.print(f"  Linked {count} existing documents")
+
+        finally:
+            await close_postgres()
+            await close_neo4j()
+
+    asyncio.run(run())
+
+
+@app.command("link-contact")
+def link_contact_cmd(
+    email: str = typer.Argument(..., help="Contact email address"),
+    project: str = typer.Option(..., "--project", "-p", help="Project short ID or title"),
+    role: str = typer.Option(None, "--role", "-r", help="Role (stakeholder, team_member, client)"),
+) -> None:
+    """Link a contact to a project (emails auto-link)."""
+    async def run():
+        from cognitex.db.postgres import init_postgres, close_postgres, get_session
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.services.linking import get_linking_service, init_linking_schema
+        from cognitex.services.tasks import get_project_service
+
+        await init_postgres()
+        await init_neo4j()
+
+        try:
+            # Initialize schema
+            async for session in get_session():
+                await init_linking_schema(session)
+
+            # Resolve project
+            project_svc = get_project_service()
+            projects = await project_svc.list()
+            project_id = None
+            project_title = None
+
+            try:
+                idx = int(project) - 1
+                if 0 <= idx < len(projects):
+                    project_id = projects[idx]["id"]
+                    project_title = projects[idx]["title"]
+            except ValueError:
+                for p in projects:
+                    if project.lower() in p["title"].lower():
+                        project_id = p["id"]
+                        project_title = p["title"]
+                        break
+
+            if not project_id:
+                console.print(f"[red]Project not found: {project}[/red]")
+                return
+
+            # Create the mapping
+            linking = get_linking_service()
+            async for session in get_session():
+                await linking.add_contact_mapping(
+                    session,
+                    contact_email=email,
+                    project_id=project_id,
+                    project_title=project_title,
+                    role=role,
+                    auto_link_emails=True,
+                )
+
+            console.print(f"[green]✓ Linked contact '{email}' to project '{project_title}'[/green]")
+            if role:
+                console.print(f"  Role: {role}")
+            console.print("  Future emails from this contact will auto-link to the project")
+
+        finally:
+            await close_postgres()
+            await close_neo4j()
+
+    asyncio.run(run())
+
+
+@app.command("link-mappings")
+def link_mappings_cmd(
+    project: str = typer.Option(None, "--project", "-p", help="Filter by project"),
+) -> None:
+    """Show folder and contact mapping rules."""
+    async def run():
+        from cognitex.db.postgres import init_postgres, close_postgres, get_session
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.services.linking import get_linking_service, init_linking_schema
+        from cognitex.services.tasks import get_project_service
+
+        await init_postgres()
+        await init_neo4j()
+
+        try:
+            async for session in get_session():
+                await init_linking_schema(session)
+
+            # Resolve project if specified
+            project_id = None
+            if project:
+                project_svc = get_project_service()
+                projects = await project_svc.list()
+                try:
+                    idx = int(project) - 1
+                    if 0 <= idx < len(projects):
+                        project_id = projects[idx]["id"]
+                except ValueError:
+                    for p in projects:
+                        if project.lower() in p["title"].lower():
+                            project_id = p["id"]
+                            break
+
+            linking = get_linking_service()
+
+            # Folder mappings
+            async for session in get_session():
+                folders = await linking.get_folder_mappings(session, project_id=project_id)
+                contacts = await linking.get_contact_mappings(session, project_id=project_id)
+
+            console.print("\n[bold]Folder Mappings[/bold]")
+            if folders:
+                table = Table()
+                table.add_column("Folder")
+                table.add_column("Project")
+                table.add_column("Auto-Link")
+
+                for f in folders:
+                    table.add_row(
+                        f.get("folder_name") or f["folder_id"][:12],
+                        f.get("project_title") or f["project_id"][:12],
+                        "✓" if f.get("auto_link_new_files") else "✗",
+                    )
+                console.print(table)
+            else:
+                console.print("[dim]  No folder mappings[/dim]")
+
+            console.print("\n[bold]Contact Mappings[/bold]")
+            if contacts:
+                table = Table()
+                table.add_column("Email")
+                table.add_column("Project")
+                table.add_column("Role")
+                table.add_column("Auto-Link")
+
+                for c in contacts:
+                    table.add_row(
+                        c["contact_email"],
+                        c.get("project_title") or c["project_id"][:12],
+                        c.get("role") or "-",
+                        "✓" if c.get("auto_link_emails") else "✗",
+                    )
+                console.print(table)
+            else:
+                console.print("[dim]  No contact mappings[/dim]")
+
+        finally:
+            await close_postgres()
+            await close_neo4j()
+
+    asyncio.run(run())
+
+
+@app.command("link-suggestions")
+def link_suggestions_cmd(
+    approve: str = typer.Option(None, "--approve", "-a", help="Approve suggestion by ID"),
+    reject: str = typer.Option(None, "--reject", "-r", help="Reject suggestion by ID"),
+    limit: int = typer.Option(20, "--limit", "-l", help="Number to show"),
+) -> None:
+    """View and manage suggested links."""
+    async def run():
+        from cognitex.db.postgres import init_postgres, close_postgres, get_session
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.services.linking import get_linking_service, init_linking_schema
+
+        await init_postgres()
+        await init_neo4j()
+
+        try:
+            async for session in get_session():
+                await init_linking_schema(session)
+
+            linking = get_linking_service()
+
+            if approve:
+                async for session in get_session():
+                    success = await linking.approve_suggestion(session, approve)
+                if success:
+                    console.print(f"[green]✓ Approved suggestion {approve}[/green]")
+                else:
+                    console.print(f"[red]Suggestion not found: {approve}[/red]")
+                return
+
+            if reject:
+                async for session in get_session():
+                    success = await linking.reject_suggestion(session, reject)
+                if success:
+                    console.print(f"[yellow]✗ Rejected suggestion {reject}[/yellow]")
+                else:
+                    console.print(f"[red]Suggestion not found: {reject}[/red]")
+                return
+
+            # Show pending suggestions
+            async for session in get_session():
+                suggestions = await linking.get_pending_suggestions(session, limit=limit)
+                stats = await linking.get_suggestion_stats(session)
+
+            console.print(f"\n[bold]Suggested Links[/bold] (pending: {stats['pending']}, approved: {stats['approved']}, rejected: {stats['rejected']})\n")
+
+            if not suggestions:
+                console.print("[dim]No pending suggestions[/dim]")
+                return
+
+            table = Table()
+            table.add_column("ID")
+            table.add_column("Source")
+            table.add_column("Target")
+            table.add_column("Confidence")
+            table.add_column("Reason")
+
+            for s in suggestions:
+                table.add_row(
+                    s["id"][:12],
+                    f"{s['source_type']}: {s.get('source_name') or s['source_id'][:20]}",
+                    f"{s['target_type']}: {s.get('target_name') or s['target_id'][:20]}",
+                    f"{s['confidence']:.0%}",
+                    (s.get("reason") or "-")[:30],
+                )
+            console.print(table)
+
+            console.print("\n[dim]Use --approve ID or --reject ID to manage suggestions[/dim]")
+
+        finally:
+            await close_postgres()
+            await close_neo4j()
+
+    asyncio.run(run())
+
+
+@app.command("project-content")
+def project_content_cmd(
+    project: str = typer.Argument(..., help="Project short ID or title"),
+) -> None:
+    """Show all content linked to a project."""
+    async def run():
+        from cognitex.db.postgres import init_postgres, close_postgres
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.services.linking import get_linking_service
+        from cognitex.services.tasks import get_project_service
+
+        await init_postgres()
+        await init_neo4j()
+
+        try:
+            # Resolve project
+            project_svc = get_project_service()
+            projects = await project_svc.list()
+            project_id = None
+
+            try:
+                idx = int(project) - 1
+                if 0 <= idx < len(projects):
+                    project_id = projects[idx]["id"]
+            except ValueError:
+                for p in projects:
+                    if project.lower() in p["title"].lower():
+                        project_id = p["id"]
+                        break
+
+            if not project_id:
+                console.print(f"[red]Project not found: {project}[/red]")
+                return
+
+            linking = get_linking_service()
+            summary = await linking.get_project_content_summary(project_id)
+
+            if not summary:
+                console.print(f"[red]Project not found in graph[/red]")
+                return
+
+            console.print(f"\n[bold]{summary['project_title']}[/bold]\n")
+
+            table = Table(show_header=False)
+            table.add_column("Type", style="cyan")
+            table.add_column("Count", justify="right")
+
+            table.add_row("Documents", str(summary["documents"]))
+            table.add_row("Emails", str(summary["emails"]))
+            table.add_row("Repositories", str(summary["repositories"]))
+            table.add_row("Tasks", str(summary["tasks"]))
+            table.add_row("Team Members", str(summary["members"]))
+
+            console.print(table)
+
+        finally:
+            await close_postgres()
+            await close_neo4j()
+
+    asyncio.run(run())
+
+
+@app.command("init-linking")
+def init_linking_cmd() -> None:
+    """Initialize linking schema (folder/contact mappings, suggestions)."""
+    async def run():
+        from cognitex.db.postgres import init_postgres, close_postgres, get_session
+        from cognitex.services.linking import init_linking_schema
+
+        await init_postgres()
+
+        try:
+            async for session in get_session():
+                await init_linking_schema(session)
+            console.print("[green]✓ Linking schema initialized[/green]")
+            console.print("\nNew tables available:")
+            console.print("  • folder_project_mappings - Auto-link docs from folders")
+            console.print("  • contact_project_mappings - Auto-link emails from contacts")
+            console.print("  • suggested_links - AI-suggested links queue")
+
+        finally:
+            await close_postgres()
+
+    asyncio.run(run())
 
 
 if __name__ == "__main__":

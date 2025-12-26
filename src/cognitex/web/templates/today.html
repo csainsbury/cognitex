@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+
+{% block title %}Today - Cognitex{% endblock %}
+
+{% block content %}
+<h1>Today - {{ today_date }}</h1>
+
+<div class="two-col">
+    <div>
+        <!-- Current State -->
+        <div class="card">
+            <div class="card-header">
+                <h2>Current State</h2>
+                <span class="mode-badge mode-{{ state.mode.value }}">{{ state.mode.value | replace('_', ' ') | title }}</span>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1rem;">
+                <div>
+                    <div style="font-size: 0.8rem; color: #666;">Fatigue</div>
+                    <div class="signal-bar">
+                        <div class="signal-fill {% if state.signals.fatigue_level < 0.4 %}low{% elif state.signals.fatigue_level < 0.7 %}medium{% else %}high{% endif %}"
+                             style="width: {{ (state.signals.fatigue_level * 100)|int }}%"></div>
+                    </div>
+                    <div style="font-size: 0.75rem; color: #888;">{{ (state.signals.fatigue_level * 100)|int }}%</div>
+                </div>
+                <div>
+                    <div style="font-size: 0.8rem; color: #666;">Interruption Pressure</div>
+                    <div class="signal-bar">
+                        <div class="signal-fill {% if state.signals.interruption_pressure < 0.4 %}low{% elif state.signals.interruption_pressure < 0.7 %}medium{% else %}high{% endif %}"
+                             style="width: {{ (state.signals.interruption_pressure * 100)|int }}%"></div>
+                    </div>
+                    <div style="font-size: 0.75rem; color: #888;">{{ (state.signals.interruption_pressure * 100)|int }}%</div>
+                </div>
+                <div>
+                    <div style="font-size: 0.8rem; color: #666;">Available Block</div>
+                    <div style="font-size: 1.2rem; font-weight: 600;">
+                        {% if state.signals.available_block_minutes %}{{ state.signals.available_block_minutes }} min{% else %}--{% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Today's Calendar -->
+        <div class="card">
+            <div class="card-header">
+                <h2>Calendar</h2>
+                <span style="font-size: 0.85rem; color: #666;">{{ events|length }} events</span>
+            </div>
+            {% if events %}
+                {% for event in events %}
+                <div class="event-card">
+                    <div class="event-time">{{ event.start_time }} - {{ event.end_time }}</div>
+                    <div class="event-title">{{ event.title }}</div>
+                    {% if event.attendees %}
+                    <div class="event-attendees">{{ event.attendees|join(', ') }}</div>
+                    {% endif %}
+                    {% if event.context_pack %}
+                    <div class="context-pack">
+                        <div class="context-pack-header">Context Pack</div>
+                        {% if event.context_pack.last_interaction %}
+                        <div class="context-pack-section">
+                            <div class="context-pack-section-title">Last Interaction</div>
+                            <div>{{ event.context_pack.last_interaction }}</div>
+                        </div>
+                        {% endif %}
+                        {% if event.context_pack.artifacts %}
+                        <div class="context-pack-section">
+                            <div class="context-pack-section-title">Related Documents</div>
+                            {% for doc in event.context_pack.artifacts[:3] %}
+                            <div style="font-size: 0.85rem;">- {{ doc.title or doc.name }}</div>
+                            {% endfor %}
+                        </div>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            {% else %}
+                <p class="empty">No events scheduled for today</p>
+            {% endif %}
+        </div>
+
+        <!-- Top Tasks -->
+        <div class="card">
+            <div class="card-header">
+                <h2>Priority Tasks</h2>
+                <a href="/tasks" class="link">View all</a>
+            </div>
+            {% if tasks %}
+            <table>
+                <tr>
+                    <th>Task</th>
+                    <th>Priority</th>
+                    <th>Due</th>
+                    <th>Actions</th>
+                </tr>
+                {% for task in tasks %}
+                <tr>
+                    <td>{{ task.title }}</td>
+                    <td><span class="priority-{{ task.priority }}">{{ task.priority }}</span></td>
+                    <td>{{ task.due or '-' }}</td>
+                    <td>
+                        <button class="btn btn-success btn-sm"
+                                hx-post="/tasks/{{ task.id }}/complete"
+                                hx-swap="outerHTML"
+                                hx-target="closest tr">Done</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% else %}
+            <p class="empty">No pending tasks</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <div>
+        <!-- Briefing -->
+        <div class="card">
+            <div class="card-header">
+                <h2>Morning Briefing</h2>
+                <button class="btn btn-secondary btn-sm"
+                        hx-post="/api/briefing/generate"
+                        hx-target="#briefing-content"
+                        hx-indicator="#briefing-loading">
+                    Regenerate
+                </button>
+            </div>
+            <div id="briefing-content">
+                {% if briefing %}
+                <div class="briefing-content">{{ briefing }}</div>
+                {% else %}
+                <p class="empty">
+                    <button class="btn btn-primary"
+                            hx-post="/api/briefing/generate"
+                            hx-target="#briefing-content"
+                            hx-indicator="#briefing-loading">
+                        Generate Briefing
+                    </button>
+                </p>
+                {% endif %}
+            </div>
+            <span id="briefing-loading" class="htmx-indicator">Loading...</span>
+        </div>
+
+        <!-- Quick Actions -->
+        <div class="card">
+            <h2>Quick Actions</h2>
+            <div style="display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.5rem;">
+                <a href="/tasks/new" class="btn btn-primary">Add Task</a>
+                <button class="btn btn-secondary"
+                        hx-post="/api/state/update?mode=deep_focus"
+                        hx-swap="none">Enter Deep Focus</button>
+                <button class="btn btn-secondary"
+                        hx-post="/api/state/update?mode=fragmented"
+                        hx-swap="none">Fragmented Mode</button>
+            </div>
+        </div>
+
+        <!-- Upcoming Deadlines -->
+        <div class="card">
+            <h2>Upcoming Deadlines</h2>
+            {% if deadlines %}
+            <ul style="list-style: none; padding: 0;">
+                {% for deadline in deadlines %}
+                <li style="padding: 0.5rem 0; border-bottom: 1px solid #eee;">
+                    <div style="font-weight: 500;">{{ deadline.title }}</div>
+                    <div style="font-size: 0.85rem; color: #666;">{{ deadline.due }}</div>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="empty">No upcoming deadlines</p>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}

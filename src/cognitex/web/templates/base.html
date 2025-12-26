@@ -143,6 +143,118 @@
         /* Keyboard shortcuts hint */
         .shortcuts { font-size: 0.75rem; color: #999; margin-top: 1rem; }
 
+        /* Mode badges */
+        .mode-badge {
+            display: inline-block;
+            padding: 0.3rem 0.8rem;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            font-weight: 600;
+        }
+        .mode-deep_focus { background: #dbeafe; color: #1e40af; }
+        .mode-fragmented { background: #fef3c7; color: #92400e; }
+        .mode-overloaded { background: #fee2e2; color: #991b1b; }
+        .mode-avoidant { background: #fce7f3; color: #9d174d; }
+        .mode-hyperfocus { background: #d1fae5; color: #065f46; }
+        .mode-transition { background: #e5e7eb; color: #374151; }
+
+        /* Signal meters */
+        .signal-bar {
+            width: 100%;
+            height: 8px;
+            background: #e5e7eb;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .signal-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.3s;
+        }
+        .signal-fill.low { background: #16a34a; }
+        .signal-fill.medium { background: #eab308; }
+        .signal-fill.high { background: #dc2626; }
+
+        /* Event cards */
+        .event-card {
+            background: #fff;
+            border-left: 4px solid #2563eb;
+            padding: 0.75rem 1rem;
+            margin-bottom: 0.5rem;
+            border-radius: 0 5px 5px 0;
+        }
+        .event-time { font-size: 0.85rem; color: #666; }
+        .event-title { font-weight: 600; margin: 0.25rem 0; }
+        .event-attendees { font-size: 0.8rem; color: #888; }
+
+        /* Context pack card */
+        .context-pack {
+            background: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 5px;
+            padding: 1rem;
+            margin-top: 0.5rem;
+        }
+        .context-pack-header { font-weight: 600; margin-bottom: 0.5rem; }
+        .context-pack-section { margin-bottom: 0.5rem; }
+        .context-pack-section-title { font-size: 0.8rem; color: #666; text-transform: uppercase; }
+
+        /* Search box */
+        .search-box {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+        }
+        .search-box input {
+            flex: 1;
+            padding: 0.6rem 1rem;
+            font-size: 1rem;
+        }
+
+        /* Document results */
+        .doc-result {
+            background: #fff;
+            padding: 1rem;
+            margin-bottom: 0.5rem;
+            border-radius: 5px;
+            border-left: 3px solid #2563eb;
+        }
+        .doc-result-title { font-weight: 600; }
+        .doc-result-path { font-size: 0.8rem; color: #666; margin: 0.25rem 0; }
+        .doc-result-snippet { font-size: 0.9rem; color: #444; }
+        .doc-result-topics { margin-top: 0.5rem; }
+        .topic-tag {
+            display: inline-block;
+            background: #e0e7ff;
+            color: #3730a3;
+            padding: 0.15rem 0.4rem;
+            border-radius: 3px;
+            font-size: 0.75rem;
+            margin-right: 0.25rem;
+        }
+        .concept-tag {
+            display: inline-block;
+            background: #fef3c7;
+            color: #92400e;
+            padding: 0.15rem 0.4rem;
+            border-radius: 3px;
+            font-size: 0.75rem;
+            margin-right: 0.25rem;
+        }
+
+        /* Briefing section */
+        .briefing-content {
+            background: #fff;
+            padding: 1.5rem;
+            border-radius: 5px;
+            white-space: pre-wrap;
+            line-height: 1.6;
+        }
+
+        /* Two column layout */
+        .two-col { display: grid; grid-template-columns: 2fr 1fr; gap: 1rem; }
+        @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+
         /* People picker styles */
         .people-picker {
             position: relative;
@@ -215,9 +327,14 @@
 <body>
     <nav>
         <a href="/" {% if request.url.path == "/" %}class="active"{% endif %}>Dashboard</a>
+        <a href="/today" {% if "/today" in request.url.path %}class="active"{% endif %}>Today</a>
+        <a href="/chat" {% if "/chat" in request.url.path %}class="active"{% endif %}>Chat</a>
         <a href="/tasks" {% if "/tasks" in request.url.path %}class="active"{% endif %}>Tasks</a>
         <a href="/projects" {% if "/projects" in request.url.path %}class="active"{% endif %}>Projects</a>
         <a href="/goals" {% if "/goals" in request.url.path %}class="active"{% endif %}>Goals</a>
+        <a href="/documents" {% if "/documents" in request.url.path %}class="active"{% endif %}>Documents</a>
+        <a href="/state" {% if "/state" in request.url.path %}class="active"{% endif %}>State</a>
+        <a href="/settings" {% if "/settings" in request.url.path %}class="active"{% endif %} style="float: right;">Settings</a>
     </nav>
 
     <div class="container">

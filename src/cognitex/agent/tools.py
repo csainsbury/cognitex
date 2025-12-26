@@ -1262,6 +1262,138 @@ class GetRepositoriesTool(BaseTool):
             return ToolResult(success=False, error=str(e))
 
 
+class WebSearchTool(BaseTool):
+    """Search the web for external information."""
+
+    name = "web_search"
+    description = """Search the web for external information. Use this to:
+    - Research products, services, or pricing (e.g., Azure GPU VMs, cloud services)
+    - Find documentation, specifications, or technical details
+    - Gather competitive intelligence or market information
+    - Research topics for meeting preparation
+
+    Returns search results with titles, snippets, and URLs."""
+    risk = ToolRisk.READONLY
+    parameters = {
+        "query": {"type": "string", "description": "Search query"},
+        "num_results": {"type": "integer", "description": "Number of results to return", "default": 5},
+    }
+
+    async def execute(self, query: str, num_results: int = 5) -> ToolResult:
+        import asyncio
+
+        try:
+            # Use the duckduckgo-search library which provides reliable results
+            search_results = await asyncio.to_thread(
+                self._search_duckduckgo_sync, query, num_results
+            )
+
+            if search_results:
+                logger.info("Web search completed", query=query[:50], results=len(search_results))
+                return ToolResult(success=True, data={
+                    "query": query,
+                    "results": search_results,
+                    "count": len(search_results),
+                })
+
+            return ToolResult(success=True, data={
+                "query": query,
+                "results": [],
+                "message": "No results found"
+            })
+
+        except Exception as e:
+            logger.warning("Web search failed", query=query[:50], error=str(e))
+            return ToolResult(success=False, error=str(e))
+
+    def _search_duckduckgo_sync(self, query: str, num_results: int) -> list[dict]:
+        """Search using ddgs library (sync, run in thread)."""
+        from ddgs import DDGS
+
+        results = []
+
+        with DDGS() as ddgs:
+            for r in ddgs.text(query, max_results=num_results):
+                results.append({
+                    "title": r.get("title", ""),
+                    "snippet": r.get("body", ""),
+                    "url": r.get("href", ""),
+                })
+
+        return results
+
+
+class WebFetchTool(BaseTool):
+    """Fetch and extract content from a specific URL."""
+
+    name = "web_fetch"
+    description = """Fetch and extract the main content from a web page. Use after web_search to get detailed information from a specific URL."""
+    risk = ToolRisk.READONLY
+    parameters = {
+        "url": {"type": "string", "description": "URL to fetch"},
+        "max_length": {"type": "integer", "description": "Maximum content length", "default": 8000},
+    }
+
+    async def execute(self, url: str, max_length: int = 8000) -> ToolResult:
+        import httpx
+        import re
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+                response = await client.get(
+                    url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (compatible; Cognitex/1.0)",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    }
+                )
+
+                if response.status_code != 200:
+                    return ToolResult(
+                        success=False,
+                        error=f"HTTP {response.status_code} fetching {url}"
+                    )
+
+                html = response.text
+
+                # Extract title
+                title_match = re.search(r'<title[^>]*>([^<]+)</title>', html, re.IGNORECASE)
+                title = title_match.group(1).strip() if title_match else ""
+
+                # Remove script and style elements
+                html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+                html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
+                html = re.sub(r'<nav[^>]*>.*?</nav>', '', html, flags=re.DOTALL | re.IGNORECASE)
+                html = re.sub(r'<footer[^>]*>.*?</footer>', '', html, flags=re.DOTALL | re.IGNORECASE)
+                html = re.sub(r'<header[^>]*>.*?</header>', '', html, flags=re.DOTALL | re.IGNORECASE)
+
+                # Remove all HTML tags
+                text = re.sub(r'<[^>]+>', ' ', html)
+
+                # Clean up whitespace
+                text = re.sub(r'\s+', ' ', text).strip()
+
+                # Decode HTML entities
+                import html as html_module
+                text = html_module.unescape(text)
+
+                content = text[:max_length]
+                truncated = len(text) > max_length
+
+                logger.info("Web fetch completed", url=url[:50], chars=len(content))
+                return ToolResult(success=True, data={
+                    "url": url,
+                    "title": title,
+                    "content": content,
+                    "truncated": truncated,
+                    "original_length": len(text),
+                })
+
+        except Exception as e:
+            logger.warning("Web fetch failed", url=url[:50], error=str(e))
+            return ToolResult(success=False, error=str(e))
+
+
 class ReadDocumentTool(BaseTool):
     """Read the full content of a specific document."""
 
@@ -1333,6 +1465,8 @@ class ToolRegistry:
             GetProjectTool(),
             GetGoalsTool(),
             GetGoalTool(),
+            WebSearchTool(),
+            WebFetchTool(),
             # Auto-execute
             CreateTaskTool(),
             UpdateTaskTool(),

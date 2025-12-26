@@ -1,0 +1,229 @@
+{% extends "base.html" %}
+
+{% block title %}Settings - Cognitex{% endblock %}
+
+{% block content %}
+<h1>Settings</h1>
+
+<div class="two-col">
+    <div>
+        <div class="card">
+            <h2>LLM Provider</h2>
+            <p style="color: #666; font-size: 0.9rem; margin-bottom: 1rem;">
+                Select which AI provider to use for chat/reasoning tasks.
+            </p>
+
+            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem;">
+                {% for p in providers %}
+                <button class="btn {% if p.id == config.provider %}btn-primary{% else %}btn-secondary{% endif %}"
+                        {% if not p.has_api_key %}disabled title="No API key configured"{% endif %}
+                        hx-post="/api/settings/provider/{{ p.id }}"
+                        hx-target="body"
+                        hx-swap="outerHTML">
+                    {{ p.name }}
+                    {% if not p.has_api_key %}<span style="opacity: 0.6;">(no key)</span>{% endif %}
+                </button>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Model Configuration</h2>
+            <p style="color: #666; font-size: 0.9rem; margin-bottom: 1rem;">
+                Configure which models to use for different purposes. Changes take effect immediately.
+            </p>
+
+            <form id="model-form" hx-post="/api/settings/models" hx-swap="outerHTML" hx-target="#save-result">
+                <input type="hidden" name="provider" value="{{ config.provider }}">
+                <table>
+                    <tr>
+                        <td style="width: 150px; font-weight: 500;">Planner Model</td>
+                        <td>
+                            <select name="planner_model" style="width: 100%;">
+                                {% for model in chat_models %}
+                                <option value="{{ model.id }}" {% if model.id == config.planner_model %}selected{% endif %}>
+                                    {{ model.display_name }}
+                                    {% if model.context_length %}({{ (model.context_length / 1000)|int }}k ctx){% endif %}
+                                </option>
+                                {% endfor %}
+                            </select>
+                            <div style="font-size: 0.8rem; color: #666; margin-top: 0.25rem;">
+                                Used for reasoning, planning, and decision making
+                            </div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="font-weight: 500;">Executor Model</td>
+                        <td>
+                            <select name="executor_model" style="width: 100%;">
+                                {% for model in chat_models %}
+                                <option value="{{ model.id }}" {% if model.id == config.executor_model %}selected{% endif %}>
+                                    {{ model.display_name }}
+                                    {% if model.context_length %}({{ (model.context_length / 1000)|int }}k ctx){% endif %}
+                                </option>
+                                {% endfor %}
+                            </select>
+                            <div style="font-size: 0.8rem; color: #666; margin-top: 0.25rem;">
+                                Used for email drafting, task execution, structured outputs
+                            </div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="font-weight: 500;">Embedding Model</td>
+                        <td>
+                            <select name="embedding_model" style="width: 100%;">
+                                {% for model in embedding_models %}
+                                <option value="{{ model.id }}" {% if model.id == config.embedding_model %}selected{% endif %}>
+                                    {{ model.display_name }}
+                                </option>
+                                {% endfor %}
+                            </select>
+                            <div style="font-size: 0.8rem; color: #666; margin-top: 0.25rem;">
+                                Used for document/code embeddings and semantic search
+                                {% if config.embedding_provider != config.provider %}
+                                (via {{ config.embedding_provider|title }})
+                                {% endif %}
+                            </div>
+                        </td>
+                    </tr>
+                </table>
+
+                <div style="margin-top: 1rem; display: flex; gap: 0.5rem; align-items: center;">
+                    <button type="submit" class="btn btn-primary">Save Changes</button>
+                    <button type="button" class="btn btn-secondary"
+                            hx-post="/api/settings/models/reset"
+                            hx-target="body"
+                            hx-swap="outerHTML">
+                        Reset to Defaults
+                    </button>
+                    <span id="save-result"></span>
+                </div>
+            </form>
+        </div>
+
+        <div class="card">
+            <h2>Current Configuration</h2>
+            <table>
+                <tr>
+                    <th>Setting</th>
+                    <th>Value</th>
+                    <th>Source</th>
+                </tr>
+                <tr>
+                    <td>Provider</td>
+                    <td><strong>{{ config.provider|title }}</strong></td>
+                    <td><span class="badge {% if config_source == 'redis' %}badge-active{% else %}badge-pending{% endif %}">{{ config_source }}</span></td>
+                </tr>
+                <tr>
+                    <td>Planner</td>
+                    <td><code style="font-size: 0.8rem;">{{ config.planner_model }}</code></td>
+                    <td></td>
+                </tr>
+                <tr>
+                    <td>Executor</td>
+                    <td><code style="font-size: 0.8rem;">{{ config.executor_model }}</code></td>
+                    <td></td>
+                </tr>
+                <tr>
+                    <td>Embedding</td>
+                    <td><code style="font-size: 0.8rem;">{{ config.embedding_model }}</code></td>
+                    <td></td>
+                </tr>
+            </table>
+            <p style="font-size: 0.8rem; color: #666; margin-top: 0.5rem;">
+                Source: <strong>redis</strong> = runtime override saved, <strong>env</strong> = using environment/config defaults
+            </p>
+        </div>
+    </div>
+
+    <div>
+        <div class="card">
+            <h2>Quick Presets</h2>
+            <p style="color: #666; font-size: 0.85rem; margin-bottom: 1rem;">
+                Common model configurations
+            </p>
+
+            <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                <strong style="font-size: 0.85rem; color: #666;">Together.ai</strong>
+                <button class="btn btn-secondary"
+                        hx-post="/api/settings/models/preset/together-performance"
+                        hx-target="body"
+                        hx-swap="outerHTML">
+                    DeepSeek V3 (Performance)
+                </button>
+                <button class="btn btn-secondary"
+                        hx-post="/api/settings/models/preset/together-reasoning"
+                        hx-target="body"
+                        hx-swap="outerHTML">
+                    DeepSeek R1 (Deep Reasoning)
+                </button>
+                <button class="btn btn-secondary"
+                        hx-post="/api/settings/models/preset/together-fast"
+                        hx-target="body"
+                        hx-swap="outerHTML">
+                    Llama 3.1 8B (Fast/Cheap)
+                </button>
+
+                <strong style="font-size: 0.85rem; color: #666; margin-top: 0.5rem;">Anthropic</strong>
+                <button class="btn btn-secondary"
+                        hx-post="/api/settings/models/preset/anthropic-sonnet"
+                        hx-target="body"
+                        hx-swap="outerHTML">
+                    Claude Sonnet 4
+                </button>
+                <button class="btn btn-secondary"
+                        hx-post="/api/settings/models/preset/anthropic-opus"
+                        hx-target="body"
+                        hx-swap="outerHTML">
+                    Claude Opus 4 (Most Capable)
+                </button>
+
+                <strong style="font-size: 0.85rem; color: #666; margin-top: 0.5rem;">OpenAI</strong>
+                <button class="btn btn-secondary"
+                        hx-post="/api/settings/models/preset/openai-gpt4o"
+                        hx-target="body"
+                        hx-swap="outerHTML">
+                    GPT-4o
+                </button>
+                <button class="btn btn-secondary"
+                        hx-post="/api/settings/models/preset/openai-o1"
+                        hx-target="body"
+                        hx-swap="outerHTML">
+                    o1 (Reasoning)
+                </button>
+
+                <strong style="font-size: 0.85rem; color: #666; margin-top: 0.5rem;">Google</strong>
+                <button class="btn btn-secondary"
+                        hx-post="/api/settings/models/preset/google-gemini"
+                        hx-target="body"
+                        hx-swap="outerHTML">
+                    Gemini 3 Flash (Fast)
+                </button>
+                <button class="btn btn-secondary"
+                        hx-post="/api/settings/models/preset/google-gemini-pro"
+                        hx-target="body"
+                        hx-swap="outerHTML">
+                    Gemini 3 Pro (Latest)
+                </button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>API Keys</h2>
+            <p style="color: #666; font-size: 0.85rem; margin-bottom: 0.5rem;">
+                Configure API keys in your <code>.env</code> file:
+            </p>
+            <pre style="background: #f5f5f5; padding: 0.5rem; font-size: 0.75rem; overflow-x: auto;">
+TOGETHER_API_KEY=...
+ANTHROPIC_API_KEY=...
+OPENAI_API_KEY=...
+GOOGLE_AI_API_KEY=...</pre>
+            <p style="font-size: 0.8rem; color: #666; margin-top: 0.5rem;">
+                {% for p in providers %}
+                {{ p.name }}: {% if p.has_api_key %}<span style="color: #16a34a;">configured</span>{% else %}<span style="color: #dc2626;">not set</span>{% endif %}{% if not loop.last %} | {% endif %}
+                {% endfor %}
+            </p>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+
+{% block title %}Documents - Cognitex{% endblock %}
+
+{% block content %}
+<h1>Documents & Knowledge</h1>
+
+<!-- Search Box -->
+<div class="search-box">
+    <input type="text"
+           id="doc-search"
+           placeholder="Search documents by content, topic, or concept..."
+           value="{{ query or '' }}"
+           hx-get="/documents/search"
+           hx-trigger="keyup changed delay:300ms"
+           hx-target="#search-results"
+           hx-indicator="#search-loading"
+           name="q">
+    <button class="btn btn-primary"
+            hx-get="/documents/search"
+            hx-include="#doc-search"
+            hx-target="#search-results">Search</button>
+</div>
+<span id="search-loading" class="htmx-indicator" style="margin-left: 1rem;">Searching...</span>
+
+<div class="two-col">
+    <div>
+        <!-- Search Results -->
+        <div class="card">
+            <h2>Search Results</h2>
+            <div id="search-results">
+                {% if results %}
+                    {% for doc in results %}
+                    <div class="doc-result">
+                        <div class="doc-result-title">{{ doc.name }}</div>
+                        <div class="doc-result-path">{{ doc.folder_path or 'Drive' }}</div>
+                        {% if doc.snippet %}
+                        <div class="doc-result-snippet">{{ doc.snippet }}</div>
+                        {% endif %}
+                        <div class="doc-result-topics">
+                            {% for topic in doc.topics[:5] %}
+                            <span class="topic-tag">{{ topic }}</span>
+                            {% endfor %}
+                            {% for concept in doc.concepts[:5] %}
+                            <span class="concept-tag">{{ concept }}</span>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <p class="empty">Enter a search query to find documents</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <div>
+        <!-- Topics Browser -->
+        <div class="card">
+            <h2>Topics</h2>
+            {% if topics %}
+            <div style="display: flex; flex-wrap: wrap; gap: 0.25rem;">
+                {% for topic in topics %}
+                <a href="/documents?topic={{ topic.name }}"
+                   class="topic-tag"
+                   style="text-decoration: none; cursor: pointer;">
+                    {{ topic.name }} ({{ topic.count }})
+                </a>
+                {% endfor %}
+            </div>
+            {% else %}
+            <p class="empty">No topics indexed yet</p>
+            {% endif %}
+        </div>
+
+        <!-- Concepts Browser -->
+        <div class="card">
+            <h2>Concepts</h2>
+            {% if concepts %}
+            <div style="display: flex; flex-wrap: wrap; gap: 0.25rem;">
+                {% for concept in concepts %}
+                <a href="/documents?concept={{ concept.name }}"
+                   class="concept-tag"
+                   style="text-decoration: none; cursor: pointer;">
+                    {{ concept.name }} ({{ concept.count }})
+                </a>
+                {% endfor %}
+            </div>
+            {% else %}
+            <p class="empty">No concepts indexed yet</p>
+            {% endif %}
+        </div>
+
+        <!-- Recent Documents -->
+        <div class="card">
+            <h2>Recently Indexed</h2>
+            {% if recent_docs %}
+            <ul style="list-style: none; padding: 0;">
+                {% for doc in recent_docs %}
+                <li style="padding: 0.5rem 0; border-bottom: 1px solid #eee;">
+                    <div style="font-weight: 500;">{{ doc.name }}</div>
+                    <div style="font-size: 0.8rem; color: #666;">{{ doc.folder_path }}</div>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="empty">No documents indexed yet</p>
+            {% endif %}
+        </div>
+
+        <!-- Stats -->
+        <div class="card">
+            <h2>Statistics</h2>
+            <div class="stats" style="margin-bottom: 0;">
+                <div class="stat">
+                    <div class="stat-value">{{ stats.documents|default(0) }}</div>
+                    <div class="stat-label">Documents</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value">{{ stats.chunks|default(0) }}</div>
+                    <div class="stat-label">Chunks</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

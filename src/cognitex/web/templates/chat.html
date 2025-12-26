@@ -1,0 +1,280 @@
+{% extends "base.html" %}
+
+{% block title %}Chat - Cognitex{% endblock %}
+
+{% block content %}
+<style>
+    .chat-container {
+        display: flex;
+        flex-direction: column;
+        height: calc(100vh - 120px);
+        max-width: 900px;
+        margin: 0 auto;
+    }
+    .chat-messages {
+        flex: 1;
+        overflow-y: auto;
+        padding: 1rem;
+        background: #fff;
+        border-radius: 5px;
+        margin-bottom: 1rem;
+    }
+    .message {
+        margin-bottom: 1rem;
+        padding: 0.75rem 1rem;
+        border-radius: 8px;
+        max-width: 85%;
+        line-height: 1.5;
+    }
+    .message-user {
+        background: #2563eb;
+        color: #fff;
+        margin-left: auto;
+        border-bottom-right-radius: 4px;
+    }
+    .message-agent {
+        background: #f3f4f6;
+        color: #333;
+        margin-right: auto;
+        border-bottom-left-radius: 4px;
+    }
+    .message-agent pre {
+        background: #e5e7eb;
+        padding: 0.5rem;
+        border-radius: 4px;
+        overflow-x: auto;
+        font-size: 0.85rem;
+    }
+    .message-agent code {
+        background: #e5e7eb;
+        padding: 0.1rem 0.3rem;
+        border-radius: 3px;
+        font-size: 0.85rem;
+    }
+    .message-time {
+        font-size: 0.7rem;
+        opacity: 0.7;
+        margin-top: 0.25rem;
+    }
+    .message-thinking {
+        background: #fef3c7;
+        color: #92400e;
+        font-style: italic;
+    }
+    .chat-input-area {
+        display: flex;
+        gap: 0.5rem;
+    }
+    .chat-input {
+        flex: 1;
+        padding: 0.75rem 1rem;
+        font-size: 1rem;
+        border: 2px solid #e5e7eb;
+        border-radius: 8px;
+        resize: none;
+        min-height: 50px;
+        max-height: 150px;
+    }
+    .chat-input:focus {
+        border-color: #2563eb;
+        outline: none;
+    }
+    .chat-send {
+        padding: 0.75rem 1.5rem;
+        background: #2563eb;
+        color: #fff;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 1rem;
+        font-weight: 500;
+    }
+    .chat-send:hover {
+        background: #1d4ed8;
+    }
+    .chat-send:disabled {
+        background: #9ca3af;
+        cursor: not-allowed;
+    }
+    .typing-indicator {
+        display: none;
+        padding: 0.5rem 1rem;
+        color: #666;
+        font-style: italic;
+    }
+    .typing-indicator.show {
+        display: block;
+    }
+    .chat-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1rem;
+    }
+    .model-info {
+        font-size: 0.85rem;
+        color: #666;
+    }
+    .clear-chat {
+        font-size: 0.85rem;
+        color: #dc2626;
+        cursor: pointer;
+        text-decoration: underline;
+    }
+    .clear-chat:hover {
+        color: #b91c1c;
+    }
+</style>
+
+<div class="chat-header">
+    <h1>Chat with Cognitex</h1>
+    <div>
+        <span class="model-info">Provider: {{ provider }} | Model: {{ model }}</span>
+        <span class="clear-chat" onclick="clearChat()">Clear history</span>
+    </div>
+</div>
+
+<div class="chat-container">
+    <div class="chat-messages" id="chat-messages">
+        <div class="message message-agent">
+            Hello! I'm your Cognitex assistant. I can help you with:
+            <ul style="margin: 0.5rem 0 0 1rem;">
+                <li>Searching your emails, documents, and calendar</li>
+                <li>Creating and managing tasks</li>
+                <li>Drafting emails (with your approval)</li>
+                <li>Answering questions about your data</li>
+            </ul>
+            <br>What can I help you with today?
+        </div>
+    </div>
+
+    <div class="typing-indicator" id="typing-indicator">
+        Agent is thinking...
+    </div>
+
+    <div class="chat-input-area">
+        <textarea
+            class="chat-input"
+            id="chat-input"
+            placeholder="Type your message... (Enter to send, Shift+Enter for new line)"
+            rows="1"
+        ></textarea>
+        <button class="chat-send" id="chat-send" onclick="sendMessage()">Send</button>
+    </div>
+</div>
+
+<script>
+const messagesEl = document.getElementById('chat-messages');
+const inputEl = document.getElementById('chat-input');
+const sendBtn = document.getElementById('chat-send');
+const typingEl = document.getElementById('typing-indicator');
+
+// Auto-resize textarea
+inputEl.addEventListener('input', function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 150) + 'px';
+});
+
+// Enter to send, Shift+Enter for new line
+inputEl.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+    }
+});
+
+function addMessage(content, isUser) {
+    const div = document.createElement('div');
+    div.className = `message ${isUser ? 'message-user' : 'message-agent'}`;
+
+    if (isUser) {
+        div.textContent = content;
+    } else {
+        // Parse markdown-like formatting for agent messages
+        div.innerHTML = formatMessage(content);
+    }
+
+    messagesEl.appendChild(div);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function formatMessage(text) {
+    // Escape HTML
+    text = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    // Code blocks
+    text = text.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
+
+    // Inline code
+    text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+    // Bold
+    text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+
+    // Italic (underscore style for markdown)
+    text = text.replace(/_\(([^)]+)\)_/g, '<em>($1)</em>');
+
+    // Line breaks
+    text = text.replace(/\n/g, '<br>');
+
+    return text;
+}
+
+async function sendMessage() {
+    const message = inputEl.value.trim();
+    if (!message) return;
+
+    // Add user message
+    addMessage(message, true);
+    inputEl.value = '';
+    inputEl.style.height = 'auto';
+
+    // Show typing indicator
+    typingEl.classList.add('show');
+    sendBtn.disabled = true;
+
+    try {
+        const response = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message })
+        });
+
+        const data = await response.json();
+
+        if (data.error) {
+            addMessage('Error: ' + data.error, false);
+        } else {
+            addMessage(data.response, false);
+
+            // If there are pending approvals, show a notice
+            if (data.approvals && data.approvals.length > 0) {
+                addMessage(`_I've created ${data.approvals.length} action(s) that need your approval. Check the Approvals page to review them._`, false);
+            }
+        }
+    } catch (err) {
+        addMessage('Error: Failed to connect to agent. ' + err.message, false);
+    } finally {
+        typingEl.classList.remove('show');
+        sendBtn.disabled = false;
+        inputEl.focus();
+    }
+}
+
+function clearChat() {
+    if (confirm('Clear chat history? This will also clear the agent\'s working memory.')) {
+        fetch('/api/chat/clear', { method: 'POST' })
+            .then(() => {
+                messagesEl.innerHTML = `
+                    <div class="message message-agent">
+                        Chat history cleared. How can I help you?
+                    </div>
+                `;
+            });
+    }
+}
+
+// Focus input on page load
+inputEl.focus();
+</script>
+{% endblock %}

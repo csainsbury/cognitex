@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+
+{% block title %}State - Cognitex{% endblock %}
+
+{% block content %}
+<h1>Operating State</h1>
+
+<div class="two-col">
+    <div>
+        <!-- Current Mode -->
+        <div class="card">
+            <div class="card-header">
+                <h2>Current Mode</h2>
+                <span class="mode-badge mode-{{ state.mode.value }}">{{ state.mode.value | replace('_', ' ') | title }}</span>
+            </div>
+            <p style="color: #666; margin-top: 0.5rem;">{{ mode_description }}</p>
+
+            <h3 style="margin-top: 1rem; margin-bottom: 0.5rem; font-size: 1rem;">Switch Mode</h3>
+            <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
+                {% for mode in available_modes %}
+                <button class="btn {% if mode.value == state.mode.value %}btn-primary{% else %}btn-secondary{% endif %}"
+                        hx-post="/api/state/update?mode={{ mode.value }}"
+                        hx-swap="none"
+                        onclick="location.reload()">
+                    {{ mode.value | replace('_', ' ') | title }}
+                </button>
+                {% endfor %}
+            </div>
+        </div>
+
+        <!-- Continuous Signals -->
+        <div class="card">
+            <h2>Continuous Signals</h2>
+            <div style="display: grid; gap: 1rem; margin-top: 0.5rem;">
+                <!-- Fatigue -->
+                <div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 0.25rem;">
+                        <span style="font-weight: 500;">Fatigue Level</span>
+                        <span>{{ (state.signals.fatigue_level * 100)|int }}%</span>
+                    </div>
+                    <div class="signal-bar" style="height: 12px;">
+                        <div class="signal-fill {% if state.signals.fatigue_level < 0.4 %}low{% elif state.signals.fatigue_level < 0.7 %}medium{% else %}high{% endif %}"
+                             style="width: {{ (state.signals.fatigue_level * 100)|int }}%"></div>
+                    </div>
+                    <div style="display: flex; gap: 0.5rem; margin-top: 0.25rem;">
+                        <button class="btn btn-sm btn-secondary"
+                                hx-post="/api/state/signal?fatigue_delta=-0.1"
+                                hx-swap="none"
+                                onclick="location.reload()">-</button>
+                        <button class="btn btn-sm btn-secondary"
+                                hx-post="/api/state/signal?fatigue_delta=0.1"
+                                hx-swap="none"
+                                onclick="location.reload()">+</button>
+                    </div>
+                </div>
+
+                <!-- Interruption Pressure -->
+                <div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 0.25rem;">
+                        <span style="font-weight: 500;">Interruption Pressure</span>
+                        <span>{{ (state.signals.interruption_pressure * 100)|int }}%</span>
+                    </div>
+                    <div class="signal-bar" style="height: 12px;">
+                        <div class="signal-fill {% if state.signals.interruption_pressure < 0.4 %}low{% elif state.signals.interruption_pressure < 0.7 %}medium{% else %}high{% endif %}"
+                             style="width: {{ (state.signals.interruption_pressure * 100)|int }}%"></div>
+                    </div>
+                </div>
+
+                <!-- Focus Score -->
+                <div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 0.25rem;">
+                        <span style="font-weight: 500;">Focus Score</span>
+                        <span>{% if state.signals.focus_score %}{{ (state.signals.focus_score * 100)|int }}%{% else %}--{% endif %}</span>
+                    </div>
+                    {% if state.signals.focus_score %}
+                    <div class="signal-bar" style="height: 12px;">
+                        <div class="signal-fill low" style="width: {{ (state.signals.focus_score * 100)|int }}%"></div>
+                    </div>
+                    {% endif %}
+                </div>
+
+                <!-- Available Block -->
+                <div>
+                    <div style="display: flex; justify-content: space-between;">
+                        <span style="font-weight: 500;">Available Block</span>
+                        <span style="font-size: 1.1rem; font-weight: 600;">
+                            {% if state.signals.available_block_minutes %}{{ state.signals.available_block_minutes }} minutes{% else %}Not set{% endif %}
+                        </span>
+                    </div>
+                </div>
+
+                <!-- Time to Next Commitment -->
+                <div>
+                    <div style="display: flex; justify-content: space-between;">
+                        <span style="font-weight: 500;">Time to Next Commitment</span>
+                        <span style="font-size: 1.1rem; font-weight: 600;">
+                            {% if state.signals.time_to_next_commitment_minutes %}{{ state.signals.time_to_next_commitment_minutes }} minutes{% else %}No upcoming{% endif %}
+                        </span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div>
+        <!-- Mode Rules -->
+        <div class="card">
+            <h2>Mode Rules</h2>
+            <table>
+                <tr><th>Setting</th><th>Value</th></tr>
+                <tr>
+                    <td>Allowed Task Types</td>
+                    <td>{{ rules.allowed_task_types | join(', ') }}</td>
+                </tr>
+                <tr>
+                    <td>Max Task Friction</td>
+                    <td>{{ rules.max_task_friction }}/5</td>
+                </tr>
+                <tr>
+                    <td>Min Block Minutes</td>
+                    <td>{% if rules.min_block_minutes %}{{ rules.min_block_minutes }}{% else %}Any{% endif %}</td>
+                </tr>
+                <tr>
+                    <td>Notification Gate</td>
+                    <td><span class="badge">{{ rules.notification_gate }}</span></td>
+                </tr>
+                <tr>
+                    <td>Interrupt For</td>
+                    <td>{{ rules.interrupt_for | join(', ') or 'None' }}</td>
+                </tr>
+                <tr>
+                    <td>UI Density</td>
+                    <td>{{ rules.ui_density }}</td>
+                </tr>
+            </table>
+        </div>
+
+        <!-- Context Switch Stats -->
+        <div class="card">
+            <h2>Today's Switch Stats</h2>
+            <div class="stats" style="margin-bottom: 0; flex-wrap: wrap;">
+                <div class="stat">
+                    <div class="stat-value">{{ switch_stats.total_switches }}</div>
+                    <div class="stat-label">Total Switches</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value">{{ switch_stats.interrupted_switches }}</div>
+                    <div class="stat-label">Interrupted</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value">{{ switch_stats.estimated_recovery_minutes }}</div>
+                    <div class="stat-label">Recovery Min</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Captured Items -->
+        <div class="card">
+            <h2>Captured Items</h2>
+            {% if captured_items %}
+            <ul style="list-style: none; padding: 0;">
+                {% for item in captured_items %}
+                <li style="padding: 0.5rem 0; border-bottom: 1px solid #eee;">
+                    <div style="display: flex; justify-content: space-between;">
+                        <span style="font-weight: 500;">{{ item.subject }}</span>
+                        <span class="badge badge-{{ item.urgency }}">{{ item.urgency }}</span>
+                    </div>
+                    <div style="font-size: 0.8rem; color: #666;">{{ item.source }} - {{ item.suggested_action }}</div>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="empty">No captured items in queue</p>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}

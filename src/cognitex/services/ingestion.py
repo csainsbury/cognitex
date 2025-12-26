@@ -2015,3 +2015,121 @@ async def auto_index_drive_file(
         logger.error("Auto-indexing failed", file=file_name, error=str(e))
 
     return stats
+
+
+async def sync_github_repo(repo_name: str) -> dict:
+    """
+    Sync a GitHub repository to the graph and index code files.
+
+    This is the programmatic API for the CLI's github-sync command,
+    designed for use by the trigger system for automated daily syncs.
+
+    Args:
+        repo_name: Repository in 'owner/repo' format
+
+    Returns:
+        dict with keys: files_synced, files_total, repo_id, error (if any)
+    """
+    from pathlib import Path
+
+    from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
+    from cognitex.db.postgres import init_postgres, close_postgres, get_session
+    from cognitex.services.github import get_github_service
+    from cognitex.db.graph_schema import create_repository, create_codefile
+
+    result = {"files_synced": 0, "files_total": 0, "repo_id": None}
+
+    try:
+        await init_neo4j()
+        github = get_github_service()
+
+        # Get repo info
+        repo = github.get_repo(repo_name)
+        if not repo:
+            result["error"] = f"Repository not found: {repo_name}"
+            return result
+
+        result["repo_id"] = repo["id"]
+
+        # Create/update repository node
+        async for session in get_neo4j_session():
+            await create_repository(
+                session,
+                repo_id=repo["id"],
+                name=repo["name"],
+                full_name=repo["full_name"],
+                url=repo["url"],
+                description=repo["description"],
+                primary_language=repo["language"],
+                default_branch=repo["default_branch"],
+            )
+            break
+
+        # Get indexable files
+        files = list(github.get_indexable_files(repo_name))
+        result["files_total"] = len(files)
+
+        if files:
+            await init_postgres()
+
+            for file_info in files:
+                try:
+                    # Get file content
+                    content = github.get_file_content(repo_name, file_info["path"])
+                    if not content:
+                        continue
+
+                    # Create CodeFile node
+                    async for session in get_neo4j_session():
+                        file_id = f"{repo['id']}:{file_info['path']}"
+                        # Detect language from extension
+                        ext = Path(file_info["name"]).suffix.lower()
+                        lang_map = {
+                            ".py": "Python", ".js": "JavaScript", ".ts": "TypeScript",
+                            ".tsx": "TypeScript", ".jsx": "JavaScript", ".go": "Go",
+                            ".rs": "Rust", ".java": "Java", ".kt": "Kotlin",
+                            ".rb": "Ruby", ".php": "PHP", ".swift": "Swift",
+                            ".sql": "SQL", ".md": "Markdown", ".yml": "YAML",
+                            ".yaml": "YAML", ".json": "JSON", ".toml": "TOML",
+                            ".sh": "Shell", ".bash": "Shell",
+                        }
+                        language = lang_map.get(ext, ext[1:].upper() if ext else None)
+
+                        await create_codefile(
+                            session,
+                            codefile_id=file_id,
+                            path=file_info["path"],
+                            name=file_info["name"],
+                            repository_id=repo["id"],
+                            language=language,
+                        )
+                        break
+
+                    # Store content and generate embedding
+                    async for pg_session in get_session():
+                        await index_code_content(
+                            pg_session,
+                            file_id=file_id,
+                            path=file_info["path"],
+                            content=content,
+                            repo_name=repo_name,
+                            skip_embedding=False,
+                        )
+                        break
+
+                    result["files_synced"] += 1
+
+                except Exception as e:
+                    logger.debug("Failed to sync file", path=file_info.get("path"), error=str(e))
+
+            await close_postgres()
+
+        await close_neo4j()
+        logger.info("GitHub repo synced", repo=repo_name, files=result["files_synced"])
+
+    except Exception as e:
+        result["error"] = str(e)
+        logger.error("GitHub sync failed", repo=repo_name, error=str(e))
+
+    return result
+

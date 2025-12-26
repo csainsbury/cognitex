@@ -7,6 +7,7 @@ from typing import Callable, Any
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from cognitex.agent.core import Agent, get_agent
 
@@ -112,14 +113,15 @@ class TriggerSystem:
             replace_existing=True,
         )
 
-        # Hourly monitoring (during work hours 9am-6pm)
-        self.scheduler.add_job(
-            self._hourly_check,
-            CronTrigger(hour="9-18", minute=0),
-            id="hourly_check",
-            name="Hourly Check",
-            replace_existing=True,
-        )
+        # Hourly monitoring DISABLED - too noisy
+        # Only do morning/evening briefings and specific task checks
+        # self.scheduler.add_job(
+        #     self._hourly_check,
+        #     CronTrigger(hour="9-18", minute=0),
+        #     id="hourly_check",
+        #     name="Hourly Check",
+        #     replace_existing=True,
+        # )
 
         # Task overdue check (twice daily)
         self.scheduler.add_job(
@@ -127,6 +129,24 @@ class TriggerSystem:
             CronTrigger(hour="10,15", minute=0),
             id="overdue_check",
             name="Overdue Task Check",
+            replace_existing=True,
+        )
+
+        # Daily GitHub sync at 3am (overnight, low activity time)
+        self.scheduler.add_job(
+            self._github_sync,
+            CronTrigger(hour=3, minute=0),
+            id="github_sync",
+            name="Daily GitHub Sync",
+            replace_existing=True,
+        )
+
+        # Drive changes poll every 15 minutes
+        self.scheduler.add_job(
+            self._drive_poll,
+            IntervalTrigger(minutes=15),
+            id="drive_poll",
+            name="Drive Changes Poll",
             replace_existing=True,
         )
 
@@ -362,19 +382,241 @@ class TriggerSystem:
         except Exception as e:
             logger.error("Overdue check failed", error=str(e))
 
+    async def _github_sync(self) -> None:
+        """Daily sync of configured GitHub repositories."""
+        from cognitex.config import get_settings
+
+        settings = get_settings()
+        repos_str = settings.github_auto_sync_repos
+
+        if not repos_str:
+            logger.info("No repos configured for auto-sync (GITHUB_AUTO_SYNC_REPOS)")
+            return
+
+        repos = [r.strip() for r in repos_str.split(",") if r.strip()]
+        if not repos:
+            return
+
+        logger.info("Starting daily GitHub sync", repos=repos)
+
+        try:
+            from cognitex.services.github import GitHubService
+            from cognitex.services.ingestion import sync_github_repo
+
+            synced = []
+            failed = []
+
+            for repo in repos:
+                try:
+                    logger.info("Syncing repository", repo=repo)
+                    result = await sync_github_repo(repo)
+                    files_synced = result.get("files_synced", 0)
+                    synced.append(f"{repo} ({files_synced} files)")
+                    logger.info("Repository synced", repo=repo, files=files_synced)
+                except Exception as e:
+                    failed.append(f"{repo}: {str(e)[:50]}")
+                    logger.error("Failed to sync repository", repo=repo, error=str(e))
+
+            # Log summary
+            if synced:
+                logger.info("GitHub sync complete", synced=synced, failed=failed)
+
+            # Only notify if there were failures
+            if failed:
+                await self._send_notification(
+                    f"**GitHub Sync Issues**\n\n"
+                    f"Synced: {len(synced)} repos\n"
+                    f"Failed: {', '.join(failed)}",
+                    urgency="low"
+                )
+
+        except Exception as e:
+            logger.error("GitHub sync failed", error=str(e))
+
+    async def _drive_poll(self) -> None:
+        """
+        Poll Google Drive for changes every 15 minutes.
+
+        Uses the Drive changes API with a stored page token to detect
+        new/modified files in priority folders and auto-index them.
+        """
+        logger.debug("Starting Drive poll")
+
+        try:
+            from cognitex.db.redis import get_redis
+            from cognitex.services.drive import DriveService, PRIORITY_FOLDERS
+            from cognitex.services.ingestion import auto_index_drive_file
+
+            redis = get_redis()
+            drive = DriveService()
+
+            # Get stored page token or initialize
+            page_token = await redis.get("cognitex:drive:page_token")
+
+            if page_token:
+                page_token = page_token.decode() if isinstance(page_token, bytes) else page_token
+            else:
+                # First run - get current token and store it
+                page_token = drive.get_start_page_token()
+                await redis.set("cognitex:drive:page_token", page_token)
+                logger.info("Drive poll initialized", page_token=page_token)
+                return  # First run just establishes baseline
+
+            # Fetch changes since last poll
+            changes_response = drive.get_changes(page_token)
+            changes = changes_response.get('changes', [])
+            new_token = changes_response.get('newStartPageToken', page_token)
+
+            if not changes:
+                logger.debug("No Drive changes detected")
+                await redis.set("cognitex:drive:page_token", new_token)
+                return
+
+            logger.info("Drive changes detected", count=len(changes))
+
+            # Get priority folder IDs for filtering
+            priority_folder_ids = set()
+            for folder_name in PRIORITY_FOLDERS:
+                folder_id = drive.get_folder_id_by_name(folder_name)
+                if folder_id:
+                    priority_folder_ids.add(folder_id)
+
+            # Process changes, filtering to priority folders
+            relevant_changes = []
+            files_to_index = []
+
+            for change in changes:
+                file_info = change.get('file', {})
+                file_id = file_info.get('id')
+                file_name = file_info.get('name', 'Unknown')
+                mime_type = file_info.get('mimeType', '')
+                parents = file_info.get('parents', [])
+                is_removed = change.get('removed', False)
+                is_trashed = file_info.get('trashed', False)
+
+                # Skip folders, removed files, and trashed files
+                if mime_type == 'application/vnd.google-apps.folder':
+                    continue
+                if is_removed or is_trashed:
+                    continue
+
+                # Check if file is in a priority folder (direct parent or ancestor)
+                in_priority = any(pid in priority_folder_ids for pid in parents)
+
+                if not in_priority:
+                    # Check one level up (for nested files)
+                    for parent_id in parents:
+                        try:
+                            parent_info = drive.get_file_metadata(parent_id)
+                            grandparents = parent_info.get('parents', [])
+                            if any(gp in priority_folder_ids for gp in grandparents):
+                                in_priority = True
+                                break
+                        except Exception:
+                            pass
+
+                if in_priority:
+                    relevant_changes.append({
+                        'id': file_id,
+                        'name': file_name,
+                        'mime_type': mime_type,
+                        'modified': file_info.get('modifiedTime'),
+                    })
+
+                    if file_id:
+                        files_to_index.append({
+                            'id': file_id,
+                            'name': file_name,
+                            'mime_type': mime_type,
+                        })
+
+            # Auto-index changed files in priority folders
+            indexed_files = []
+            for file_data in files_to_index:
+                try:
+                    logger.info(
+                        "Auto-indexing changed Drive file",
+                        file=file_data['name'],
+                        mime_type=file_data['mime_type']
+                    )
+                    result = await auto_index_drive_file(
+                        file_id=file_data['id'],
+                        file_name=file_data['name'],
+                        mime_type=file_data['mime_type'],
+                    )
+                    if result.get('indexed'):
+                        indexed_files.append({
+                            'name': file_data['name'],
+                            'chunks': result.get('chunks_created', 0),
+                        })
+                except Exception as e:
+                    logger.warning(
+                        "Failed to index Drive file",
+                        file=file_data['name'],
+                        error=str(e)
+                    )
+
+            # Store new page token
+            await redis.set("cognitex:drive:page_token", new_token)
+
+            # Log summary
+            if indexed_files:
+                logger.info(
+                    "Drive poll complete",
+                    changes=len(relevant_changes),
+                    indexed=len(indexed_files),
+                )
+
+                # Notify about significant changes (3+ files or important docs)
+                if len(indexed_files) >= 3:
+                    file_list = ", ".join(f['name'] for f in indexed_files[:5])
+                    await self._send_notification(
+                        f"**Drive Sync**\n\n"
+                        f"Indexed {len(indexed_files)} updated files: {file_list}"
+                        + ("..." if len(indexed_files) > 5 else ""),
+                        urgency="low"
+                    )
+
+        except Exception as e:
+            logger.error("Drive poll failed", error=str(e))
+
     # =========================================================================
     # Event trigger handlers
     # =========================================================================
 
     async def _on_new_email(self, email_data: dict) -> None:
-        """Handle new email event from Gmail push notification."""
+        """Handle new email event from Gmail push notification.
+
+        Only surfaces emails that are truly actionable:
+        - Require a response/reply
+        - Have deadlines or time-sensitive content
+        - Are from important contacts
+        - Result in task creation
+
+        Filters out:
+        - FYI/informational emails
+        - Newsletters/marketing
+        - Auto-generated notifications
+        - Calendar invites (handled separately)
+        """
         history_id = email_data.get("history_id")
         email_address = email_data.get("email_address")
         logger.info("Processing Gmail push notification", history_id=history_id, email_address=email_address)
 
         try:
-            # First, sync new emails from Gmail using the history ID
+            from cognitex.db.redis import get_redis
             from cognitex.services.ingestion import run_incremental_sync
+
+            # Deduplicate: Skip if we've already processed this history_id recently
+            if history_id:
+                redis = get_redis()
+                dedup_key = f"cognitex:email:processed:{history_id}"
+                already_processed = await redis.get(dedup_key)
+                if already_processed:
+                    logger.debug("Skipping duplicate email notification", history_id=history_id)
+                    return
+                # Mark as processed with 5-minute TTL (Google may send duplicates within seconds)
+                await redis.set(dedup_key, "1", ex=300)
 
             if history_id:
                 logger.info("Syncing emails from history", history_id=history_id)
@@ -396,6 +638,7 @@ class TriggerSystem:
                 auto_completed = sync_result.get("auto_completed_tasks", [])
                 if auto_completed:
                     logger.info("Tasks auto-completed from sent emails", task_ids=auto_completed)
+                    # Only notify for task completions - this IS actionable feedback
                     await self._send_notification(
                         f"**Tasks Auto-Completed**\n\n"
                         f"I detected that you replied to emails related to {len(auto_completed)} task(s). "
@@ -403,14 +646,19 @@ class TriggerSystem:
                         urgency="low"
                     )
 
-                # We have new emails - prepare summary for agent
+                # We have new emails - filter to only actionable ones
                 emails = sync_result.get("emails", [])
-                email_count = len(emails)
-                logger.info("Synced new emails", count=email_count)
+                actionable_emails = self._filter_actionable_emails(emails)
 
-                # Build email summary for agent
+                if not actionable_emails:
+                    logger.info("No actionable emails in batch", total=len(emails))
+                    return  # All emails were filtered as non-actionable
+
+                logger.info("Found actionable emails", actionable=len(actionable_emails), total=len(emails))
+
+                # Build email summary for agent (only actionable ones)
                 email_summaries = []
-                for email in emails[:5]:  # Limit to 5 most recent
+                for email in actionable_emails[:5]:  # Limit to 5 most recent
                     sender = email.get("sender_email", "unknown")
                     subject = email.get("subject", "(no subject)")[:80]
                     snippet = email.get("snippet", "")[:150]
@@ -418,29 +666,49 @@ class TriggerSystem:
 
                 email_list = "\n\n".join(email_summaries)
 
-                # Ask the agent to analyze the new emails
+                # Ask the agent to analyze ONLY if we have actionable emails
                 response = await self.agent.chat(
-                    f"I just received {email_count} new email(s). Here are the details:\n\n"
+                    f"I received {len(actionable_emails)} email(s) that may need action. Here are the details:\n\n"
                     f"{email_list}\n\n"
-                    "Please analyze these emails and let me know:\n"
-                    "1. Are any of these urgent or need immediate attention?\n"
-                    "2. Should any tasks be created from these?\n"
-                    "3. Do any require a reply?\n"
-                    "Only highlight what's truly important."
+                    "Please analyze these emails:\n"
+                    "1. Which ones require a reply? (be specific about what to reply)\n"
+                    "2. Should any tasks be created? (create them if so)\n"
+                    "3. Are any truly urgent (deadline within 24h)?\n\n"
+                    "If none of these require immediate action, just say 'No action needed' and I won't notify."
                 )
             else:
-                # No history ID - just ask agent to check emails
-                response = await self.agent.chat(
-                    "A new email notification was received. "
-                    "Please check my recent emails for anything that needs my attention."
-                )
+                # No history ID - skip notification (this shouldn't happen often)
+                logger.debug("Email notification without history ID, skipping")
+                return
 
-            # Only notify if the agent found something important
-            if response and any(kw in response.lower() for kw in ["task", "reply", "urgent", "important", "action", "need", "require", "attention"]):
-                await self._send_notification(
-                    f"**New Email Alert**\n\n{response}",
-                    urgency="normal"
-                )
+            # STRICT filter: Only notify if agent explicitly found action items
+            # Look for concrete action indicators, not just general keywords
+            if response:
+                response_lower = response.lower()
+                # Skip if agent explicitly says no action needed
+                if any(phrase in response_lower for phrase in [
+                    "no action needed", "no action required", "nothing urgent",
+                    "no immediate action", "none of these require", "no tasks to create",
+                    "fyi only", "informational only"
+                ]):
+                    logger.info("Agent determined no action needed, skipping notification")
+                    return
+
+                # Only notify if there are concrete action items
+                action_indicators = [
+                    "should reply", "need to reply", "reply to", "respond to",
+                    "created task", "creating task", "task created",
+                    "deadline", "due by", "due date", "urgent",
+                    "action required", "please", "waiting for your",
+                    "follow up", "follow-up"
+                ]
+                if any(indicator in response_lower for indicator in action_indicators):
+                    await self._send_notification(
+                        f"**Email Action Needed**\n\n{response}",
+                        urgency="normal"
+                    )
+                else:
+                    logger.info("No concrete action items found, skipping notification")
 
             # Trigger context pack refresh for related events
             try:
@@ -458,34 +726,28 @@ class TriggerSystem:
             logger.error("Email processing failed", error=str(e))
 
     async def _on_calendar_change(self, event_data: dict) -> None:
-        """Handle calendar change event."""
+        """Handle calendar change event.
+
+        Calendar changes are synced silently - no Discord notification.
+        Users can check /today or the morning briefing for calendar updates.
+        Only truly urgent changes (same-day new meetings) might warrant notification.
+        """
         resource_state = event_data.get("resource_state", "change")
         calendar_id = event_data.get("calendar_id", "primary")
         logger.info("Processing calendar change", resource_state=resource_state, calendar_id=calendar_id)
 
         try:
-            # First, sync calendar from Google to get latest data
+            # Sync calendar from Google to get latest data (silent)
             from cognitex.services.ingestion import run_calendar_sync
-            logger.info("Syncing calendar before processing change")
+            logger.info("Syncing calendar silently")
             await run_calendar_sync(months_back=0, days_ahead=7)
-            logger.info("Calendar sync complete")
+            logger.info("Calendar sync complete - no notification sent")
 
-            # Now use the agent to check for any notable calendar updates
-            response = await self.agent.chat(
-                "A calendar change was just detected and I've synced the latest data. "
-                "Please check my calendar for today and the next few days "
-                "to see if there are any new or updated events I should know about. "
-                "Tell me about any meetings that were just added or changed."
-            )
+            # NO notification for calendar changes - too noisy
+            # Users can check /today or morning briefing for updates
+            # Only exception would be urgent same-day meetings, but we skip those too
+            # to avoid noise from every calendar invite response
 
-            # Only send notification if agent found something worth mentioning
-            if response and not any(phrase in response.lower() for phrase in [
-                "no new", "no notable", "nothing new", "no changes", "no updates"
-            ]):
-                await self._send_notification(
-                    f"**Calendar Update**\n\n{response}",
-                    urgency="low"
-                )
         except Exception as e:
             logger.error("Calendar processing failed", error=str(e))
 
@@ -595,31 +857,15 @@ class TriggerSystem:
                             'topics': result.get('topics_created', 0),
                         })
 
+            # Drive changes are indexed silently - no notification
+            # Users can use /documents or doc-search to find updated files
             if relevant_changes:
-                # Build summary for agent
-                change_summary = "\n".join(
-                    f"- {c['name']} ({c['change_type']})"
-                    for c in relevant_changes[:5]
+                logger.info(
+                    "Drive changes indexed silently",
+                    changes=len(relevant_changes),
+                    indexed=len(indexed_files),
                 )
-
-                index_summary = ""
-                if indexed_files:
-                    index_summary = "\n\nI've automatically indexed these files:\n" + "\n".join(
-                        f"- {f['name']}: {f['chunks']} chunks, {f['topics']} topics"
-                        for f in indexed_files
-                    )
-
-                response = await self.agent.chat(
-                    f"Files changed in your priority folders:\n{change_summary}"
-                    f"{index_summary}\n\n"
-                    "Is there anything notable about these changes I should be aware of?"
-                )
-
-                if response:
-                    await self._send_notification(
-                        f"**Drive Changes Detected**\n\n{response}",
-                        urgency="low"
-                    )
+                # NO notification - too noisy. Files are indexed and searchable.
 
             # Update page token for next time
             new_token = changes.get('newStartPageToken')
@@ -642,6 +888,105 @@ class TriggerSystem:
             except Exception:
                 pass
         return False
+
+    # =========================================================================
+    # Email Filtering
+    # =========================================================================
+
+    # Patterns that indicate non-actionable emails
+    NOISE_SENDERS = [
+        "noreply", "no-reply", "donotreply", "mailer-daemon",
+        "notifications@", "alerts@", "digest@", "newsletter@",
+        "marketing@", "promo@", "info@", "support@", "help@",
+        "calendar-notification", "notify@", "updates@",
+    ]
+
+    NOISE_SUBJECTS = [
+        "unsubscribe", "newsletter", "weekly digest", "daily digest",
+        "your order", "shipping confirmation", "delivery notification",
+        "password reset", "verify your email", "confirm your",
+        "receipt for", "invoice", "payment received",
+        "out of office", "automatic reply", "auto-reply",
+        "calendar:", "invitation:", "accepted:", "declined:",
+        "fyi:", "fyi -", "[fyi]", "for your information",
+        "thank you for", "thanks for your",
+    ]
+
+    def _filter_actionable_emails(self, emails: list[dict]) -> list[dict]:
+        """Filter emails to only those that are potentially actionable.
+
+        Filters out:
+        - Auto-generated notifications
+        - Marketing/newsletters
+        - Calendar invites (handled separately)
+        - FYI/informational emails
+        - Receipts and confirmations
+        - Out-of-office replies
+        """
+        actionable = []
+
+        for email in emails:
+            sender = email.get("sender_email", "").lower()
+            subject = email.get("subject", "").lower()
+            snippet = email.get("snippet", "").lower()
+
+            # Skip noise senders
+            if any(noise in sender for noise in self.NOISE_SENDERS):
+                logger.debug("Filtered noise sender", sender=sender[:30])
+                continue
+
+            # Skip noise subjects
+            if any(noise in subject for noise in self.NOISE_SUBJECTS):
+                logger.debug("Filtered noise subject", subject=subject[:30])
+                continue
+
+            # Skip calendar invites (these come through calendar notifications)
+            if "calendar-notification@google.com" in sender:
+                continue
+            if subject.startswith(("invitation:", "updated invitation:", "accepted:", "declined:")):
+                continue
+
+            # Look for signals that indicate actionable content
+            actionable_signals = [
+                "?" in snippet,  # Questions typically need answers
+                "please" in snippet,
+                "could you" in snippet,
+                "can you" in snippet,
+                "would you" in snippet,
+                "need" in snippet and "your" in snippet,
+                "deadline" in snippet,
+                "urgent" in subject or "urgent" in snippet,
+                "asap" in subject or "asap" in snippet,
+                "action required" in subject or "action required" in snippet,
+                "waiting for" in snippet,
+                "follow up" in snippet or "follow-up" in snippet,
+                "reminder" in subject,  # But not auto-reminders
+            ]
+
+            # If it has actionable signals, include it
+            if any(actionable_signals):
+                actionable.append(email)
+                continue
+
+            # For emails without clear signals, check if it's from a person (not automated)
+            # Real emails from people are more likely to need attention
+            is_from_person = (
+                "@gmail.com" in sender or
+                "@yahoo.com" in sender or
+                "@outlook.com" in sender or
+                "@hotmail.com" in sender or
+                # Assume company emails are from people if not in noise list
+                not any(noise in sender for noise in ["notification", "alert", "system", "auto"])
+            )
+
+            # Only include person emails that have some content suggesting interaction
+            if is_from_person:
+                # Check for interaction patterns in snippet
+                interaction_patterns = ["hi ", "hello", "hey ", "dear ", "thanks", "thank you"]
+                if any(pattern in snippet[:50] for pattern in interaction_patterns):
+                    actionable.append(email)
+
+        return actionable
 
     # =========================================================================
     # Utilities

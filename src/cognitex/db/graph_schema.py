@@ -819,7 +819,7 @@ async def get_task(
                sender_email: sender.email,
                sender_name: sender.name
            } as source_email,
-           ev {.gcal_id, .title, .start_time, .end_time} as source_event,
+           ev {.gcal_id, .title, .start, .end} as source_event,
            collect(DISTINCT p {.id, .title, .status}) as projects,
            collect(DISTINCT g {.id, .title, .timeframe}) as goals,
            collect(DISTINCT {
@@ -897,7 +897,8 @@ async def get_tasks(
         filters.append("t.status = $status")
         params["status"] = status
     elif not include_completed:
-        filters.append("t.status <> 'completed' AND t.status <> 'cancelled'")
+        # Filter out completed tasks - handle both 'done' and 'completed' status values
+        filters.append("NOT t.status IN ['done', 'completed', 'cancelled']")
 
     if priority:
         filters.append("t.priority = $priority")

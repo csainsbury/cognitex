@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = Field(default="redis://localhost:6379/0")
 
+    # LLM Provider Selection
+    llm_provider: str = Field(
+        default="together",
+        description="Active LLM provider: together, anthropic, openai, or google",
+    )
+
     # Together.ai
     together_api_key: SecretStr = Field(default=SecretStr(""))
     together_model_planner: str = Field(
@@ -52,6 +58,43 @@ class Settings(BaseSettings):
     # Legacy aliases for backward compatibility
     together_model_primary: str = Field(default="")
     together_model_fast: str = Field(default="")
+
+    # Anthropic (Claude)
+    anthropic_api_key: SecretStr = Field(default=SecretStr(""))
+    anthropic_model_planner: str = Field(
+        default="claude-sonnet-4-20250514",
+        description="Claude model for planning",
+    )
+    anthropic_model_executor: str = Field(
+        default="claude-sonnet-4-20250514",
+        description="Claude model for execution",
+    )
+
+    # OpenAI
+    openai_api_key: SecretStr = Field(default=SecretStr(""))
+    openai_model_planner: str = Field(
+        default="gpt-4o",
+        description="OpenAI model for planning",
+    )
+    openai_model_executor: str = Field(
+        default="gpt-4o-mini",
+        description="OpenAI model for execution",
+    )
+    openai_model_embedding: str = Field(
+        default="text-embedding-3-small",
+        description="OpenAI embedding model",
+    )
+
+    # Google (Gemini)
+    google_ai_api_key: SecretStr = Field(default=SecretStr(""))
+    google_model_planner: str = Field(
+        default="gemini-2.0-flash",
+        description="Gemini model for planning",
+    )
+    google_model_executor: str = Field(
+        default="gemini-2.0-flash",
+        description="Gemini model for execution",
+    )
 
     # Discord
     discord_bot_token: SecretStr = Field(default=SecretStr(""))
@@ -73,6 +116,10 @@ class Settings(BaseSettings):
     github_token: SecretStr = Field(
         default=SecretStr(""),
         description="GitHub personal access token for repo access",
+    )
+    github_auto_sync_repos: str = Field(
+        default="csainsbury/cognitex,csainsbury/kre,csainsbury/ascend_v0.15,csainsbury/validact",
+        description="Comma-separated list of repos to auto-sync daily (e.g., owner/repo,owner/repo2)",
     )
 
     # Push notifications

@@ -326,7 +326,7 @@ class ContextPackCompiler:
         logger.info(
             "Compiled context pack",
             pack_id=pack_id,
-            event=summary[:30],
+            event_name=summary[:30],
             stage=stage.value,
             readiness=score,
         )
@@ -529,7 +529,7 @@ class ContextPackCompiler:
         search_query = f"{title} {description[:200]}" if description else title
 
         try:
-            from cognitex.db.postgres import get_postgres_session
+            from cognitex.db.postgres import get_session as get_postgres_session
             from cognitex.services.ingestion import search_chunks_semantic
 
             # Semantic search on document chunks
