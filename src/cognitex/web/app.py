@@ -100,10 +100,16 @@ async def create_person(email: str, name: str | None = None) -> dict:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
+    import structlog
     from cognitex.db.neo4j import init_neo4j, close_neo4j
     from cognitex.db.graph_schema import init_graph_schema
     from cognitex.db.postgres import init_postgres, close_postgres
     from cognitex.db.redis import init_redis, close_redis
+    from cognitex.agent.triggers import start_triggers, stop_triggers
+    from cognitex.services.push_notifications import get_watch_manager
+    from cognitex.config import get_settings
+
+    logger = structlog.get_logger()
 
     # Initialize database connections
     await init_neo4j()
@@ -111,9 +117,35 @@ async def lifespan(app: FastAPI):
     await init_postgres()
     await init_redis()
 
+    # Start the full trigger system (includes autonomous agent + event listeners)
+    try:
+        await start_triggers()
+        logger.info("Trigger system started (includes event listeners + autonomous agent)")
+    except Exception as e:
+        logger.error("Failed to start trigger system", error=str(e))
+
+    # Set up Gmail watch for push notifications
+    try:
+        settings = get_settings()
+        if settings.google_pubsub_topic:
+            watch_manager = get_watch_manager()
+            result = await watch_manager.setup_gmail_watch()
+            if "error" not in result:
+                logger.info("Gmail watch set up successfully", history_id=result.get("historyId"))
+            else:
+                logger.warning("Gmail watch setup failed", error=result.get("error"))
+        else:
+            logger.info("No GOOGLE_PUBSUB_TOPIC configured, skipping Gmail watch setup")
+    except Exception as e:
+        logger.warning("Failed to set up Gmail watch", error=str(e))
+
     yield
 
     # Cleanup
+    try:
+        await stop_triggers()
+    except Exception:
+        pass
     await close_redis()
     await close_neo4j()
     await close_postgres()
@@ -1719,13 +1751,18 @@ async def archive_pack(pack_id: str):
 @app.post("/api/twin/blocks/{block_id}/approve")
 async def approve_block(block_id: str):
     """Approve a suggested focus block (add to calendar)."""
+    from datetime import datetime, timedelta
     from cognitex.db.neo4j import get_neo4j_session
+    from cognitex.services.calendar import CalendarService
 
     async for session in get_neo4j_session():
         # Get block details
         query = """
         MATCH (sb:SuggestedBlock {id: $block_id})
-        RETURN sb.title as title, sb.duration_hours as duration_hours, sb.suggested_day as suggested_day
+        OPTIONAL MATCH (sb)-[:FOR_PROJECT]->(p:Project)
+        RETURN sb.title as title, sb.duration_hours as duration_hours,
+               sb.suggested_day as suggested_day, sb.reason as reason,
+               p.title as project_title
         """
         result = await session.run(query, {"block_id": block_id})
         block = await result.single()
@@ -1733,20 +1770,67 @@ async def approve_block(block_id: str):
         if not block:
             raise HTTPException(status_code=404, detail="Block not found")
 
-        # TODO: Actually create calendar event via Google Calendar API
+        # Calculate start time based on suggested_day
+        today = datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
+        suggested_day = (block.get("suggested_day") or "tomorrow").lower()
 
-        # Mark as approved
+        if suggested_day == "today":
+            start_date = today
+        elif suggested_day == "tomorrow":
+            start_date = today + timedelta(days=1)
+        elif suggested_day == "next week":
+            # Next Monday
+            days_until_monday = (7 - today.weekday()) % 7
+            if days_until_monday == 0:
+                days_until_monday = 7
+            start_date = today + timedelta(days=days_until_monday)
+        else:
+            # Default to tomorrow
+            start_date = today + timedelta(days=1)
+
+        duration_hours = block.get("duration_hours") or 2
+        end_date = start_date + timedelta(hours=duration_hours)
+
+        # Format as ISO strings
+        start_iso = start_date.strftime("%Y-%m-%dT%H:%M:%S")
+        end_iso = end_date.strftime("%Y-%m-%dT%H:%M:%S")
+
+        # Create the calendar event
+        try:
+            calendar_service = CalendarService()
+            description = f"Focus time suggested by Cognitex Digital Twin.\n\nReason: {block.get('reason', 'No reason provided')}"
+            if block.get("project_title"):
+                description = f"Project: {block['project_title']}\n\n{description}"
+
+            event = calendar_service.create_event(
+                title=block["title"],
+                start=start_iso,
+                end=end_iso,
+                description=description,
+                send_notifications=False,
+            )
+            event_id = event.get("id", "unknown")
+            logger.info("Calendar event created for focus block", block_id=block_id, event_id=event_id)
+        except Exception as e:
+            logger.error("Failed to create calendar event", error=str(e), block_id=block_id)
+            return HTMLResponse(f'''
+                <tr style="background: #fee2e2;">
+                    <td colspan="6"><strong>Error:</strong> Failed to create calendar event: {str(e)[:100]}</td>
+                </tr>
+            ''')
+
+        # Mark as approved and store calendar event ID
         update_query = """
         MATCH (sb:SuggestedBlock {id: $block_id})
-        SET sb.status = 'approved', sb.approved_at = datetime()
+        SET sb.status = 'approved', sb.approved_at = datetime(), sb.calendar_event_id = $event_id
         """
-        await session.run(update_query, {"block_id": block_id})
+        await session.run(update_query, {"block_id": block_id, "event_id": event_id})
 
         logger.info("Focus block approved", block_id=block_id)
 
         return HTMLResponse(f'''
             <tr style="background: #d1fae5;">
-                <td colspan="6"><strong>Added to calendar:</strong> {block["title"]} ({block["duration_hours"]}h)</td>
+                <td colspan="6"><strong>Added to calendar:</strong> {block["title"]} ({duration_hours}h) on {start_date.strftime("%A %d %b at %H:%M")}</td>
             </tr>
         ''')
 
