@@ -37,7 +37,7 @@ class Settings(BaseSettings):
 
     # LLM Provider Selection
     llm_provider: str = Field(
-        default="together",
+        default="google",
         description="Active LLM provider: together, anthropic, openai, or google",
     )
 
@@ -88,12 +88,12 @@ class Settings(BaseSettings):
     # Google (Gemini)
     google_ai_api_key: SecretStr = Field(default=SecretStr(""))
     google_model_planner: str = Field(
-        default="gemini-2.0-flash",
-        description="Gemini model for planning",
+        default="gemini-3-pro-preview",
+        description="Gemini model for planning (main agent)",
     )
     google_model_executor: str = Field(
-        default="gemini-2.0-flash",
-        description="Gemini model for execution",
+        default="gemini-3-flash-preview",
+        description="Gemini model for execution (worker agent)",
     )
 
     # Discord
