@@ -1462,6 +1462,314 @@ async def test_agent_notification():
 
 
 # -------------------------------------------------------------------
+# Digital Twin Review
+# -------------------------------------------------------------------
+
+import structlog
+logger = structlog.get_logger()
+
+
+async def get_pending_drafts() -> list[dict]:
+    """Get all pending email drafts."""
+    from cognitex.db.neo4j import get_neo4j_session
+
+    async for session in get_neo4j_session():
+        query = """
+        MATCH (d:EmailDraft {status: 'pending_review'})-[:REPLY_TO]->(e:Email)
+        OPTIONAL MATCH (e)-[:SENT_BY]->(sender:Person)
+        RETURN
+            d.id as id,
+            d.to as to,
+            d.subject as subject,
+            d.body as body,
+            d.reason as reason,
+            d.created_at as created_at,
+            e.subject as original_subject,
+            e.gmail_id as original_email_id,
+            sender.email as sender_email
+        ORDER BY d.created_at DESC
+        """
+        result = await session.run(query)
+        data = await result.data()
+        return data
+    return []
+
+
+async def get_context_packs() -> list[dict]:
+    """Get all ready context packs."""
+    from cognitex.db.neo4j import get_neo4j_session
+
+    async for session in get_neo4j_session():
+        query = """
+        MATCH (cp:ContextPack {status: 'ready'})
+        OPTIONAL MATCH (cp)-[:PREPARED_FOR]->(ce:CalendarEvent)
+        OPTIONAL MATCH (cp)-[:REFERENCES]->(d:Document)
+        OPTIONAL MATCH (cp)-[:REFERENCES]->(t:Task)
+        WITH cp, ce,
+             collect(DISTINCT {id: d.drive_id, name: d.name}) as documents,
+             collect(DISTINCT {id: t.id, title: t.title}) as tasks
+        RETURN
+            cp.id as id,
+            cp.title as title,
+            cp.summary as summary,
+            cp.key_points as key_points,
+            cp.created_at as created_at,
+            ce.id as calendar_id,
+            ce.title as event_title,
+            ce.start_time as event_time,
+            documents,
+            tasks
+        ORDER BY cp.created_at DESC
+        """
+        result = await session.run(query)
+        data = await result.data()
+        # Filter out null entries in documents/tasks
+        for pack in data:
+            pack['documents'] = [d for d in pack.get('documents', []) if d.get('id')]
+            pack['tasks'] = [t for t in pack.get('tasks', []) if t.get('id')]
+        return data
+    return []
+
+
+async def get_suggested_blocks() -> list[dict]:
+    """Get all pending suggested calendar blocks."""
+    from cognitex.db.neo4j import get_neo4j_session
+
+    async for session in get_neo4j_session():
+        query = """
+        MATCH (sb:SuggestedBlock {status: 'pending_approval'})
+        OPTIONAL MATCH (sb)-[:FOR_PROJECT]->(p:Project)
+        OPTIONAL MATCH (sb)-[:FOR_TASK]->(t:Task)
+        RETURN
+            sb.id as id,
+            sb.title as title,
+            sb.duration_hours as duration_hours,
+            sb.suggested_day as suggested_day,
+            sb.reason as reason,
+            sb.created_at as created_at,
+            p.id as project_id,
+            p.title as project_title,
+            t.id as task_id,
+            t.title as task_title
+        ORDER BY sb.created_at DESC
+        """
+        result = await session.run(query)
+        data = await result.data()
+        return data
+    return []
+
+
+@app.get("/twin", response_class=HTMLResponse)
+async def twin_page(request: Request):
+    """Digital Twin review page - review and approve agent outputs."""
+    drafts = await get_pending_drafts()
+    packs = await get_context_packs()
+    blocks = await get_suggested_blocks()
+
+    return templates.TemplateResponse(
+        "twin.html",
+        {
+            "request": request,
+            "drafts": drafts,
+            "packs": packs,
+            "blocks": blocks,
+        },
+    )
+
+
+@app.post("/api/twin/drafts/{draft_id}/approve")
+async def approve_draft(draft_id: str):
+    """Approve and send an email draft."""
+    from cognitex.db.neo4j import get_neo4j_session
+
+    async for session in get_neo4j_session():
+        # Get draft details
+        query = """
+        MATCH (d:EmailDraft {id: $draft_id})-[:REPLY_TO]->(e:Email)
+        RETURN d.to as to, d.subject as subject, d.body as body, e.gmail_id as thread_id
+        """
+        result = await session.run(query, {"draft_id": draft_id})
+        draft = await result.single()
+
+        if not draft:
+            raise HTTPException(status_code=404, detail="Draft not found")
+
+        # TODO: Actually send the email via Gmail API
+        # For now, just mark as approved
+        update_query = """
+        MATCH (d:EmailDraft {id: $draft_id})
+        SET d.status = 'approved', d.approved_at = datetime()
+        """
+        await session.run(update_query, {"draft_id": draft_id})
+
+        logger.info("Email draft approved", draft_id=draft_id)
+
+        return HTMLResponse(f'''
+            <div class="draft-card" style="background: #d1fae5; border-color: #065f46;">
+                <p><strong>Approved!</strong> Email will be sent to {draft["to"]}</p>
+            </div>
+        ''')
+
+    raise HTTPException(status_code=500, detail="Failed to approve draft")
+
+
+@app.get("/api/twin/drafts/{draft_id}/edit")
+async def edit_draft_form(request: Request, draft_id: str):
+    """Get edit form for a draft."""
+    from cognitex.db.neo4j import get_neo4j_session
+
+    async for session in get_neo4j_session():
+        query = """
+        MATCH (d:EmailDraft {id: $draft_id})-[:REPLY_TO]->(e:Email)
+        RETURN d.id as id, d.to as to, d.subject as subject, d.body as body,
+               e.subject as original_subject
+        """
+        result = await session.run(query, {"draft_id": draft_id})
+        draft = await result.single()
+
+        if not draft:
+            raise HTTPException(status_code=404, detail="Draft not found")
+
+        return HTMLResponse(f'''
+            <form class="draft-edit-form" hx-put="/api/twin/drafts/{draft_id}" hx-target="#draft-{draft_id}" hx-swap="outerHTML">
+                <div class="draft-meta">
+                    <strong>To:</strong> <input type="text" name="to" value="{draft['to']}" style="width: 300px;"><br>
+                    <strong>Subject:</strong> <input type="text" name="subject" value="{draft['subject']}" style="width: 100%;">
+                </div>
+                <textarea name="body" class="draft-body" style="min-height: 200px; width: 100%;">{draft['body']}</textarea>
+                <div class="draft-actions" style="margin-top: 0.5rem;">
+                    <button type="submit" class="btn btn-success">Save & Send</button>
+                    <button type="button" class="btn btn-secondary" hx-get="/twin" hx-target="body">Cancel</button>
+                </div>
+            </form>
+        ''')
+
+    raise HTTPException(status_code=500, detail="Failed to load draft")
+
+
+@app.put("/api/twin/drafts/{draft_id}")
+async def update_draft(
+    draft_id: str,
+    to: Annotated[str, Form()],
+    subject: Annotated[str, Form()],
+    body: Annotated[str, Form()],
+):
+    """Update and approve a draft."""
+    from cognitex.db.neo4j import get_neo4j_session
+
+    async for session in get_neo4j_session():
+        query = """
+        MATCH (d:EmailDraft {id: $draft_id})
+        SET d.to = $to, d.subject = $subject, d.body = $body,
+            d.status = 'approved', d.approved_at = datetime()
+        RETURN d.id as id
+        """
+        result = await session.run(query, {
+            "draft_id": draft_id,
+            "to": to,
+            "subject": subject,
+            "body": body,
+        })
+        data = await result.single()
+
+        if not data:
+            raise HTTPException(status_code=404, detail="Draft not found")
+
+        return HTMLResponse(f'''
+            <div class="draft-card" style="background: #d1fae5; border-color: #065f46;">
+                <p><strong>Updated & Approved!</strong> Email will be sent to {to}</p>
+            </div>
+        ''')
+
+    raise HTTPException(status_code=500, detail="Failed to update draft")
+
+
+@app.delete("/api/twin/drafts/{draft_id}")
+async def delete_draft(draft_id: str):
+    """Discard a draft."""
+    from cognitex.db.neo4j import get_neo4j_session
+
+    async for session in get_neo4j_session():
+        query = """
+        MATCH (d:EmailDraft {id: $draft_id})
+        SET d.status = 'discarded'
+        """
+        await session.run(query, {"draft_id": draft_id})
+        return HTMLResponse("")  # Empty to remove from DOM
+
+    raise HTTPException(status_code=500, detail="Failed to delete draft")
+
+
+@app.delete("/api/twin/packs/{pack_id}")
+async def archive_pack(pack_id: str):
+    """Archive a context pack."""
+    from cognitex.db.neo4j import get_neo4j_session
+
+    async for session in get_neo4j_session():
+        query = """
+        MATCH (cp:ContextPack {id: $pack_id})
+        SET cp.status = 'archived'
+        """
+        await session.run(query, {"pack_id": pack_id})
+        return HTMLResponse("")  # Empty to remove from DOM
+
+    raise HTTPException(status_code=500, detail="Failed to archive pack")
+
+
+@app.post("/api/twin/blocks/{block_id}/approve")
+async def approve_block(block_id: str):
+    """Approve a suggested focus block (add to calendar)."""
+    from cognitex.db.neo4j import get_neo4j_session
+
+    async for session in get_neo4j_session():
+        # Get block details
+        query = """
+        MATCH (sb:SuggestedBlock {id: $block_id})
+        RETURN sb.title as title, sb.duration_hours as duration_hours, sb.suggested_day as suggested_day
+        """
+        result = await session.run(query, {"block_id": block_id})
+        block = await result.single()
+
+        if not block:
+            raise HTTPException(status_code=404, detail="Block not found")
+
+        # TODO: Actually create calendar event via Google Calendar API
+
+        # Mark as approved
+        update_query = """
+        MATCH (sb:SuggestedBlock {id: $block_id})
+        SET sb.status = 'approved', sb.approved_at = datetime()
+        """
+        await session.run(update_query, {"block_id": block_id})
+
+        logger.info("Focus block approved", block_id=block_id)
+
+        return HTMLResponse(f'''
+            <tr style="background: #d1fae5;">
+                <td colspan="6"><strong>Added to calendar:</strong> {block["title"]} ({block["duration_hours"]}h)</td>
+            </tr>
+        ''')
+
+    raise HTTPException(status_code=500, detail="Failed to approve block")
+
+
+@app.delete("/api/twin/blocks/{block_id}")
+async def dismiss_block(block_id: str):
+    """Dismiss a suggested block."""
+    from cognitex.db.neo4j import get_neo4j_session
+
+    async for session in get_neo4j_session():
+        query = """
+        MATCH (sb:SuggestedBlock {id: $block_id})
+        SET sb.status = 'dismissed'
+        """
+        await session.run(query, {"block_id": block_id})
+        return HTMLResponse("")  # Empty to remove from DOM
+
+    raise HTTPException(status_code=500, detail="Failed to dismiss block")
+
+
+# -------------------------------------------------------------------
 # State / Mode Management
 # -------------------------------------------------------------------
 

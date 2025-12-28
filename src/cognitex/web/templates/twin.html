@@ -1,0 +1,246 @@
+{% extends "base.html" %}
+{% block title %}Digital Twin - Cognitex{% endblock %}
+
+{% block content %}
+<h1>Digital Twin Review</h1>
+
+<div class="stats">
+    <div class="stat">
+        <div class="stat-value">{{ drafts|length }}</div>
+        <div class="stat-label">Email Drafts</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value">{{ packs|length }}</div>
+        <div class="stat-label">Context Packs</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value">{{ blocks|length }}</div>
+        <div class="stat-label">Suggested Blocks</div>
+    </div>
+</div>
+
+<!-- Email Drafts Section -->
+<div class="card">
+    <div class="card-header">
+        <h2>Pending Email Drafts</h2>
+    </div>
+
+    {% if drafts %}
+    <div id="drafts-list">
+        {% for draft in drafts %}
+        <div class="draft-card" id="draft-{{ draft.id }}">
+            <div class="draft-header">
+                <span class="badge badge-pending">Pending Review</span>
+                <span class="draft-date">{{ draft.created_at }}</span>
+            </div>
+            <div class="draft-meta">
+                <strong>To:</strong> {{ draft.to }}<br>
+                <strong>Subject:</strong> {{ draft.subject }}<br>
+                <strong>Replying to:</strong> {{ draft.original_subject }}
+            </div>
+            <div class="draft-body">
+                <pre>{{ draft.body }}</pre>
+            </div>
+            <div class="draft-reason">
+                <em>Reason: {{ draft.reason }}</em>
+            </div>
+            <div class="draft-actions">
+                <button class="btn btn-success"
+                        hx-post="/api/twin/drafts/{{ draft.id }}/approve"
+                        hx-target="#draft-{{ draft.id }}"
+                        hx-swap="outerHTML">
+                    Approve & Send
+                </button>
+                <button class="btn btn-primary"
+                        hx-get="/api/twin/drafts/{{ draft.id }}/edit"
+                        hx-target="#draft-{{ draft.id }}"
+                        hx-swap="innerHTML">
+                    Edit
+                </button>
+                <button class="btn btn-danger btn-sm"
+                        hx-delete="/api/twin/drafts/{{ draft.id }}"
+                        hx-target="#draft-{{ draft.id }}"
+                        hx-swap="outerHTML"
+                        hx-confirm="Discard this draft?">
+                    Discard
+                </button>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">No pending email drafts</div>
+    {% endif %}
+</div>
+
+<!-- Context Packs Section -->
+<div class="card">
+    <div class="card-header">
+        <h2>Context Packs</h2>
+    </div>
+
+    {% if packs %}
+    <div id="packs-list">
+        {% for pack in packs %}
+        <div class="context-pack" id="pack-{{ pack.id }}">
+            <div class="context-pack-header">
+                {{ pack.title }}
+                <span class="badge badge-active">Ready</span>
+            </div>
+
+            {% if pack.summary %}
+            <div class="context-pack-section">
+                <div class="context-pack-section-title">Summary</div>
+                <p>{{ pack.summary }}</p>
+            </div>
+            {% endif %}
+
+            {% if pack.key_points %}
+            <div class="context-pack-section">
+                <div class="context-pack-section-title">Key Points</div>
+                <ul>
+                    {% for point in pack.key_points %}
+                    <li>{{ point }}</li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+
+            {% if pack.documents %}
+            <div class="context-pack-section">
+                <div class="context-pack-section-title">Related Documents ({{ pack.documents|length }})</div>
+                {% for doc in pack.documents %}
+                <span class="topic-tag">{{ doc.name }}</span>
+                {% endfor %}
+            </div>
+            {% endif %}
+
+            {% if pack.tasks %}
+            <div class="context-pack-section">
+                <div class="context-pack-section-title">Related Tasks ({{ pack.tasks|length }})</div>
+                {% for task in pack.tasks %}
+                <span class="concept-tag">{{ task.title }}</span>
+                {% endfor %}
+            </div>
+            {% endif %}
+
+            <div class="draft-actions" style="margin-top: 0.75rem;">
+                <button class="btn btn-secondary btn-sm"
+                        hx-delete="/api/twin/packs/{{ pack.id }}"
+                        hx-target="#pack-{{ pack.id }}"
+                        hx-swap="outerHTML"
+                        hx-confirm="Archive this context pack?">
+                    Archive
+                </button>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">No context packs prepared</div>
+    {% endif %}
+</div>
+
+<!-- Suggested Blocks Section -->
+<div class="card">
+    <div class="card-header">
+        <h2>Suggested Focus Blocks</h2>
+    </div>
+
+    {% if blocks %}
+    <table>
+        <thead>
+            <tr>
+                <th>Title</th>
+                <th>Duration</th>
+                <th>When</th>
+                <th>Project</th>
+                <th>Reason</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody id="blocks-list">
+            {% for block in blocks %}
+            <tr id="block-{{ block.id }}">
+                <td><strong>{{ block.title }}</strong></td>
+                <td>{{ block.duration_hours }}h</td>
+                <td>{{ block.suggested_day }}</td>
+                <td>{{ block.project_title or '-' }}</td>
+                <td class="desc-preview" title="{{ block.reason }}">{{ block.reason[:50] }}{% if block.reason|length > 50 %}...{% endif %}</td>
+                <td class="actions">
+                    <button class="btn btn-success btn-sm"
+                            hx-post="/api/twin/blocks/{{ block.id }}/approve"
+                            hx-target="#block-{{ block.id }}"
+                            hx-swap="outerHTML">
+                        Add to Calendar
+                    </button>
+                    <button class="btn btn-danger btn-sm"
+                            hx-delete="/api/twin/blocks/{{ block.id }}"
+                            hx-target="#block-{{ block.id }}"
+                            hx-swap="outerHTML">
+                        Dismiss
+                    </button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty">No suggested focus blocks</div>
+    {% endif %}
+</div>
+
+<style>
+    .draft-card {
+        background: #fff;
+        border: 1px solid #e5e7eb;
+        border-radius: 5px;
+        padding: 1rem;
+        margin-bottom: 1rem;
+    }
+    .draft-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 0.75rem;
+    }
+    .draft-date {
+        font-size: 0.8rem;
+        color: #666;
+    }
+    .draft-meta {
+        font-size: 0.9rem;
+        margin-bottom: 0.75rem;
+        padding: 0.5rem;
+        background: #f9fafb;
+        border-radius: 3px;
+    }
+    .draft-body {
+        background: #fafafa;
+        border: 1px solid #eee;
+        border-radius: 3px;
+        padding: 0.75rem;
+        margin-bottom: 0.75rem;
+    }
+    .draft-body pre {
+        white-space: pre-wrap;
+        font-family: inherit;
+        margin: 0;
+        font-size: 0.9rem;
+    }
+    .draft-reason {
+        font-size: 0.85rem;
+        color: #666;
+        margin-bottom: 0.75rem;
+    }
+    .draft-actions {
+        display: flex;
+        gap: 0.5rem;
+    }
+    .draft-edit-form textarea {
+        width: 100%;
+        min-height: 150px;
+        font-family: inherit;
+    }
+</style>
+{% endblock %}

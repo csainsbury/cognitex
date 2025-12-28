@@ -170,6 +170,51 @@ class AutonomousAgent:
         # Build a concise summary for the LLM
         summary = context["summary"]
 
+        # Format writing samples for style learning
+        writing_samples = context.get('writing_samples', [])[:3]
+        if writing_samples:
+            samples_text = "\n\n".join([
+                f"--- Sample {i+1} ---\n{sample[:500]}{'...' if len(sample) > 500 else ''}"
+                for i, sample in enumerate(writing_samples)
+            ])
+        else:
+            samples_text = "(No writing samples available yet)"
+
+        # Format pending emails needing response
+        pending_emails = context.get('pending_emails', [])[:5]
+        if pending_emails:
+            email_lines = []
+            for e in pending_emails:
+                urgency = str(e.get('urgency', 'normal')).upper()
+                sender = e.get('sender_name') or e.get('sender_email') or 'Unknown'
+                snippet = str(e.get('snippet', '') or '')[:150]
+                email_lines.append(
+                    f"  - [{urgency}] From: {sender}\n"
+                    f"    Subject: {e.get('subject', 'No subject')}\n"
+                    f"    ID: {e.get('id')}\n"
+                    f"    Snippet: {snippet}..."
+                )
+            pending_emails_text = "\n".join(email_lines)
+        else:
+            pending_emails_text = "  None pending"
+
+        # Format upcoming calendar events
+        upcoming = context.get('upcoming_calendar', [])[:5]
+        if upcoming:
+            cal_lines = []
+            for c in upcoming:
+                needs_prep = "NEEDS CONTEXT" if c.get('needs_context') else "prepared"
+                attendees = ", ".join(c.get('attendees', [])[:3]) or "No attendees"
+                cal_lines.append(
+                    f"  - [{needs_prep}] {c.get('title', 'No title')}\n"
+                    f"    ID: {c.get('id')}\n"
+                    f"    When: {c.get('start_time')}\n"
+                    f"    Attendees: {attendees}"
+                )
+            upcoming_calendar_text = "\n".join(cal_lines)
+        else:
+            upcoming_calendar_text = "  No upcoming meetings"
+
         # Format connection opportunities with explicit action suggestions
         opportunities = context.get('connection_opportunities', [])[:10]
         opp_lines = []
@@ -216,17 +261,31 @@ class AutonomousAgent:
             for o in context.get('orphaned_nodes', [])
         ][:8]) or "  None"
 
+        # Build skip list (items already actioned - don't re-suggest)
+        skip_lines = []
+        projects_with_blocks = context.get('projects_with_recent_blocks', set())
+        if projects_with_blocks:
+            skip_lines.append(f"- Projects with recent focus blocks (skip SCHEDULE_BLOCK): {', '.join(list(projects_with_blocks)[:5])}")
+        skip_list_text = "\n".join(skip_lines) if skip_lines else "  (none)"
+
         prompt = format_prompt(
             "autonomous_agent",
-            total_changes_24h=summary['total_changes_24h'],
-            stale_tasks=summary['stale_tasks'],
-            stale_projects=summary['stale_projects'],
-            orphaned_documents=summary['orphaned_documents'],
+            # Summary stats
+            emails_needing_response=summary.get('emails_needing_response', 0),
+            meetings_needing_prep=summary.get('meetings_needing_prep', 0),
             connection_opportunities=summary['connection_opportunities'],
+            pending_task_count=summary['pending_task_count'],
+            goals_needing_attention=summary['goals_needing_attention'],
+            projects_needing_attention=summary['projects_needing_attention'],
+            # Formatted content sections
+            writing_samples_text=samples_text,
+            pending_emails_text=pending_emails_text,
+            upcoming_calendar_text=upcoming_calendar_text,
             opportunities_text=opp_text,
             goals_text=goals_text,
             projects_text=projects_text,
             orphaned_text=orphaned_text,
+            skip_list_text=skip_list_text,
         )
 
         try:
@@ -283,12 +342,12 @@ class AutonomousAgent:
                             "reason": d.get("reason", "")
                         })
                 else:
-                    # Find action type key (LINK_*, CREATE_*, FLAG_*)
+                    # Find action type key (LINK_*, CREATE_*, FLAG_*, DRAFT_*, COMPILE_*, SCHEDULE_*)
                     action_type = None
                     params = {}
                     reason = d.get("reason", "")
                     for key in d:
-                        if key.startswith(("LINK_", "CREATE_", "FLAG_", "UPDATE_")):
+                        if key.startswith(("LINK_", "CREATE_", "FLAG_", "UPDATE_", "DRAFT_", "COMPILE_", "SCHEDULE_")):
                             action_type = key
                             params = d[key] if isinstance(d[key], dict) else {}
                             break
@@ -317,7 +376,15 @@ class AutonomousAgent:
 
         logger.info("Executing decision", action=action, reason=reason[:100])
 
-        if action == "LINK_DOCUMENT":
+        # Digital Twin priority actions
+        if action == "DRAFT_EMAIL":
+            return await self._draft_email(session, params, reason)
+        elif action == "COMPILE_CONTEXT_PACK":
+            return await self._compile_context_pack(session, params, reason)
+        elif action == "SCHEDULE_BLOCK":
+            return await self._schedule_block(session, params, reason)
+        # Graph maintenance actions
+        elif action == "LINK_DOCUMENT":
             return await self._link_document(session, params, reason)
         elif action == "LINK_REPOSITORY":
             return await self._link_repository(session, params, reason)
@@ -636,6 +703,362 @@ class AutonomousAgent:
             f"**{entity_type}:** {entity_name}\n"
             f"**Issue:** {issue}\n\n"
             f"_Flagged by autonomous agent_"
+        )
+
+        tool = SendNotificationTool()
+        await tool.execute(message=message, urgency="normal")
+
+    # =========================================================================
+    # Digital Twin Actions
+    # =========================================================================
+
+    async def _draft_email(self, session, params: dict, reason: str) -> dict | None:
+        """
+        Draft an email reply in the user's voice.
+
+        The draft is stored in the graph for user review before sending.
+        """
+        import uuid
+
+        email_id = params.get("email_id")
+        to = params.get("to")
+        subject = params.get("subject", "")
+        body = params.get("body", "")
+        original_subject = params.get("original_subject", "")
+
+        if not email_id or not body:
+            logger.warning("DRAFT_EMAIL missing required fields", params=params)
+            return None
+
+        draft_id = f"draft_{uuid.uuid4().hex[:12]}"
+
+        # Store the draft in the graph, linked to the original email
+        query = """
+        MATCH (original:Email {gmail_id: $email_id})
+        CREATE (draft:EmailDraft {
+            id: $draft_id,
+            to: $to,
+            subject: $subject,
+            body: $body,
+            status: 'pending_review',
+            created_at: datetime(),
+            created_by: 'autonomous_agent',
+            reason: $reason
+        })
+        CREATE (draft)-[:REPLY_TO]->(original)
+        RETURN draft.id as id, original.subject as original_subject
+        """
+        try:
+            result = await session.run(query, {
+                "email_id": email_id,
+                "draft_id": draft_id,
+                "to": to or "",
+                "subject": subject,
+                "body": body,
+                "reason": reason
+            })
+            data = await result.single()
+
+            if data:
+                await log_action(
+                    "draft_email",
+                    "agent",
+                    summary=f"Drafted reply to '{original_subject or data.get('original_subject', 'email')}'",
+                    details={
+                        "draft_id": draft_id,
+                        "email_id": email_id,
+                        "to": to,
+                        "subject": subject,
+                        "body_preview": body[:200] + "..." if len(body) > 200 else body,
+                        "reason": reason
+                    }
+                )
+
+                # Notify user about the draft
+                await self._send_draft_notification(
+                    original_subject or data.get('original_subject', 'email'),
+                    to,
+                    body[:300]
+                )
+
+                return {"drafted": True, "draft_id": draft_id, "email_id": email_id}
+        except Exception as e:
+            logger.warning("Failed to draft email", error=str(e))
+        return None
+
+    async def _send_draft_notification(
+        self, original_subject: str, to: str, body_preview: str
+    ) -> None:
+        """Send a Discord notification about a drafted email."""
+        from cognitex.agent.tools import SendNotificationTool
+
+        message = (
+            f"**Email Draft Ready for Review**\n\n"
+            f"**Replying to:** {original_subject}\n"
+            f"**To:** {to}\n\n"
+            f"**Preview:**\n{body_preview}...\n\n"
+            f"_Review and send from the dashboard_"
+        )
+
+        tool = SendNotificationTool()
+        await tool.execute(message=message, urgency="normal")
+
+    async def _compile_context_pack(self, session, params: dict, reason: str) -> dict | None:
+        """
+        Compile a context pack for an upcoming meeting or decision.
+
+        Gathers relevant documents, tasks, and key points into a briefing.
+        """
+        import uuid
+
+        calendar_id = params.get("calendar_id")
+        meeting_title = params.get("meeting_title", "")
+        context_summary = params.get("context_summary", "")
+        relevant_documents = params.get("relevant_documents", [])
+        relevant_tasks = params.get("relevant_tasks", [])
+        key_points = params.get("key_points", [])
+
+        if not calendar_id and not meeting_title:
+            logger.warning("COMPILE_CONTEXT_PACK missing calendar_id or meeting_title")
+            return None
+
+        pack_id = f"context_{uuid.uuid4().hex[:12]}"
+
+        # Create the context pack node
+        query = """
+        CREATE (cp:ContextPack {
+            id: $pack_id,
+            title: $meeting_title,
+            summary: $context_summary,
+            key_points: $key_points,
+            status: 'ready',
+            created_at: datetime(),
+            created_by: 'autonomous_agent',
+            reason: $reason
+        })
+        RETURN cp.id as id
+        """
+        try:
+            result = await session.run(query, {
+                "pack_id": pack_id,
+                "meeting_title": meeting_title,
+                "context_summary": context_summary,
+                "key_points": key_points,
+                "reason": reason
+            })
+            data = await result.single()
+
+            if not data:
+                return None
+
+            # Link to calendar event if provided
+            if calendar_id:
+                link_query = """
+                MATCH (cp:ContextPack {id: $pack_id})
+                MATCH (ce:CalendarEvent {id: $calendar_id})
+                MERGE (cp)-[:PREPARED_FOR]->(ce)
+                """
+                await session.run(link_query, {
+                    "pack_id": pack_id,
+                    "calendar_id": calendar_id
+                })
+
+            # Link to relevant documents
+            if relevant_documents:
+                doc_query = """
+                MATCH (cp:ContextPack {id: $pack_id})
+                UNWIND $doc_ids as doc_id
+                MATCH (d:Document {drive_id: doc_id})
+                MERGE (cp)-[:REFERENCES]->(d)
+                """
+                await session.run(doc_query, {
+                    "pack_id": pack_id,
+                    "doc_ids": relevant_documents
+                })
+
+            # Link to relevant tasks
+            if relevant_tasks:
+                task_query = """
+                MATCH (cp:ContextPack {id: $pack_id})
+                UNWIND $task_ids as task_id
+                MATCH (t:Task {id: task_id})
+                MERGE (cp)-[:REFERENCES]->(t)
+                """
+                await session.run(task_query, {
+                    "pack_id": pack_id,
+                    "task_ids": relevant_tasks
+                })
+
+            await log_action(
+                "compile_context_pack",
+                "agent",
+                summary=f"Compiled context pack for '{meeting_title}'",
+                details={
+                    "pack_id": pack_id,
+                    "calendar_id": calendar_id,
+                    "meeting_title": meeting_title,
+                    "documents_count": len(relevant_documents),
+                    "tasks_count": len(relevant_tasks),
+                    "key_points": key_points,
+                    "reason": reason
+                }
+            )
+
+            # Notify about the context pack
+            await self._send_context_pack_notification(meeting_title, key_points)
+
+            return {
+                "compiled": True,
+                "pack_id": pack_id,
+                "meeting_title": meeting_title,
+                "documents": len(relevant_documents),
+                "tasks": len(relevant_tasks)
+            }
+        except Exception as e:
+            logger.warning("Failed to compile context pack", error=str(e))
+        return None
+
+    async def _send_context_pack_notification(
+        self, meeting_title: str, key_points: list[str]
+    ) -> None:
+        """Send a Discord notification about a compiled context pack."""
+        from cognitex.agent.tools import SendNotificationTool
+
+        points_text = "\n".join([f"• {p}" for p in key_points[:5]]) if key_points else "No key points"
+
+        message = (
+            f"**Context Pack Ready**\n\n"
+            f"**Meeting:** {meeting_title}\n\n"
+            f"**Key Points:**\n{points_text}\n\n"
+            f"_View full context in the dashboard_"
+        )
+
+        tool = SendNotificationTool()
+        await tool.execute(message=message, urgency="normal")
+
+    async def _schedule_block(self, session, params: dict, reason: str) -> dict | None:
+        """
+        Schedule a focus block for a project or task.
+
+        Creates a calendar event suggestion for the user to approve.
+        """
+        import uuid
+
+        title = params.get("title", "Focus Time")
+        project_id = params.get("project_id")
+        task_id = params.get("task_id")
+        duration_hours = params.get("duration_hours", 2)
+        suggested_day = params.get("suggested_day", "tomorrow")
+
+        block_id = f"block_{uuid.uuid4().hex[:12]}"
+
+        # Create a suggested calendar block
+        query = """
+        CREATE (sb:SuggestedBlock {
+            id: $block_id,
+            title: $title,
+            duration_hours: $duration_hours,
+            suggested_day: $suggested_day,
+            status: 'pending_approval',
+            created_at: datetime(),
+            created_by: 'autonomous_agent',
+            reason: $reason
+        })
+        RETURN sb.id as id
+        """
+        try:
+            result = await session.run(query, {
+                "block_id": block_id,
+                "title": title,
+                "duration_hours": duration_hours,
+                "suggested_day": suggested_day,
+                "reason": reason
+            })
+            data = await result.single()
+
+            if not data:
+                return None
+
+            # Link to project if provided
+            if project_id:
+                link_query = """
+                MATCH (sb:SuggestedBlock {id: $block_id})
+                MATCH (p:Project {id: $project_id})
+                MERGE (sb)-[:FOR_PROJECT]->(p)
+                RETURN p.title as project_title
+                """
+                link_result = await session.run(link_query, {
+                    "block_id": block_id,
+                    "project_id": project_id
+                })
+                link_data = await link_result.single()
+                project_title = link_data.get("project_title") if link_data else None
+            else:
+                project_title = None
+
+            # Link to task if provided
+            if task_id:
+                link_query = """
+                MATCH (sb:SuggestedBlock {id: $block_id})
+                MATCH (t:Task {id: $task_id})
+                MERGE (sb)-[:FOR_TASK]->(t)
+                """
+                await session.run(link_query, {
+                    "block_id": block_id,
+                    "task_id": task_id
+                })
+
+            await log_action(
+                "schedule_block",
+                "agent",
+                summary=f"Suggested focus block: '{title}' ({duration_hours}h)",
+                details={
+                    "block_id": block_id,
+                    "title": title,
+                    "project_id": project_id,
+                    "task_id": task_id,
+                    "duration_hours": duration_hours,
+                    "suggested_day": suggested_day,
+                    "reason": reason
+                }
+            )
+
+            # Notify about the schedule suggestion
+            await self._send_schedule_notification(
+                title, duration_hours, suggested_day, project_title, reason
+            )
+
+            return {
+                "suggested": True,
+                "block_id": block_id,
+                "title": title,
+                "duration_hours": duration_hours
+            }
+        except Exception as e:
+            logger.warning("Failed to schedule block", error=str(e))
+        return None
+
+    async def _send_schedule_notification(
+        self,
+        title: str,
+        duration_hours: int,
+        suggested_day: str,
+        project_title: str | None,
+        reason: str
+    ) -> None:
+        """Send a Discord notification about a suggested calendar block."""
+        from cognitex.agent.tools import SendNotificationTool
+
+        project_line = f"**Project:** {project_title}\n" if project_title else ""
+
+        message = (
+            f"**Focus Time Suggestion**\n\n"
+            f"**Title:** {title}\n"
+            f"{project_line}"
+            f"**Duration:** {duration_hours} hours\n"
+            f"**When:** {suggested_day}\n\n"
+            f"**Why:** {reason[:200]}\n\n"
+            f"_Approve or modify in the dashboard_"
         )
 
         tool = SendNotificationTool()

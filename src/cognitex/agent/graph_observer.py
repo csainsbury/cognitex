@@ -29,6 +29,7 @@ class GraphObserver:
         context = {
             "timestamp": datetime.now().isoformat(),
             "summary": {},
+            # Graph health metrics
             "recent_changes": await self.get_recent_changes(),
             "stale_items": await self.get_stale_items(),
             "orphaned_nodes": await self.get_orphaned_nodes(),
@@ -37,10 +38,17 @@ class GraphObserver:
             "pending_tasks": await self.get_pending_tasks(),
             "recent_documents": await self.get_recent_documents(),
             "connection_opportunities": await self.get_connection_opportunities(),
+            # Digital twin perception
+            "writing_samples": await self.get_user_writing_samples(),
+            "pending_emails": await self.get_actionable_emails(),
+            "upcoming_calendar": await self.get_pending_calendar_blocks(),
+            # Already-actioned items (to prevent re-suggesting)
+            "projects_with_recent_blocks": await self.get_projects_with_recent_blocks(),
         }
 
         # Build summary
         context["summary"] = {
+            # Graph health
             "total_changes_24h": len(context["recent_changes"]),
             "stale_tasks": len([i for i in context["stale_items"] if i["type"] == "Task"]),
             "stale_projects": len([i for i in context["stale_items"] if i["type"] == "Project"]),
@@ -49,6 +57,10 @@ class GraphObserver:
             "projects_needing_attention": len([p for p in context["project_health"] if p.get("needs_attention")]),
             "pending_task_count": len(context["pending_tasks"]),
             "connection_opportunities": len(context["connection_opportunities"]),
+            # Digital twin actionable items
+            "emails_needing_response": len(context["pending_emails"]),
+            "meetings_needing_prep": len([c for c in context["upcoming_calendar"] if c.get("needs_context")]),
+            "has_writing_samples": len(context["writing_samples"]) > 0,
         }
 
         return context
@@ -478,3 +490,185 @@ class GraphObserver:
         except Exception as e:
             logger.warning("Failed to get graph stats", error=str(e))
             return {}
+
+    # =========================================================================
+    # Digital Twin Perception Methods
+    # =========================================================================
+
+    async def get_user_writing_samples(self, limit: int = 5) -> list[str]:
+        """
+        Fetch recent emails sent by the user to establish writing style.
+
+        These samples allow the agent to mimic the user's voice when drafting
+        emails or other communications.
+        """
+        query = """
+        MATCH (e:Email)-[:SENT_BY]->(p:Person)
+        WHERE p.is_user = true
+          AND e.body IS NOT NULL
+          AND size(e.body) > 50
+        RETURN e.body as body
+        ORDER BY e.date DESC
+        LIMIT $limit
+        """
+        try:
+            result = await self.session.run(query, {"limit": limit})
+            data = await result.data()
+            return [row["body"] for row in data if row.get("body")]
+        except Exception as e:
+            logger.warning("Failed to get user writing samples", error=str(e))
+            return []
+
+    async def get_actionable_emails(self, limit: int = 10) -> list[dict]:
+        """
+        Get emails that likely require a response or action.
+
+        Finds incoming emails marked as actionable/urgent that haven't been
+        addressed yet (no reply sent, no task created, no draft created).
+        """
+        query = """
+        MATCH (e:Email)
+        WHERE (e.classification IN ['actionable', 'urgent']
+               OR e.action_required = true
+               OR e.needs_response = true)
+          AND NOT (e)<-[:REPLY_TO]-(:Email)
+          AND NOT (e)<-[:REPLY_TO]-(:EmailDraft)
+          AND NOT (e)<-[:DERIVED_FROM]-(:Task)
+          AND NOT (e)-[:SENT_BY]->(:Person {is_user: true})
+        OPTIONAL MATCH (e)-[:SENT_BY]->(sender:Person)
+        RETURN
+            e.gmail_id as id,
+            e.subject as subject,
+            e.snippet as snippet,
+            e.body as body,
+            e.date as date,
+            e.classification as classification,
+            coalesce(e.urgency, 'normal') as urgency,
+            sender.name as sender_name,
+            sender.email as sender_email
+        ORDER BY
+            CASE e.classification
+                WHEN 'urgent' THEN 0
+                WHEN 'actionable' THEN 1
+                ELSE 2
+            END,
+            e.date DESC
+        LIMIT $limit
+        """
+        try:
+            result = await self.session.run(query, {"limit": limit})
+            data = await result.data()
+            return data
+        except Exception as e:
+            logger.warning("Failed to get actionable emails", error=str(e))
+            return []
+
+    async def get_pending_calendar_blocks(self, days_ahead: int = 7) -> list[dict]:
+        """
+        Get upcoming calendar events that may need preparation or context.
+
+        Identifies meetings that the user should prepare for, especially
+        those without attached materials or context. Excludes events that
+        already have a context pack prepared (regardless of pack status).
+        """
+        query = """
+        MATCH (c:CalendarEvent)
+        WHERE c.start_time > datetime()
+          AND c.start_time < datetime() + duration({days: $days_ahead})
+          AND NOT (c)<-[:PREPARED_FOR]-(:ContextPack)
+        OPTIONAL MATCH (c)-[:ABOUT]->(p:Project)
+        OPTIONAL MATCH (c)-[:INVOLVES]->(person:Person)
+        OPTIONAL MATCH (c)-[:HAS_ATTACHMENT]->(d:Document)
+        WITH c,
+             collect(DISTINCT p.title) as related_projects,
+             collect(DISTINCT person.name) as attendees,
+             collect(DISTINCT d.name) as attachments
+        RETURN
+            c.id as id,
+            c.title as title,
+            c.start_time as start_time,
+            c.end_time as end_time,
+            c.description as description,
+            related_projects,
+            attendees,
+            attachments,
+            size(attachments) = 0 AND size(related_projects) = 0 as needs_context
+        ORDER BY c.start_time ASC
+        LIMIT 20
+        """
+        try:
+            result = await self.session.run(query, {"days_ahead": days_ahead})
+            data = await result.data()
+            return data
+        except Exception as e:
+            logger.warning("Failed to get pending calendar blocks", error=str(e))
+            return []
+
+    async def get_projects_with_recent_blocks(self, days: int = 7) -> set[str]:
+        """
+        Get project IDs that have had focus blocks suggested recently.
+
+        Used to prevent the agent from repeatedly suggesting blocks for
+        the same projects.
+        """
+        query = """
+        MATCH (sb:SuggestedBlock)-[:FOR_PROJECT]->(p:Project)
+        WHERE sb.created_at > datetime() - duration({days: $days})
+        RETURN DISTINCT p.id as project_id
+        """
+        try:
+            result = await self.session.run(query, {"days": days})
+            data = await result.data()
+            return {row["project_id"] for row in data if row.get("project_id")}
+        except Exception as e:
+            logger.warning("Failed to get projects with recent blocks", error=str(e))
+            return set()
+
+    async def get_decision_context(self, topic: str = None) -> list[dict]:
+        """
+        Gather context for decision-making on a specific topic.
+
+        Finds all relevant documents, emails, and tasks related to a topic
+        to help compile a decision pack.
+        """
+        if not topic:
+            # Get topics from recent high-priority items
+            query = """
+            MATCH (t:Task)
+            WHERE t.status = 'in_progress'
+              AND t.energy_cost >= 3
+            OPTIONAL MATCH (t)-[:BELONGS_TO]->(p:Project)
+            OPTIONAL MATCH (t)-[:COVERS]->(topic:Topic)
+            RETURN
+                t.title as task_title,
+                p.title as project_title,
+                collect(DISTINCT topic.name) as topics
+            ORDER BY t.updated_at DESC
+            LIMIT 5
+            """
+        else:
+            query = """
+            MATCH (n)
+            WHERE (n:Document OR n:Email OR n:Task OR n:Project)
+              AND (toLower(coalesce(n.title, n.name, n.subject, '')) CONTAINS toLower($topic)
+                   OR toLower(coalesce(n.summary, n.body, n.description, '')) CONTAINS toLower($topic))
+            OPTIONAL MATCH (n)-[:COVERS]->(t:Topic)
+            OPTIONAL MATCH (n)-[:ABOUT]->(c:Concept)
+            RETURN
+                labels(n)[0] as type,
+                coalesce(n.id, n.drive_id, n.gmail_id) as id,
+                coalesce(n.title, n.name, n.subject) as title,
+                coalesce(n.summary, n.snippet, n.description) as summary,
+                collect(DISTINCT t.name) as topics,
+                collect(DISTINCT c.name) as concepts
+            ORDER BY n.updated_at DESC, n.date DESC
+            LIMIT 20
+            """
+        try:
+            params = {"topic": topic} if topic else {}
+            result = await self.session.run(query, params)
+            data = await result.data()
+            return data
+        except Exception as e:
+            logger.warning("Failed to get decision context", error=str(e))
+            return []

@@ -39,7 +39,7 @@
 \newcommand{\cognitex}{\textsc{Cognitex}}
 \newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
 
-\title{\cognitex{}: A Multi-Tier Personal Agent Architecture for Cognitive Load Management Through Semantic Knowledge Graphs and Risk-Stratified Autonomous Action}
+\title{\cognitex{}: A Multi-Tier Personal Agent Architecture for Cognitive Load Management Through Semantic Knowledge Graphs, Autonomous Graph Orchestration, and Risk-Stratified Action}
 
 \author{
     Chris Sainsbury\\
@@ -55,10 +55,10 @@
 \maketitle
 
 \begin{abstract}
-We present \cognitex{}, a novel personal agent architecture designed to reduce cognitive overhead for knowledge workers by unifying email, calendar, document, and code repository data into a hybrid semantic knowledge graph. The system implements a hierarchical large language model (LLM) architecture with distinct reasoning and execution tiers, combined with a three-level risk stratification framework (read-only, auto-execute, approval-required) that balances autonomous operation with human agency. Our approach integrates three complementary knowledge representations: a Neo4j property graph capturing entities and relationships, PostgreSQL with pgvector extensions for 768-dimensional semantic embeddings, and Redis-backed working memory for session context. The agent employs a ReAct-style (Reason + Act) planning loop with decision trace capture, enabling learning from user feedback through retrieval-augmented generation over historical decisions. We describe the complete system architecture, including data ingestion pipelines, the semantic graph schema, the agent's tool ecosystem comprising 27 specialized tools, and the trigger system supporting both scheduled and event-driven activation. \cognitex{} represents a reference implementation for trustworthy personal AI systems that maintain transparency while providing meaningful cognitive assistance.
+We present \cognitex{}, a personal agent architecture designed to reduce cognitive overhead for knowledge workers by unifying email, calendar, document, and code repository data into a hybrid semantic knowledge graph. The system implements a hierarchical large language model (LLM) architecture with distinct reasoning and execution tiers, combined with a three-level risk stratification framework (read-only, auto-execute, approval-required) that balances autonomous operation with human agency. A key innovation is the \textbf{autonomous graph orchestration layer}: an always-running agent that proactively monitors graph health, creates connections between related entities (documents to projects, repositories to projects, tasks to goals), and surfaces items requiring human attention via Discord notifications. The architecture integrates three complementary knowledge representations: a Neo4j property graph capturing entities and relationships, PostgreSQL with pgvector extensions for 768-dimensional semantic embeddings, and Redis-backed working memory for session context. The agent employs a ReAct-style (Reason + Act) planning loop with decision trace capture, an executive function layer modeling user cognitive state, and externalized prompt templates for iterative refinement. \cognitex{} represents a reference implementation for trustworthy personal AI systems that maintain transparency while providing meaningful cognitive assistance through both reactive and proactive behaviors.
 \end{abstract}
 
-\noindent\textbf{Keywords:} Personal agents, Knowledge graphs, Large language models, Cognitive load management, Semantic search, ReAct agents, Human-AI collaboration
+\noindent\textbf{Keywords:} Personal agents, Knowledge graphs, Large language models, Cognitive load management, Semantic search, ReAct agents, Autonomous orchestration, Human-AI collaboration
 
 \section{Introduction}
 
@@ -66,7 +66,7 @@ We present \cognitex{}, a novel personal agent architecture designed to reduce c
 
 Knowledge workers face an increasingly fragmented digital environment characterized by multiple communication channels, calendaring systems, document repositories, and project management tools. This fragmentation imposes substantial cognitive overhead: the mental effort required to track commitments, maintain relationship context, and synthesize information across disparate sources. Studies estimate that knowledge workers spend 28\% of their workweek managing email alone \citep{mckinsey2012social}, with significant additional time lost to context switching between applications.
 
-While general-purpose AI assistants have demonstrated impressive capabilities in natural language understanding and generation, they typically operate without persistent context about the user's specific professional network, commitments, and communication patterns. This limitation necessitates repeated context provision, undermining the efficiency gains such systems might otherwise provide.
+While general-purpose AI assistants have demonstrated impressive capabilities in natural language understanding and generation, they typically operate without persistent context about the user's specific professional network, commitments, and communication patterns. This limitation necessitates repeated context provision, undermining the efficiency gains such systems might otherwise provide. Furthermore, most AI assistants are purely \emph{reactive}---they respond to user queries but do not proactively maintain or organize information.
 
 \subsection{Contributions}
 
@@ -75,18 +75,22 @@ This paper presents \cognitex{}, a personal agent system that addresses these ch
 \begin{enumerate}
     \item \textbf{Hybrid Knowledge Representation}: We integrate property graphs (Neo4j), vector embeddings (PostgreSQL/pgvector), and key-value caching (Redis) to capture complementary aspects of personal knowledge---relationships, semantic similarity, and session context respectively.
 
+    \item \textbf{Autonomous Graph Orchestration}: An always-running agent loop that proactively monitors graph state, identifies connection opportunities (documents matching project names, repositories matching projects, orphaned tasks), creates links automatically, and surfaces ambiguous items for human review via Discord notifications.
+
     \item \textbf{Risk-Stratified Tool Execution}: Our framework categorizes agent capabilities into three risk tiers (\texttt{READONLY}, \texttt{AUTO}, \texttt{APPROVAL}), enabling autonomous operation for safe actions while preserving human oversight for consequential decisions.
+
+    \item \textbf{Executive Function Layer}: A cognitive state model that tracks user operating modes (deep work, shallow work, fragmented, recovery) and an interruption firewall that filters notifications based on current cognitive capacity.
 
     \item \textbf{Decision Trace Learning}: We capture complete decision contexts including triggers, proposed actions, and user feedback, enabling retrieval-augmented generation from similar historical decisions and providing infrastructure for behavioral fine-tuning.
 
-    \item \textbf{Hierarchical LLM Architecture}: The system employs specialized models for planning (reasoning about situations) versus execution (structured task completion), optimizing for both cognitive depth and operational efficiency.
+    \item \textbf{Externalized Prompt Architecture}: System prompts are stored as markdown files with templated variables, enabling rapid iteration on agent behavior without code changes.
 
-    \item \textbf{Multi-Modal Triggering}: The agent responds to scheduled events (morning briefings, periodic monitoring), external triggers (new emails, calendar changes), and direct user interaction through multiple interfaces (CLI, Discord, REST API).
+    \item \textbf{Multi-Modal Triggering}: The agent responds to scheduled events (morning briefings, periodic monitoring), external triggers (new emails, calendar changes, Drive file updates), autonomous cycles (15-minute graph health checks), and direct user interaction through multiple interfaces (CLI, Discord, web dashboard, REST API).
 \end{enumerate}
 
 \subsection{Paper Organization}
 
-\Cref{sec:related} reviews related work in personal agents, knowledge graphs, and LLM-based systems. \Cref{sec:architecture} presents the system architecture, including data models and service integrations. \Cref{sec:agent} details the agent subsystem, covering the planner, executors, tools, and memory systems. \Cref{sec:graph} describes the semantic graph construction and query patterns. \Cref{sec:chunking} covers the document chunking and embedding pipeline. \Cref{sec:triggers} discusses the trigger and notification infrastructure. \Cref{sec:evaluation} presents preliminary evaluation results. \Cref{sec:discussion} discusses limitations and future directions, and \Cref{sec:conclusion} concludes.
+\Cref{sec:related} reviews related work in personal agents, knowledge graphs, and LLM-based systems. \Cref{sec:architecture} presents the system architecture, including data models and service integrations. \Cref{sec:agent} details the agent subsystem, covering the planner, executors, tools, and memory systems. \Cref{sec:autonomous} describes the autonomous graph orchestration layer. \Cref{sec:executive} covers the executive function layer including state modeling and interruption management. \Cref{sec:graph} describes the semantic graph construction and query patterns. \Cref{sec:chunking} covers the document chunking and embedding pipeline. \Cref{sec:triggers} discusses the trigger and notification infrastructure. \Cref{sec:web} presents the web dashboard interface. \Cref{sec:evaluation} presents preliminary evaluation results. \Cref{sec:discussion} discusses limitations and future directions, and \Cref{sec:conclusion} concludes.
 
 \section{Related Work}
 \label{sec:related}
@@ -98,6 +102,10 @@ Personal information management (PIM) systems have evolved from simple contact d
 \subsection{LLM-Based Agents}
 
 The emergence of capable large language models has catalyzed research into autonomous agents. ReAct \citep{yao2022react} demonstrated the effectiveness of interleaved reasoning and action traces for tool-using agents. Subsequent work has explored tool learning \citep{qin2023toolllm}, self-reflection \citep{shinn2023reflexion}, and multi-agent collaboration \citep{park2023generative}. However, most systems target general-purpose assistance rather than the specialized domain of personal productivity with its requirements for persistent context and relationship awareness.
+
+\subsection{Proactive Agent Behavior}
+
+Traditional agent systems are predominantly reactive, responding only to explicit user requests. Recent work has explored proactive behaviors including anticipatory assistance \citep{yorke2012proactive} and context-aware notifications. Our autonomous orchestration layer extends this paradigm by continuously monitoring a knowledge graph and taking corrective actions to maintain graph health and coherence.
 
 \subsection{Knowledge Graph Construction}
 
@@ -112,44 +120,47 @@ Dense retrieval methods using learned embeddings have largely superseded sparse 
 
 \subsection{Overview}
 
-\cognitex{} implements a multi-tier architecture comprising data services, integration services, agent components, and user interfaces. The system operates as a set of containerized microservices orchestrated via Docker Compose. \Cref{fig:architecture} illustrates the high-level system design.
+\cognitex{} implements a multi-tier architecture comprising data services, integration services, agent components, autonomous orchestration, executive function management, and user interfaces. The system operates as a set of containerized microservices orchestrated via Docker Compose. \Cref{fig:architecture} illustrates the high-level system design.
 
 \begin{figure}[t]
 \centering
 \begin{tikzpicture}[
-    node distance=0.8cm,
-    box/.style={rectangle, draw, rounded corners, minimum width=2cm, minimum height=0.8cm, align=center, font=\small},
+    node distance=0.7cm,
+    box/.style={rectangle, draw, rounded corners, minimum width=1.8cm, minimum height=0.7cm, align=center, font=\small},
     bigbox/.style={rectangle, draw, rounded corners, minimum width=4cm, minimum height=1cm, align=center},
-    layer/.style={rectangle, draw, dashed, rounded corners, inner sep=0.3cm},
+    layer/.style={rectangle, draw, dashed, rounded corners, inner sep=0.25cm},
     arrow/.style={->, >=stealth, thick}
 ]
 
 % User Interfaces Layer
 \node[box] (cli) {CLI\\(Typer)};
-\node[box, right=0.5cm of cli] (discord) {Discord\\Bot};
-\node[box, right=0.5cm of discord] (api) {REST API\\(FastAPI)};
-\node[layer, fit=(cli)(discord)(api), label=above:User Interfaces] (ui_layer) {};
+\node[box, right=0.4cm of cli] (discord) {Discord\\Bot};
+\node[box, right=0.4cm of discord] (web) {Web\\Dashboard};
+\node[box, right=0.4cm of web] (api) {REST API\\(FastAPI)};
+\node[layer, fit=(cli)(discord)(web)(api), label=above:User Interfaces] (ui_layer) {};
 
 % Agent System Layer
-\node[box, below=1.5cm of cli] (planner) {Planner\\(DeepSeek)};
-\node[box, right=0.3cm of planner] (executors) {Executors};
-\node[box, right=0.3cm of executors] (tools) {Tools\\(27)};
-\node[box, below=0.5cm of executors] (memory) {Memory Systems};
-\node[box, below=0.5cm of memory] (triggers) {Trigger System};
-\node[layer, fit=(planner)(executors)(tools)(memory)(triggers), label=above:Agent System] (agent_layer) {};
+\node[box, below=1.3cm of cli] (planner) {Planner};
+\node[box, right=0.2cm of planner] (executors) {Executors};
+\node[box, right=0.2cm of executors] (tools) {Tools\\(27)};
+\node[box, right=0.2cm of tools] (autonomous) {Autonomous\\Agent};
+\node[box, below=0.4cm of planner, xshift=0.5cm] (memory) {Memory Systems};
+\node[box, right=0.2cm of memory] (executive) {Executive\\Layer};
+\node[box, below=0.4cm of memory, xshift=0.8cm] (triggers) {Trigger System};
+\node[layer, fit=(planner)(executors)(tools)(autonomous)(memory)(executive)(triggers), label=above:Agent System] (agent_layer) {};
 
 % Integration Services Layer
-\node[box, below=1.5cm of triggers, xshift=-2cm] (gmail) {Gmail};
-\node[box, right=0.3cm of gmail] (calendar) {Calendar};
-\node[box, right=0.3cm of calendar] (drive) {Drive};
-\node[box, right=0.3cm of drive] (github) {GitHub};
-\node[box, right=0.3cm of github] (llm) {LLM};
+\node[box, below=1.3cm of triggers, xshift=-2.5cm] (gmail) {Gmail};
+\node[box, right=0.2cm of gmail] (calendar) {Calendar};
+\node[box, right=0.2cm of calendar] (drive) {Drive};
+\node[box, right=0.2cm of drive] (github) {GitHub};
+\node[box, right=0.2cm of github] (llm) {LLM};
 \node[layer, fit=(gmail)(calendar)(drive)(github)(llm), label=above:Integration Services] (int_layer) {};
 
 % Data Services Layer
-\node[box, below=1.5cm of gmail, xshift=0.5cm] (postgres) {PostgreSQL\\+pgvector};
-\node[box, right=0.5cm of postgres] (neo4j) {Neo4j\\Graph};
-\node[box, right=0.5cm of neo4j] (redis) {Redis\\Cache};
+\node[box, below=1.3cm of gmail, xshift=0.5cm] (postgres) {PostgreSQL\\+pgvector};
+\node[box, right=0.4cm of postgres] (neo4j) {Neo4j\\Graph};
+\node[box, right=0.4cm of neo4j] (redis) {Redis\\Cache};
 \node[layer, fit=(postgres)(neo4j)(redis), label=above:Data Services] (data_layer) {};
 
 % Arrows
@@ -158,7 +169,7 @@ Dense retrieval methods using learned embeddings have largely superseded sparse 
 \draw[arrow] (int_layer) -- (data_layer);
 
 \end{tikzpicture}
-\caption{High-level system architecture of \cognitex{} showing the four primary layers: user interfaces, agent system, integration services, and data services.}
+\caption{High-level system architecture of \cognitex{} showing the four primary layers: user interfaces (CLI, Discord, Web Dashboard, REST API), agent system (including autonomous orchestration and executive function layer), integration services, and data services.}
 \label{fig:architecture}
 \end{figure}
 
@@ -166,13 +177,13 @@ Dense retrieval methods using learned embeddings have largely superseded sparse 
 
 \subsubsection{PostgreSQL with pgvector}
 
-PostgreSQL serves as the primary relational store, extended with the pgvector extension for efficient similarity search over dense embeddings. The schema comprises 15 tables organized into functional groups:
+PostgreSQL serves as the primary relational store, extended with the pgvector extension for efficient similarity search over dense embeddings. The schema comprises 18 tables organized into functional groups:
 
 \paragraph{Task Management:}
 \begin{itemize}
-    \item \texttt{tasks}: Core task storage with status (pending, in\_progress, done), energy cost estimates, due dates, priority levels, and foreign keys to source entities
+    \item \texttt{tasks}: Core task storage with status (pending, in\_progress, completed), energy cost estimates (1--5 scale), due dates, priority levels, and foreign keys to source entities
     \item \texttt{goals}: Hierarchical goal management supporting quarterly and yearly timeframes with OKR-style key results stored as JSONB
-    \item \texttt{projects}: Project containers linking goals to executable tasks
+    \item \texttt{projects}: Project containers linking goals to executable tasks with status tracking (active, completed, on\_hold, cancelled)
 \end{itemize}
 
 \paragraph{Semantic Search:}
@@ -182,8 +193,9 @@ PostgreSQL serves as the primary relational store, extended with the pgvector ex
     \item \texttt{code\_content}: GitHub source code with repository and path metadata
 \end{itemize}
 
-\paragraph{Learning Infrastructure:}
+\paragraph{Agent Operations:}
 \begin{itemize}
+    \item \texttt{agent\_actions}: Complete log of autonomous agent actions including action\_type, source (agent, trigger, user), status, summary, and detailed JSONB metadata
     \item \texttt{decision\_traces}: Complete decision context including trigger type, proposed action, final action, user feedback, and quality scores
     \item \texttt{communication\_patterns}: Learned per-contact preferences
     \item \texttt{preference\_rules}: Extracted behavioral patterns with conditions and confidence scores
@@ -201,7 +213,7 @@ This configuration provides $O(\log n)$ query complexity with high recall at the
 
 \subsubsection{Neo4j Property Graph}
 
-Neo4j stores the semantic knowledge graph with 10 primary node types and 15 relationship types. \Cref{tab:node_types} summarizes the core entity nodes.
+Neo4j stores the semantic knowledge graph with 12 primary node types and 18 relationship types. \Cref{tab:node_types} summarizes the core entity nodes.
 
 \begin{table}[t]
 \centering
@@ -214,10 +226,11 @@ Neo4j stores the semantic knowledge graph with 10 primary node types and 15 rela
 Person & email, name, org, role & Contacts and collaborators \\
 Email & gmail\_id, subject, date & Email messages \\
 Event & gcal\_id, title, start, end & Calendar entries \\
-Task & id, title, status, priority & Action items \\
+Task & id, title, status, priority, due & Action items \\
 Document & drive\_id, name, mime\_type & Drive files \\
-Project & id, title, status & Project containers \\
-Goal & id, title, timeframe & Strategic objectives \\
+Repository & id, name, full\_name & GitHub repositories \\
+Project & id, title, status, description & Project containers \\
+Goal & id, title, timeframe, target\_date & Strategic objectives \\
 Chunk & id, chunk\_index, summary & Document segments \\
 Topic & name & Extracted themes \\
 Concept & name & Domain concepts \\
@@ -225,37 +238,45 @@ Concept & name & Domain concepts \\
 \end{tabular}
 \end{table}
 
-The graph captures relationships including communication (\texttt{SENT\_BY}, \texttt{RECEIVED\_BY}), ownership (\texttt{OWNS}, \texttt{SHARED\_WITH}), derivation (\texttt{DERIVED\_FROM}, \texttt{LINKED\_TO}), and inferred connections (\texttt{WORKS\_WITH}).
+The graph captures relationships including:
+\begin{itemize}
+    \item \textbf{Communication}: \texttt{SENT\_BY}, \texttt{RECEIVED\_BY}, \texttt{MENTIONS}
+    \item \textbf{Ownership}: \texttt{OWNS}, \texttt{SHARED\_WITH}, \texttt{CREATED\_BY}
+    \item \textbf{Hierarchy}: \texttt{BELONGS\_TO}, \texttt{PART\_OF}, \texttt{DERIVED\_FROM}
+    \item \textbf{Semantic}: \texttt{COVERS} (topic), \texttt{ABOUT} (concept), \texttt{REFERENCES}
+    \item \textbf{Inferred}: \texttt{WORKS\_WITH}, \texttt{ASSIGNED\_TO}
+\end{itemize}
 
 \subsubsection{Redis}
 
-Redis provides three functions: (1) working memory with 24-hour TTL for session context, (2) approval queue for staged high-risk actions, and (3) pub/sub messaging for event-driven triggers.
+Redis provides four functions: (1) working memory with 24-hour TTL for session context, (2) approval queue for staged high-risk actions, (3) pub/sub messaging for event-driven triggers and notifications, and (4) deduplication tracking for event processing.
 
 \subsection{Integration Services}
 
 \subsubsection{Gmail Service}
 
-The Gmail integration implements OAuth2 authentication with incremental synchronization. Initial synchronization fetches historical messages within a configurable date range. Subsequent syncs use Gmail's history API with stored \texttt{history\_id} to retrieve only new messages.
+The Gmail integration implements OAuth2 authentication with incremental synchronization. Initial synchronization fetches historical messages within a configurable date range. Subsequent syncs use Gmail's history API with stored \texttt{history\_id} to retrieve only new messages. The service supports automatic task completion detection from sent emails.
 
 \subsubsection{Calendar Service}
 
-Google Calendar integration supports full CRUD operations. Events are enriched with computed properties including \texttt{energy\_impact} (1--10 scale based on event type, duration, and attendee count) and \texttt{event\_type} classification.
+Google Calendar integration supports full CRUD operations. Events are enriched with computed properties including \texttt{energy\_impact} (1--10 scale based on event type, duration, and attendee count) and \texttt{event\_type} classification (meeting, focus\_time, travel, etc.).
 
 \subsubsection{Drive Service}
 
-Google Drive integration indexes document metadata and content. Content extraction supports Google Docs, PDFs (via pypdf), Microsoft Office documents, and plain text formats.
+Google Drive integration indexes document metadata and content with automatic change detection. Content extraction supports Google Docs, PDFs (via pypdf), Microsoft Office documents, and plain text formats. Priority folders can be configured for preferential indexing.
 
 \subsubsection{GitHub Service}
 
-GitHub integration enables code repository indexing with selective targeting of meaningful files while excluding generated artifacts.
+GitHub integration enables code repository indexing with selective targeting of meaningful files (source code, documentation, configuration) while excluding generated artifacts (node\_modules, build outputs, binaries). Repository nodes in the graph can be linked to projects.
 
 \subsubsection{LLM Service}
 
 The LLM service provides a unified interface to Together.ai's inference API. Model selection is task-specific:
 \begin{itemize}
-    \item \textbf{Planning}: DeepSeek V3 (671B parameters, MoE) for complex reasoning
+    \item \textbf{Planning/Reasoning}: DeepSeek V3 (671B parameters, MoE) for complex reasoning
     \item \textbf{Execution}: DeepSeek V3 for structured task completion
     \item \textbf{Embedding}: BAAI/bge-base-en-v1.5 for 768-dimensional semantic vectors
+    \item \textbf{Autonomous Agent}: DeepSeek V3 for graph orchestration decisions
 \end{itemize}
 
 \section{Agent Subsystem}
@@ -312,6 +333,7 @@ REVIEW & Evening reflection & READONLY, AUTO \\
 MONITOR & Hourly check & READONLY, AUTO \\
 PROCESS\_EMAIL & New email analysis & READONLY, AUTO, APPROVAL \\
 CONVERSATION & User interaction & READONLY, AUTO, APPROVAL \\
+AUTONOMOUS & Graph orchestration & READONLY, AUTO \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -320,13 +342,13 @@ CONVERSATION & User interaction & READONLY, AUTO, APPROVAL \\
 
 The system provides 27 tools organized by risk level:
 
-\paragraph{READONLY Tools (10):} No side effects, always allowed. Includes \texttt{graph\_query}, \texttt{search\_documents}, \texttt{search\_code}, \texttt{get\_calendar}, \texttt{get\_tasks}, \texttt{get\_contact}, and \texttt{recall\_memory}.
+\paragraph{READONLY Tools (10):} No side effects, always allowed. Includes \texttt{graph\_query}, \texttt{search\_documents}, \texttt{search\_code}, \texttt{get\_calendar}, \texttt{get\_tasks}, \texttt{get\_contact}, \texttt{recall\_memory}, \texttt{get\_projects}, \texttt{get\_goals}, and \texttt{get\_repositories}.
 
-\paragraph{AUTO Tools (14):} Low-risk side effects, executed automatically. Includes \texttt{create\_task}, \texttt{update\_task}, \texttt{create\_project}, \texttt{create\_goal}, \texttt{send\_notification}, and \texttt{add\_memory}.
+\paragraph{AUTO Tools (14):} Low-risk side effects, executed automatically. Includes \texttt{create\_task}, \texttt{update\_task}, \texttt{create\_project}, \texttt{update\_project}, \texttt{create\_goal}, \texttt{link\_task\_to\_project}, \texttt{link\_project\_to\_goal}, \texttt{link\_document\_to\_project}, \texttt{link\_repository\_to\_project}, \texttt{send\_notification}, \texttt{add\_memory}, \texttt{flag\_for\_review}, and graph mutation tools.
 
 \paragraph{APPROVAL Tools (3):} High-risk, require user confirmation. Includes \texttt{draft\_email}, \texttt{send\_email}, and \texttt{create\_event}.
 
-The risk stratification enables safe autonomous operation while preserving human agency for consequential actions.
+The risk stratification enables safe autonomous operation while preserving user agency for consequential actions.
 
 \subsection{Memory Systems}
 
@@ -350,6 +372,185 @@ Specialized storage for learning from feedback captures:
 \end{itemize}
 
 Quality scoring follows: auto-executed (0.7), approved unchanged (0.9), approved with edits (0.85), rejected (0.3).
+
+\section{Autonomous Graph Orchestration}
+\label{sec:autonomous}
+
+\subsection{Motivation}
+
+Traditional agent systems are purely reactive---they wait for user input before taking action. However, knowledge graphs require ongoing maintenance: new documents should be linked to relevant projects, repositories should be associated with their projects, orphaned tasks need homes, and stale items require attention. The autonomous orchestration layer addresses this need through continuous, proactive graph management.
+
+\subsection{Architecture}
+
+The autonomous agent operates on a configurable interval (default: 15 minutes) and follows an OODA-inspired loop:
+
+\begin{enumerate}
+    \item \textbf{Observe}: Query the graph for current state including recent changes, stale items, orphaned nodes, goal/project health metrics, and connection opportunities
+    \item \textbf{Orient}: Format observations into a structured context for LLM reasoning
+    \item \textbf{Decide}: Use LLM to analyze context and select actions from available options
+    \item \textbf{Act}: Execute selected actions and log results
+\end{enumerate}
+
+\subsection{Graph Observer}
+
+The Graph Observer component provides comprehensive visibility into graph state through specialized queries:
+
+\begin{lstlisting}[language=Python]
+class GraphObserver:
+    async def get_full_context(self) -> dict:
+        return {
+            "recent_changes": await self.get_recent_changes(),
+            "stale_items": await self.get_stale_items(),
+            "orphaned_nodes": await self.get_orphaned_nodes(),
+            "goal_health": await self.get_goal_health(),
+            "project_health": await self.get_project_health(),
+            "pending_tasks": await self.get_pending_tasks(),
+            "recent_documents": await self.get_recent_documents(),
+            "connection_opportunities":
+                await self.get_connection_opportunities(),
+        }
+\end{lstlisting}
+
+\paragraph{Connection Opportunities:} The observer identifies potential links based on:
+\begin{itemize}
+    \item \textbf{Name matching}: Documents/repositories containing project names (minimum 4 characters to avoid false positives)
+    \item \textbf{Topic overlap}: Documents sharing topics with projects
+    \item \textbf{Orphaned entities}: Tasks without projects, projects without goals
+\end{itemize}
+
+\subsection{Available Actions}
+
+The autonomous agent can perform the following actions:
+
+\begin{itemize}
+    \item \texttt{LINK\_DOCUMENT}: Connect a document to a project based on name match or topic overlap
+    \item \texttt{LINK\_REPOSITORY}: Connect a GitHub repository to a project
+    \item \texttt{LINK\_TASK}: Connect an orphaned task to a project
+    \item \texttt{LINK\_PROJECT\_TO\_GOAL}: Connect a project to a goal
+    \item \texttt{CREATE\_TASK}: Create a task for a stalled project with no tasks
+    \item \texttt{FLAG\_FOR\_REVIEW}: Surface an item requiring human decision (triggers Discord notification)
+\end{itemize}
+
+\subsection{Externalized Prompts}
+
+The autonomous agent's decision-making behavior is controlled by an externalized prompt stored as a markdown template:
+
+\begin{lstlisting}[language=bash]
+src/cognitex/prompts/autonomous_agent.md
+\end{lstlisting}
+
+This separation enables rapid iteration on agent behavior without code changes. The prompt template uses \texttt{\{variable\}} placeholders that are populated at runtime with current graph state.
+
+\subsection{Discord Notifications}
+
+When the autonomous agent encounters situations requiring human judgment, it uses \texttt{FLAG\_FOR\_REVIEW} which:
+\begin{enumerate}
+    \item Logs the flag to the agent\_actions table
+    \item Publishes a notification to Redis pub/sub
+    \item Discord bot receives and posts formatted message to configured channel
+\end{enumerate}
+
+This ensures flagged items receive attention rather than being silently logged.
+
+\subsection{Action Logging}
+
+All autonomous actions are recorded in the \texttt{agent\_actions} table:
+
+\begin{lstlisting}[language=SQL]
+CREATE TABLE agent_actions (
+    id TEXT PRIMARY KEY,
+    timestamp TIMESTAMP DEFAULT NOW(),
+    action_type TEXT NOT NULL,  -- link_document, create_task, etc.
+    source TEXT NOT NULL,       -- agent, trigger, user
+    summary TEXT,
+    details JSONB DEFAULT '{}',
+    status TEXT DEFAULT 'completed',
+    error TEXT
+);
+\end{lstlisting}
+
+The web dashboard provides a dedicated Agent Log page for reviewing action history with filtering by status and source.
+
+\section{Executive Function Layer}
+\label{sec:executive}
+
+\subsection{Motivation}
+
+Not all moments are equally suited for interruptions. A user in deep focus should not be disturbed for routine notifications, while someone in fragmented attention mode may welcome task suggestions. The executive function layer models user cognitive state and manages interruptions accordingly.
+
+\subsection{Operating Modes}
+
+The system defines four operating modes based on cognitive load theory:
+
+\begin{table}[t]
+\centering
+\caption{Operating modes and their characteristics.}
+\label{tab:operating_modes}
+\begin{tabular}{lp{6cm}l}
+\toprule
+\textbf{Mode} & \textbf{Description} & \textbf{Interruption Level} \\
+\midrule
+DEEP\_WORK & Focused cognitive work requiring sustained attention & Minimal (urgent only) \\
+SHALLOW & Administrative tasks, email, routine work & Moderate \\
+FRAGMENTED & Interrupted attention, context switching & Open \\
+RECOVERY & Rest, breaks, low cognitive capacity & Low priority only \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{State Estimation}
+
+The State Estimator infers current operating mode from multiple signals:
+
+\begin{lstlisting}[language=Python]
+@dataclass
+class ContinuousSignals:
+    calendar_status: str      # busy, free, focus_time
+    recent_app_switches: int  # context switch frequency
+    time_of_day: str         # morning, afternoon, evening
+    day_of_week: str         # weekday, weekend
+    pending_urgent_items: int
+    energy_level: float      # estimated 0-1
+\end{lstlisting}
+
+\subsection{Interruption Firewall}
+
+The Interruption Firewall filters incoming notifications based on current mode:
+
+\begin{lstlisting}[language=Python]
+class InterruptionFirewall:
+    async def should_interrupt(
+        self,
+        urgency: str,  # low, normal, high, urgent
+        source: str    # email, calendar, agent, etc.
+    ) -> tuple[bool, str]:
+        """Returns (should_interrupt, reason)"""
+        mode = await self.get_current_mode()
+        rules = ModeRules.get_rules(mode)
+
+        if urgency == "urgent":
+            return True, "Urgent items always interrupt"
+        if mode == OperatingMode.DEEP_WORK:
+            return False, "Deep work mode - queued for later"
+        # ... mode-specific logic
+\end{lstlisting}
+
+Items blocked by the firewall are queued and surfaced during appropriate moments (e.g., mode transitions, scheduled review times).
+
+\subsection{Context Packs}
+
+Context Packs provide pre-assembled context for different operating modes, reducing the cognitive overhead of task switching:
+
+\begin{lstlisting}[language=Python]
+@dataclass
+class ContextPack:
+    mode: OperatingMode
+    relevant_tasks: list[Task]
+    active_projects: list[Project]
+    upcoming_events: list[Event]
+    recent_communications: list[Email]
+    suggested_actions: list[str]
+\end{lstlisting}
 
 \section{Semantic Graph Construction}
 \label{sec:graph}
@@ -405,6 +606,25 @@ MERGE (sender)-[r:WORKS_WITH]->(recipient)
 ON CREATE SET r.interaction_count = 1
 ON MATCH SET r.interaction_count = r.interaction_count + 1
 \end{lstlisting}
+
+\subsection{Autonomous Link Creation}
+
+The autonomous agent creates links based on name matching:
+
+\begin{lstlisting}[language=SQL]
+-- Documents matching project names (4+ char minimum)
+MATCH (d:Document), (p:Project)
+WHERE NOT (d)-[:BELONGS_TO|REFERENCES]->(p)
+  AND (
+    (size(p.title) >= 4 AND
+     toLower(d.name) CONTAINS toLower(p.title))
+    OR (size(d.name) >= 4 AND
+        toLower(p.title) CONTAINS toLower(d.name))
+  )
+RETURN d.drive_id, d.name, p.id, p.title
+\end{lstlisting}
+
+Similar queries identify repository-project matches, task-project matches, and project-goal matches.
 
 \subsection{Semantic Chunk Analysis}
 
@@ -469,13 +689,23 @@ When Drive files change, the system automatically re-indexes by extracting conte
 
 \subsection{Trigger Types}
 
-The system supports three trigger categories:
+The system supports four trigger categories:
 
-\paragraph{Scheduled Triggers:} APScheduler provides cron-based scheduling for morning briefings (8:00 AM), evening reviews (6:00 PM), and hourly monitoring (9 AM--6 PM).
+\paragraph{Scheduled Triggers:} APScheduler provides cron-based scheduling for:
+\begin{itemize}
+    \item Morning briefings (8:00 AM)
+    \item Evening reviews (6:00 PM)
+    \item Hourly monitoring (9 AM--6 PM)
+    \item Overdue task checks (9:30 AM)
+    \item GitHub sync (every 4 hours)
+    \item Drive polling (every 30 minutes)
+\end{itemize}
 
 \paragraph{Event-Driven Triggers:} Redis pub/sub enables reactive processing for new emails, calendar changes, task updates, and Drive modifications.
 
-\paragraph{User-Initiated Triggers:} Direct interaction via CLI, Discord, or REST API.
+\paragraph{Autonomous Triggers:} The autonomous agent runs on its own schedule (default: every 15 minutes) for proactive graph maintenance.
+
+\paragraph{User-Initiated Triggers:} Direct interaction via CLI, Discord, web dashboard, or REST API.
 
 \subsection{Approval Workflow}
 
@@ -484,11 +714,63 @@ High-risk actions follow a staged approval process:
 \begin{enumerate}
     \item Agent proposes action (e.g., send email)
     \item Action staged in Redis with metadata
-    \item Notification published to Discord
+    \item Notification published to Discord with approve/reject buttons
     \item User reviews and approves/edits/rejects
     \item On approval: execute action, record decision trace
     \item On rejection: store feedback for learning
 \end{enumerate}
+
+\subsection{Notification Routing}
+
+Notifications are routed through the Interruption Firewall before delivery:
+
+\begin{enumerate}
+    \item Notification generated (email analysis, agent flag, etc.)
+    \item Firewall evaluates against current operating mode
+    \item If allowed: publish to Redis pub/sub for Discord delivery
+    \item If blocked: queue for later delivery with reason
+\end{enumerate}
+
+\section{Web Dashboard}
+\label{sec:web}
+
+\subsection{Overview}
+
+The web dashboard provides a comprehensive interface for system interaction and monitoring, built with FastAPI and Jinja2 templates.
+
+\subsection{Pages}
+
+\paragraph{Dashboard (Home):} Overview of system state including pending tasks, upcoming events, recent emails requiring action, and quick stats.
+
+\paragraph{Tasks:} Task management with inline editing, status updates, energy cost assignment, due date setting, and project/goal linking.
+
+\paragraph{Projects:} Project management with task rollup, progress tracking, and goal association.
+
+\paragraph{Goals:} Strategic goal management with project linkage and progress visualization.
+
+\paragraph{Documents:} Document browser with semantic search, topic filtering, and project linking.
+
+\paragraph{Graph:} Interactive graph visualization using vis.js with:
+\begin{itemize}
+    \item Node type filtering (Person, Project, Task, Document, Goal, Topic, Concept, Repository)
+    \item Configurable node limits
+    \item Dynamic filtering: single type shows all nodes, multiple types show only connections between selected types
+    \item Topic/Concept nodes sorted by reference count
+\end{itemize}
+
+\paragraph{Agent Log:} Autonomous agent action history with:
+\begin{itemize}
+    \item Action timeline (link\_document, link\_repository, create\_task, flag\_for\_review, etc.)
+    \item Filtering by status (completed, failed, pending) and source (agent, trigger, user)
+    \item Statistics: total actions, last 24h, failed count
+    \item Action type and source breakdowns
+    \item Manual ``Run Cycle Now'' button for testing
+    \item Autonomous agent status indicator
+\end{itemize}
+
+\paragraph{State:} Operating mode management and interruption firewall status with queued item display.
+
+\paragraph{Settings:} Configuration management for autonomous agent interval, integration settings, and user preferences.
 
 \section{Evaluation}
 \label{sec:evaluation}
@@ -501,8 +783,16 @@ The current deployment demonstrates the following characteristics:
 \begin{itemize}
     \item 153,108 documents indexed from Google Drive
     \item 3,372 document chunks with embeddings
-    \item 50 documents with deep semantic analysis
-    \item $\approx$8,000 lines of application code
+    \item 50+ documents with deep semantic analysis
+    \item 5 GitHub repositories indexed
+    \item $\approx$12,000 lines of application code
+\end{itemize}
+
+\paragraph{Autonomous Agent Activity:}
+\begin{itemize}
+    \item Average 5 actions per 15-minute cycle
+    \item Action types: link\_document (most common), link\_repository, link\_project\_to\_goal, create\_task, flag\_for\_review (rare)
+    \item Near-zero flag\_for\_review rate with optimized prompt
 \end{itemize}
 
 \paragraph{Performance:}
@@ -511,6 +801,7 @@ The current deployment demonstrates the following characteristics:
     \item Semantic search: $<$100ms for top-10 results
     \item Graph queries: $<$50ms for typical traversals
     \item Agent response: 3--15s depending on tool usage
+    \item Autonomous cycle: 5--10s total
 \end{itemize}
 
 \subsection{Qualitative Assessment}
@@ -521,11 +812,13 @@ The system successfully demonstrates:
     \item \textbf{Relationship Inference}: WORKS\_WITH relationships accurately reflect collaboration patterns
     \item \textbf{Risk Stratification}: Approval workflow prevents unintended actions while allowing autonomous task creation
     \item \textbf{Semantic Search}: Document retrieval surfaces relevant content across diverse file types
+    \item \textbf{Proactive Linking}: Autonomous agent successfully identifies and creates document-project, repository-project, and project-goal links without user intervention
+    \item \textbf{Graph Health}: Orphaned nodes are identified and linked, stale items are flagged
 \end{enumerate}
 
 \subsection{Limitations}
 
-Current limitations include: (1) decision traces captured but not yet used for fine-tuning, (2) Gmail and Calendar use polling rather than push notifications, (3) limited automated testing, and (4) single-user deployment only.
+Current limitations include: (1) decision traces captured but not yet used for fine-tuning, (2) Gmail and Calendar use polling rather than push notifications, (3) limited automated testing, (4) single-user deployment only, and (5) executive function layer signals are partially simulated pending full integration.
 
 \section{Discussion and Future Work}
 \label{sec:discussion}
@@ -538,6 +831,10 @@ Several architectural decisions warrant discussion:
 
 \paragraph{Risk Stratification:} The three-tier risk model represents a pragmatic balance between autonomy and control. Future work may explore dynamic risk assessment based on context and learned user preferences.
 
+\paragraph{Autonomous Orchestration:} The decision to implement proactive graph management as a separate always-running agent (rather than integrating into reactive flows) provides clear separation of concerns and predictable behavior.
+
+\paragraph{Externalized Prompts:} Storing prompts as markdown files rather than embedding in code enables rapid iteration on agent behavior. This is particularly valuable for the autonomous agent where prompt engineering significantly affects link creation vs. flagging ratios.
+
 \paragraph{LLM Selection:} Using Together.ai provides cost-effective access to capable models. The hierarchical architecture enables future experimentation with model specialization.
 
 \subsection{Future Directions}
@@ -545,11 +842,13 @@ Several architectural decisions warrant discussion:
 Several extensions are planned:
 \begin{enumerate}
     \item Behavioral fine-tuning using captured decision traces
-    \item Energy management implementation for cognitive load awareness
-    \item Push notifications via Google Cloud Pub/Sub
+    \item Push notifications via Google Cloud Pub/Sub for Gmail/Calendar
     \item Multi-modal input processing (images, attachments)
     \item Collaborative features for team environments
     \item Granular privacy controls
+    \item Enhanced executive function layer with physiological signals (calendar patterns, typing cadence)
+    \item Cross-entity semantic linking (email content to documents, calendar events to projects)
+    \item Agent self-improvement through prompt evolution based on action outcomes
 \end{enumerate}
 
 \subsection{Ethical Considerations}
@@ -561,16 +860,18 @@ Personal agent systems raise important ethical questions around data privacy (br
 
 \cognitex{} demonstrates a viable architecture for personal AI agents that balance autonomous capability with human oversight. The hybrid knowledge representation---combining property graphs, vector embeddings, and session caching---provides a robust foundation for personal information management. The risk-stratified tool system enables meaningful automation while preserving user agency for consequential actions.
 
-Key contributions include the decision trace framework for learning from user feedback, the semantic graph construction pipeline for automatic relationship inference, and the multi-modal trigger system supporting both proactive and reactive agent behavior.
+Key contributions include the autonomous graph orchestration layer for proactive graph maintenance, the executive function layer for cognitive state awareness, the externalized prompt architecture for rapid behavior iteration, and the comprehensive web dashboard for system visibility.
 
-While significant work remains---particularly in leveraging captured feedback for behavioral improvement---the current implementation provides a functional reference architecture for trustworthy personal AI systems. We release the complete codebase to support further research in this domain.
+The autonomous agent's ability to continuously identify and create connections between documents, repositories, tasks, projects, and goals---while appropriately flagging ambiguous cases for human review---represents a significant step toward truly assistive personal AI that reduces cognitive overhead without sacrificing user control.
+
+While significant work remains---particularly in leveraging captured feedback for behavioral improvement and expanding the executive function layer---the current implementation provides a functional reference architecture for trustworthy personal AI systems. We release the complete codebase to support further research in this domain.
 
 \section*{Acknowledgments}
 
 This work was developed independently with assistance from Claude (Anthropic) for code generation and architectural refinement.
 
 \bibliographystyle{plainnat}
-\begin{thebibliography}{9}
+\begin{thebibliography}{10}
 
 \bibitem[Dong et al.(2014)]{dong2014knowledge}
 Dong, X., Gabrilovich, E., Heitz, G., Horn, W., Lao, N., Murphy, K., Strohmann, T., Sun, S., \& Zhang, W. (2014).
@@ -617,6 +918,11 @@ Yao, S., Zhao, J., Yu, D., Du, N., Shafran, I., Narasimhan, K., \& Cao, Y. (2022
 \newblock ReAct: Synergizing reasoning and acting in language models.
 \newblock \emph{arXiv preprint arXiv:2210.03629}.
 
+\bibitem[Yorke-Smith et al.(2012)]{yorke2012proactive}
+Yorke-Smith, N., Saadati, S., Myers, K.~L., \& Morley, D.~N. (2012).
+\newblock The design of a proactive personal agent for task management.
+\newblock \emph{International Journal on Artificial Intelligence Tools}, 21(01), 1250004.
+
 \end{thebibliography}
 
 \appendix
@@ -644,9 +950,14 @@ GOOGLE_CLIENT_SECRET=<secret>
 # Discord
 DISCORD_BOT_TOKEN=<secret>
 DISCORD_CHANNEL_ID=<channel_id>
+DISCORD_USER_ID=<user_id>  # For DM notifications
 
 # GitHub
 GITHUB_TOKEN=<secret>
+
+# Autonomous Agent
+AUTONOMOUS_AGENT_ENABLED=true
+AUTONOMOUS_AGENT_INTERVAL_MINUTES=15
 \end{lstlisting}
 
 \section{CLI Command Reference}
@@ -657,6 +968,7 @@ GITHUB_TOKEN=<secret>
 cognitex status              # Configuration and memory stats
 cognitex auth                # OAuth2 authentication flow
 cognitex graph               # Neo4j statistics
+cognitex web                 # Start web dashboard
 
 # Data Synchronization
 cognitex sync                # Incremental Gmail sync
@@ -695,6 +1007,12 @@ CREATE CONSTRAINT task_id_unique
   FOR (t:Task) REQUIRE t.id IS UNIQUE;
 CREATE CONSTRAINT document_drive_id_unique
   FOR (d:Document) REQUIRE d.drive_id IS UNIQUE;
+CREATE CONSTRAINT repository_id_unique
+  FOR (r:Repository) REQUIRE r.id IS UNIQUE;
+CREATE CONSTRAINT project_id_unique
+  FOR (p:Project) REQUIRE p.id IS UNIQUE;
+CREATE CONSTRAINT goal_id_unique
+  FOR (g:Goal) REQUIRE g.id IS UNIQUE;
 CREATE CONSTRAINT chunk_id_unique
   FOR (c:Chunk) REQUIRE c.id IS UNIQUE;
 CREATE CONSTRAINT topic_name_unique
@@ -706,7 +1024,70 @@ CREATE CONSTRAINT concept_name_unique
 CREATE INDEX person_name FOR (p:Person) ON (p.name);
 CREATE INDEX email_date FOR (e:Email) ON (e.date);
 CREATE INDEX task_status FOR (t:Task) ON (t.status);
+CREATE INDEX project_status FOR (p:Project) ON (p.status);
+CREATE INDEX goal_status FOR (g:Goal) ON (g.status);
 CREATE INDEX chunk_analyzed FOR (c:Chunk) ON (c.analyzed);
 \end{lstlisting}
+
+\section{Autonomous Agent Prompt Template}
+\label{app:prompt}
+
+The autonomous agent uses an externalized prompt template stored at \texttt{src/cognitex/prompts/autonomous\_agent.md}. Key sections include:
+
+\begin{lstlisting}[caption={Autonomous agent prompt structure (abbreviated)}]
+# Autonomous Agent System Prompt
+
+You are an autonomous agent managing a knowledge graph.
+Your PRIMARY job is to CREATE CONNECTIONS between
+related entities. You have FULL AUTONOMY - act decisively.
+
+## CRITICAL RULES:
+1. Every item in "Connection Opportunities" MUST result
+   in a LINK action - these are pre-validated matches
+2. NEVER use FLAG_FOR_REVIEW for items already in
+   Connection Opportunities
+3. FLAG_FOR_REVIEW is ONLY for completely ambiguous
+   situations not covered by connection opportunities
+
+## Current State:
+- Recent changes (24h): {total_changes_24h}
+- Connection opportunities: {connection_opportunities}
+...
+
+## Available Actions:
+LINK_DOCUMENT, LINK_REPOSITORY, LINK_TASK,
+LINK_PROJECT_TO_GOAL, CREATE_TASK, FLAG_FOR_REVIEW
+
+## Instructions:
+- Convert EVERY connection opportunity into a LINK action
+- For projects with no tasks, use CREATE_TASK
+- Maximum 5 actions per cycle
+- Return JSON array ONLY, no explanation
+\end{lstlisting}
+
+\section{Agent Action Types}
+\label{app:actions}
+
+\begin{table}[h]
+\centering
+\caption{Autonomous agent action types logged to agent\_actions table.}
+\begin{tabular}{ll}
+\toprule
+\textbf{Action Type} & \textbf{Description} \\
+\midrule
+autonomous\_cycle & Cycle completion summary \\
+link\_document & Document linked to project \\
+link\_repository & Repository linked to project \\
+link\_task & Task linked to project \\
+link\_project\_to\_goal & Project linked to goal \\
+create\_task & New task created \\
+update\_project\_status & Project status changed \\
+flag\_for\_review & Item flagged for human review \\
+notification\_sent & Discord notification delivered \\
+autonomous\_agent\_started & Agent loop started \\
+autonomous\_agent\_stopped & Agent loop stopped \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \end{document}
