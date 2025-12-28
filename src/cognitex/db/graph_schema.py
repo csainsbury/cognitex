@@ -77,24 +77,31 @@ async def create_person(
     name: str | None = None,
     org: str | None = None,
     role: str | None = None,
+    is_user: bool = False,
 ) -> dict:
-    """Create or update a Person node."""
+    """Create or update a Person node.
+
+    Args:
+        is_user: If True, marks this person as the authenticated user (for writing style learning)
+    """
     query = """
     MERGE (p:Person {email: $email})
     ON CREATE SET
         p.name = $name,
         p.org = $org,
         p.role = $role,
+        p.is_user = $is_user,
         p.created_at = datetime(),
         p.updated_at = datetime()
     ON MATCH SET
         p.name = COALESCE($name, p.name),
         p.org = COALESCE($org, p.org),
         p.role = COALESCE($role, p.role),
+        p.is_user = CASE WHEN $is_user THEN true ELSE p.is_user END,
         p.updated_at = datetime()
     RETURN p
     """
-    result = await session.run(query, email=email, name=name, org=org, role=role)
+    result = await session.run(query, email=email, name=name, org=org, role=role, is_user=is_user)
     record = await result.single()
     return dict(record["p"]) if record else {}
 

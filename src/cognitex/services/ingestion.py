@@ -38,23 +38,32 @@ async def ingest_email_to_graph(email_data: dict) -> None:
     Args:
         email_data: Email metadata dict from extract_email_metadata()
     """
+    # Get authenticated user's email to mark "self" in the graph
+    user_email = await get_user_email()
+    user_email_lower = user_email.lower() if user_email else None
+
     async for session in get_neo4j_session():
         # Create sender Person node
         if email_data["sender_email"]:
+            sender_email_lower = email_data["sender_email"].lower()
+            is_self = (sender_email_lower == user_email_lower) if user_email_lower else False
             await create_person(
                 session,
                 email=email_data["sender_email"],
                 name=email_data["sender_name"] or None,
+                is_user=is_self,
             )
 
         # Create recipient Person nodes
         for name, email_addr in email_data.get("to", []):
             if email_addr:
-                await create_person(session, email=email_addr, name=name or None)
+                is_self = (email_addr.lower() == user_email_lower) if user_email_lower else False
+                await create_person(session, email=email_addr, name=name or None, is_user=is_self)
 
         for name, email_addr in email_data.get("cc", []):
             if email_addr:
-                await create_person(session, email=email_addr, name=name or None)
+                is_self = (email_addr.lower() == user_email_lower) if user_email_lower else False
+                await create_person(session, email=email_addr, name=name or None, is_user=is_self)
 
         # Create Email node
         await create_email(

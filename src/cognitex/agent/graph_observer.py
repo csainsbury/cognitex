@@ -500,21 +500,30 @@ class GraphObserver:
         Fetch recent emails sent by the user to establish writing style.
 
         These samples allow the agent to mimic the user's voice when drafting
-        emails or other communications.
+        emails or other communications. Uses snippet as fallback if body is not stored.
         """
+        # Get user email for fallback matching
+        from cognitex.services.ingestion import get_user_email
+        user_email = await get_user_email()
+
         query = """
         MATCH (e:Email)-[:SENT_BY]->(p:Person)
-        WHERE p.is_user = true
-          AND e.body IS NOT NULL
-          AND size(e.body) > 50
-        RETURN e.body as body
+        WHERE (p.is_user = true OR p.email = $user_email)
+        WITH e, coalesce(e.body, e.snippet) as content
+        WHERE content IS NOT NULL AND size(content) > 20
+        RETURN content as body
         ORDER BY e.date DESC
         LIMIT $limit
         """
         try:
-            result = await self.session.run(query, {"limit": limit})
+            result = await self.session.run(query, {"limit": limit, "user_email": user_email})
             data = await result.data()
-            return [row["body"] for row in data if row.get("body")]
+            samples = [row["body"] for row in data if row.get("body")]
+
+            if not samples:
+                logger.info("No writing samples found for user")
+                return []
+            return samples
         except Exception as e:
             logger.warning("Failed to get user writing samples", error=str(e))
             return []
