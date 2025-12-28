@@ -519,18 +519,24 @@ class GraphObserver:
             logger.warning("Failed to get user writing samples", error=str(e))
             return []
 
-    async def get_actionable_emails(self, limit: int = 10) -> list[dict]:
+    async def get_actionable_emails(self, limit: int = 10, days_back: int = 7) -> list[dict]:
         """
         Get emails that likely require a response or action.
 
         Finds incoming emails marked as actionable/urgent that haven't been
         addressed yet (no reply sent, no task created, no draft created).
+
+        Filters:
+        - Only emails from the last N days (default 7)
+        - Only actionable/urgent classification (not automated/marketing/newsletter)
+        - Excludes emails already replied to or with drafts
+        - Excludes emails sent by the user
         """
         query = """
         MATCH (e:Email)
-        WHERE (e.classification IN ['actionable', 'urgent']
-               OR e.action_required = true
-               OR e.needs_response = true)
+        WHERE e.classification IN ['actionable', 'urgent']
+          AND e.date >= datetime() - duration({days: $days_back})
+          AND NOT e.classification IN ['automated', 'marketing', 'newsletter', 'informational']
           AND NOT (e)<-[:REPLY_TO]-(:Email)
           AND NOT (e)<-[:REPLY_TO]-(:EmailDraft)
           AND NOT (e)<-[:DERIVED_FROM]-(:Task)
@@ -556,7 +562,7 @@ class GraphObserver:
         LIMIT $limit
         """
         try:
-            result = await self.session.run(query, {"limit": limit})
+            result = await self.session.run(query, {"limit": limit, "days_back": days_back})
             data = await result.data()
             return data
         except Exception as e:
