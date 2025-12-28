@@ -233,8 +233,38 @@ class CognitexBot(commands.Bot):
                     if new_approval_ids:
                         await self._send_approvals_by_ids(message.channel, new_approval_ids)
 
+                    # Log the Discord interaction
+                    try:
+                        from cognitex.agent.action_log import log_action
+                        await log_action(
+                            "discord_chat",
+                            "discord",
+                            summary=f"User: {content[:80]}... → Response: {response[:80] if response else 'None'}...",
+                            details={
+                                "user_message": content[:500],
+                                "response_length": len(response) if response else 0,
+                                "approvals_created": len(new_approval_ids) if new_approval_ids else 0,
+                                "author": str(message.author),
+                                "channel": str(message.channel),
+                            }
+                        )
+                    except Exception as log_err:
+                        logger.warning("Failed to log Discord action", error=str(log_err))
+
                 except Exception as e:
                     logger.error("Agent chat failed", error=str(e))
+                    # Log failed Discord interaction
+                    try:
+                        from cognitex.agent.action_log import log_action
+                        await log_action(
+                            "discord_chat",
+                            "discord",
+                            summary=f"Failed to process: {content[:80]}...",
+                            status="failed",
+                            error=str(e)
+                        )
+                    except Exception:
+                        pass
                     await message.channel.send(
                         f"Sorry, I encountered an error: {str(e)[:100]}"
                     )

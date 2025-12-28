@@ -1,0 +1,353 @@
+{% extends "base.html" %}
+
+{% block title %}Agent Log - Cognitex{% endblock %}
+
+{% block content %}
+<h1>Agent Log</h1>
+
+<!-- Autonomous Agent Status -->
+<div class="card" style="margin-bottom: 1rem; padding: 1rem;">
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div>
+            <strong>Autonomous Agent</strong>
+            <span id="agent-status" style="margin-left: 1rem; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.85rem;">
+                Loading...
+            </span>
+            <span id="agent-interval" style="margin-left: 0.5rem; color: #666; font-size: 0.85rem;"></span>
+        </div>
+        <div>
+            <button class="btn btn-primary" onclick="runAgentCycle()" id="run-cycle-btn">
+                Run Cycle Now
+            </button>
+        </div>
+    </div>
+    <div id="cycle-result" style="margin-top: 0.5rem; font-size: 0.85rem; display: none;"></div>
+</div>
+
+<div class="two-col">
+    <div style="flex: 2;">
+        <!-- Recent Actions -->
+        <div class="card">
+            <div class="card-header">
+                <h2>Recent Agent Actions</h2>
+                <div style="display: flex; gap: 0.5rem;">
+                    <select id="filter-status" onchange="filterActions()">
+                        <option value="">All Status</option>
+                        <option value="completed">Completed</option>
+                        <option value="failed">Failed</option>
+                        <option value="pending">Pending</option>
+                    </select>
+                    <select id="filter-source" onchange="filterActions()">
+                        <option value="">All Sources</option>
+                        <option value="trigger">Trigger</option>
+                        <option value="discord">Discord</option>
+                        <option value="email">Email</option>
+                        <option value="chat">Chat</option>
+                    </select>
+                </div>
+            </div>
+
+            {% if actions %}
+            <table class="action-table">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Action</th>
+                        <th>Source</th>
+                        <th>Summary</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for action in actions %}
+                    <tr class="action-row"
+                        data-status="{{ action.status }}"
+                        data-source="{{ action.source }}"
+                        onclick="showActionDetails('{{ action.id }}')">
+                        <td style="white-space: nowrap;">
+                            <span style="font-size: 0.85rem;">{{ action.timestamp[:16] if action.timestamp else '-' }}</span>
+                        </td>
+                        <td>
+                            <span class="action-badge action-{{ action.action_type }}">{{ action.action_type | replace('_', ' ') }}</span>
+                        </td>
+                        <td>
+                            <span class="source-badge source-{{ action.source }}">{{ action.source }}</span>
+                        </td>
+                        <td style="max-width: 400px; overflow: hidden; text-overflow: ellipsis;">
+                            {% if action.summary %}
+                            <span style="font-size: 0.85rem; color: #444;">
+                                {{ action.summary[:80] }}{% if action.summary|length > 80 %}...{% endif %}
+                            </span>
+                            {% else %}
+                            <span style="color: #999;">-</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <span class="status-badge status-{{ action.status }}">{{ action.status }}</span>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p class="empty">No agent actions recorded yet. Actions will appear here as the agent processes emails, Discord messages, scheduled triggers, etc.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <div>
+        <!-- Stats -->
+        <div class="card">
+            <h2>Statistics</h2>
+            <div class="stats" style="margin-bottom: 0;">
+                <div class="stat">
+                    <div class="stat-value">{{ stats.total }}</div>
+                    <div class="stat-label">Total Actions</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value">{{ stats.last_24h }}</div>
+                    <div class="stat-label">Last 24h</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value" style="color: {% if stats.failed > 0 %}#c62828{% else %}#2e7d32{% endif %};">{{ stats.failed }}</div>
+                    <div class="stat-label">Failed</div>
+                </div>
+            </div>
+            <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #eee;">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+                    <span>Action Types</span>
+                    <strong>{{ stats.action_types }}</strong>
+                </div>
+                <div style="display: flex; justify-content: space-between;">
+                    <span>Sources</span>
+                    <strong>{{ stats.sources }}</strong>
+                </div>
+            </div>
+        </div>
+
+        <!-- Action Type Breakdown -->
+        <div class="card">
+            <h2>By Action Type</h2>
+            {% if action_counts %}
+            <table>
+                <tr><th>Action</th><th>Count</th></tr>
+                {% for action in action_counts %}
+                <tr>
+                    <td><span class="action-badge action-{{ action.action_type }}">{{ action.action_type | replace('_', ' ') }}</span></td>
+                    <td style="text-align: right;">{{ action.count }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% else %}
+            <p class="empty">No actions yet</p>
+            {% endif %}
+        </div>
+
+        <!-- By Source -->
+        <div class="card">
+            <h2>By Source</h2>
+            {% if source_counts %}
+            <table>
+                <tr><th>Source</th><th>Count</th></tr>
+                {% for src in source_counts %}
+                <tr>
+                    <td><span class="source-badge source-{{ src.source }}">{{ src.source }}</span></td>
+                    <td style="text-align: right;">{{ src.count }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% else %}
+            <p class="empty">No sources yet</p>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<!-- Action Detail Modal -->
+<div id="action-modal" class="modal" style="display: none;">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h2>Action Details</h2>
+            <button onclick="hideActionDetails()" style="background: none; border: none; font-size: 1.5rem; cursor: pointer;">&times;</button>
+        </div>
+        <div id="action-details"></div>
+    </div>
+</div>
+
+<style>
+.action-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+.action-table th, .action-table td {
+    padding: 0.75rem;
+    text-align: left;
+    border-bottom: 1px solid #eee;
+}
+.action-row {
+    cursor: pointer;
+}
+.action-row:hover {
+    background: #f8f9fa;
+}
+
+.source-badge, .action-badge, .status-badge {
+    display: inline-block;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    font-weight: 500;
+}
+
+.source-badge { background: #e3f2fd; color: #1565c0; }
+.source-badge.source-trigger { background: #e0f7fa; color: #00838f; }
+.source-badge.source-discord { background: #ede7f6; color: #5e35b1; }
+.source-badge.source-email { background: #fff3e0; color: #e65100; }
+.source-badge.source-chat { background: #e8f5e9; color: #2e7d32; }
+
+.action-badge { background: #f3e5f5; color: #7b1fa2; }
+.action-badge.action-morning_briefing { background: #fff8e1; color: #f9a825; }
+.action-badge.action-evening_review { background: #e8eaf6; color: #3949ab; }
+.action-badge.action-discord_chat { background: #ede7f6; color: #5e35b1; }
+.action-badge.action-email_analysis { background: #fff3e0; color: #e65100; }
+.action-badge.action-hourly_check { background: #e0f7fa; color: #00838f; }
+.action-badge.action-overdue_check { background: #fce4ec; color: #c2185b; }
+.action-badge.action-github_sync { background: #eceff1; color: #37474f; }
+.action-badge.action-drive_poll { background: #e8f5e9; color: #2e7d32; }
+.action-badge.action-notification_sent { background: #e3f2fd; color: #1565c0; }
+
+.status-badge { background: #eceff1; color: #546e7a; }
+.status-badge.status-completed { background: #e8f5e9; color: #2e7d32; }
+.status-badge.status-failed { background: #ffebee; color: #c62828; }
+.status-badge.status-pending { background: #fff3e0; color: #e65100; }
+
+.modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.5);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+}
+.modal-content {
+    background: white;
+    padding: 1.5rem;
+    border-radius: 8px;
+    max-width: 600px;
+    width: 90%;
+    max-height: 80vh;
+    overflow-y: auto;
+}
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid #eee;
+}
+</style>
+
+<script>
+function filterActions() {
+    const status = document.getElementById('filter-status').value;
+    const source = document.getElementById('filter-source').value;
+    const rows = document.querySelectorAll('.action-row');
+
+    rows.forEach(row => {
+        const rowStatus = row.getAttribute('data-status');
+        const rowSource = row.getAttribute('data-source');
+        const showStatus = !status || rowStatus === status;
+        const showSource = !source || rowSource === source;
+        row.style.display = (showStatus && showSource) ? '' : 'none';
+    });
+}
+
+function showActionDetails(actionId) {
+    fetch('/agent-log/' + actionId)
+        .then(r => r.text())
+        .then(html => {
+            document.getElementById('action-details').innerHTML = html;
+            document.getElementById('action-modal').style.display = 'flex';
+        });
+}
+
+function hideActionDetails() {
+    document.getElementById('action-modal').style.display = 'none';
+}
+
+document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') hideActionDetails();
+});
+
+// Autonomous agent functions
+async function loadAgentStatus() {
+    try {
+        const response = await fetch('/api/agent/status');
+        const data = await response.json();
+
+        const statusEl = document.getElementById('agent-status');
+        const intervalEl = document.getElementById('agent-interval');
+
+        if (data.enabled) {
+            if (data.running) {
+                statusEl.textContent = 'Running';
+                statusEl.style.background = '#e8f5e9';
+                statusEl.style.color = '#2e7d32';
+            } else {
+                statusEl.textContent = 'Enabled (not running)';
+                statusEl.style.background = '#fff3e0';
+                statusEl.style.color = '#e65100';
+            }
+            intervalEl.textContent = `Every ${data.interval_minutes} minutes`;
+        } else {
+            statusEl.textContent = 'Disabled';
+            statusEl.style.background = '#eceff1';
+            statusEl.style.color = '#546e7a';
+            intervalEl.textContent = '';
+        }
+    } catch (err) {
+        console.error('Failed to load agent status:', err);
+    }
+}
+
+async function runAgentCycle() {
+    const btn = document.getElementById('run-cycle-btn');
+    const resultEl = document.getElementById('cycle-result');
+
+    btn.disabled = true;
+    btn.textContent = 'Running...';
+    resultEl.style.display = 'none';
+
+    try {
+        const response = await fetch('/api/agent/run-cycle', { method: 'POST' });
+        const data = await response.json();
+
+        if (data.status === 'success') {
+            resultEl.textContent = 'Cycle completed successfully. Refresh to see new actions.';
+            resultEl.style.color = '#2e7d32';
+            // Reload the page after a short delay to show new actions
+            setTimeout(() => location.reload(), 1500);
+        } else {
+            resultEl.textContent = 'Error: ' + (data.error || 'Unknown error');
+            resultEl.style.color = '#c62828';
+        }
+        resultEl.style.display = 'block';
+    } catch (err) {
+        resultEl.textContent = 'Error: ' + err.message;
+        resultEl.style.color = '#c62828';
+        resultEl.style.display = 'block';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Run Cycle Now';
+    }
+}
+
+// Load status on page load
+loadAgentStatus();
+</script>
+{% endblock %}

@@ -522,6 +522,7 @@ async def project_update(
     status: Annotated[str, Form()],
     target_date: Annotated[str | None, Form()] = None,
     description: Annotated[str | None, Form()] = None,
+    goal_id: Annotated[str | None, Form()] = None,
     repository_id: Annotated[str | None, Form()] = None,
     people: Annotated[list[str] | None, Form()] = None,
 ):
@@ -534,6 +535,7 @@ async def project_update(
         status=status,
         target_date=target_date if target_date else None,
         description=description if description else None,
+        goal_id=goal_id if goal_id else "",  # Empty string to unlink
     )
 
     if not project:
@@ -943,23 +945,28 @@ async def get_document_stats() -> dict:
     from cognitex.db.postgres import get_session
     from sqlalchemy import text
 
-    doc_count = 0
-    chunk_count = 0
+    stats = {"documents": 0, "analyzed": 0, "topics": 0, "concepts": 0}
 
-    # Get document count from Neo4j
+    # Get counts from Neo4j
     async for session in get_neo4j_session():
-        result = await session.run("MATCH (d:Document) WHERE d.indexed = true RETURN count(d) as count")
-        data = await result.data()
-        doc_count = data[0]["count"] if data else 0
+        result = await session.run("""
+            MATCH (d:Document)
+            WITH count(d) as total,
+                 count(CASE WHEN d.summary IS NOT NULL THEN 1 END) as analyzed
+            OPTIONAL MATCH (t:Topic)
+            WITH total, analyzed, count(DISTINCT t) as topics
+            OPTIONAL MATCH (c:Concept)
+            RETURN total, analyzed, topics, count(DISTINCT c) as concepts
+        """)
+        data = await result.single()
+        if data:
+            stats["documents"] = data["total"]
+            stats["analyzed"] = data["analyzed"]
+            stats["topics"] = data["topics"]
+            stats["concepts"] = data["concepts"]
         break
 
-    # Get chunk count from postgres
-    async for session in get_session():
-        chunk_result = await session.execute(text("SELECT COUNT(*) FROM document_chunks"))
-        chunk_count = chunk_result.scalar() or 0
-        break
-
-    return {"documents": doc_count, "chunks": chunk_count}
+    return stats
 
 
 async def get_topics(limit: int = 50) -> list[dict]:
@@ -967,9 +974,10 @@ async def get_topics(limit: int = 50) -> list[dict]:
     from cognitex.db.neo4j import get_neo4j_session
 
     async for session in get_neo4j_session():
+        # Look for topics linked to Documents (from semantic-analyze)
         query = """
-        MATCH (t:Topic)<-[:HAS_TOPIC]-(c:Chunk)
-        WITH t, count(DISTINCT c) as count
+        MATCH (t:Topic)<-[:COVERS]-(d:Document)
+        WITH t, count(DISTINCT d) as count
         RETURN t.name as name, count
         ORDER BY count DESC
         LIMIT $limit
@@ -984,9 +992,10 @@ async def get_concepts(limit: int = 50) -> list[dict]:
     from cognitex.db.neo4j import get_neo4j_session
 
     async for session in get_neo4j_session():
+        # Look for concepts linked to Documents (from semantic-analyze)
         query = """
-        MATCH (c:Concept)<-[:MENTIONS]-(chunk:Chunk)
-        WITH c, count(DISTINCT chunk) as count
+        MATCH (c:Concept)<-[:ABOUT]-(d:Document)
+        WITH c, count(DISTINCT d) as count
         RETURN c.name as name, count
         ORDER BY count DESC
         LIMIT $limit
@@ -997,16 +1006,18 @@ async def get_concepts(limit: int = 50) -> list[dict]:
 
 
 async def get_recent_documents(limit: int = 10) -> list[dict]:
-    """Get recently indexed documents from Neo4j."""
+    """Get recently analyzed documents from Neo4j."""
     from cognitex.db.neo4j import get_neo4j_session
 
     async for session in get_neo4j_session():
+        # Get documents that have been analyzed (have summary)
         result = await session.run("""
             MATCH (d:Document)
-            WHERE d.indexed = true
+            WHERE d.summary IS NOT NULL
             RETURN d.drive_id as id, d.drive_id as drive_id, d.name as name,
-                   d.folder_path as folder_path, d.indexed_at as indexed_at
-            ORDER BY d.indexed_at DESC
+                   d.folder_path as folder_path, d.analyzed_at as analyzed_at,
+                   d.summary as summary
+            ORDER BY d.analyzed_at DESC
             LIMIT $limit
         """, {"limit": limit})
         return await result.data()
@@ -1014,79 +1025,134 @@ async def get_recent_documents(limit: int = 10) -> list[dict]:
 
 
 async def search_documents(query: str, limit: int = 20) -> list[dict]:
-    """Search documents by name in Neo4j and text search in postgres."""
+    """Search documents by name, summary, topics, and concepts."""
     from cognitex.db.neo4j import get_neo4j_session
-    from cognitex.db.postgres import get_session
-    from sqlalchemy import text
 
     if not query or len(query) < 2:
         return []
 
     results = []
     seen_drive_ids = set()
+    query_lower = query.lower()
 
-    # First: text search in postgres chunks
-    async for session in get_session():
-        result = await session.execute(text("""
-            SELECT DISTINCT drive_id, content,
-                   ts_rank(to_tsvector('english', content), plainto_tsquery('english', :query)) as rank
-            FROM document_chunks
-            WHERE to_tsvector('english', content) @@ plainto_tsquery('english', :query)
-            ORDER BY rank DESC
-            LIMIT :limit
-        """), {"query": query, "limit": limit})
-        rows = result.fetchall()
+    # Search in Neo4j: document names, summaries, topics, concepts
+    async for session in get_neo4j_session():
+        # Search documents by name or summary
+        doc_result = await session.run("""
+            MATCH (d:Document)
+            WHERE d.summary IS NOT NULL
+              AND (toLower(d.name) CONTAINS $query
+                   OR toLower(d.summary) CONTAINS $query)
+            RETURN d.drive_id as drive_id, d.name as name, d.folder_path as folder_path,
+                   d.summary as snippet
+            ORDER BY d.analyzed_at DESC
+            LIMIT $limit
+        """, {"query": query_lower, "limit": limit})
 
-        for row in rows:
-            drive_id = row[0]
-            if drive_id not in seen_drive_ids:
-                seen_drive_ids.add(drive_id)
-                snippet = row[1][:200] + "..." if len(row[1]) > 200 else row[1]
+        for doc in await doc_result.data():
+            if doc["drive_id"] not in seen_drive_ids:
+                seen_drive_ids.add(doc["drive_id"])
                 results.append({
-                    "id": drive_id,
-                    "drive_id": drive_id,
-                    "name": "",  # Will be filled from Neo4j
-                    "folder_path": "",
-                    "snippet": snippet,
+                    "drive_id": doc["drive_id"],
+                    "name": doc["name"],
+                    "folder_path": doc["folder_path"],
+                    "snippet": doc["snippet"][:200] + "..." if doc["snippet"] and len(doc["snippet"]) > 200 else doc["snippet"],
                     "topics": [],
                     "concepts": []
                 })
-        break
 
-    # Get document metadata from Neo4j
-    if results:
-        drive_ids = [r["drive_id"] for r in results]
-        async for session in get_neo4j_session():
-            # Batch query for all documents
-            doc_result = await session.run("""
-                MATCH (d:Document)
-                WHERE d.drive_id IN $drive_ids
-                RETURN d.drive_id as drive_id, d.name as name, d.folder_path as folder_path
-            """, {"drive_ids": drive_ids})
-            doc_data = {d["drive_id"]: d for d in await doc_result.data()}
+        # Also search by topic/concept names
+        if len(results) < limit:
+            remaining = limit - len(results)
+            topic_result = await session.run("""
+                MATCH (d:Document)-[:COVERS]->(t:Topic)
+                WHERE toLower(t.name) CONTAINS $query
+                  AND d.summary IS NOT NULL
+                RETURN DISTINCT d.drive_id as drive_id, d.name as name,
+                       d.folder_path as folder_path, d.summary as snippet
+                LIMIT $limit
+            """, {"query": query_lower, "limit": remaining})
 
-            for r in results:
-                if r["drive_id"] in doc_data:
-                    r["name"] = doc_data[r["drive_id"]]["name"]
-                    r["folder_path"] = doc_data[r["drive_id"]]["folder_path"]
+            for doc in await topic_result.data():
+                if doc["drive_id"] not in seen_drive_ids:
+                    seen_drive_ids.add(doc["drive_id"])
+                    results.append({
+                        "drive_id": doc["drive_id"],
+                        "name": doc["name"],
+                        "folder_path": doc["folder_path"],
+                        "snippet": doc["snippet"][:200] + "..." if doc["snippet"] and len(doc["snippet"]) > 200 else doc["snippet"],
+                        "topics": [],
+                        "concepts": []
+                    })
 
-            # Get topics for each result
-            for doc in results:
-                topic_result = await session.run("""
-                    MATCH (c:Chunk {drive_id: $drive_id})-[:HAS_TOPIC]->(t:Topic)
-                    RETURN DISTINCT t.name as name LIMIT 5
-                """, {"drive_id": doc["drive_id"]})
-                doc["topics"] = [r["name"] for r in await topic_result.data()]
+        # Get topics and concepts for results
+        for doc in results:
+            topic_result = await session.run("""
+                MATCH (d:Document {drive_id: $drive_id})-[:COVERS]->(t:Topic)
+                RETURN DISTINCT t.name as name LIMIT 5
+            """, {"drive_id": doc["drive_id"]})
+            doc["topics"] = [r["name"] for r in await topic_result.data()]
 
-                # Get concepts
-                concept_result = await session.run("""
-                    MATCH (c:Chunk {drive_id: $drive_id})-[:MENTIONS]->(con:Concept)
-                    RETURN DISTINCT con.name as name LIMIT 5
-                """, {"drive_id": doc["drive_id"]})
-                doc["concepts"] = [r["name"] for r in await concept_result.data()]
-            break
+            concept_result = await session.run("""
+                MATCH (d:Document {drive_id: $drive_id})-[:ABOUT]->(c:Concept)
+                RETURN DISTINCT c.name as name LIMIT 5
+            """, {"drive_id": doc["drive_id"]})
+            doc["concepts"] = [r["name"] for r in await concept_result.data()]
 
-    return results
+        return results
+    return []
+
+
+async def get_documents_by_topic(topic_name: str, limit: int = 20) -> list[dict]:
+    """Get documents linked to a specific topic."""
+    from cognitex.db.neo4j import get_neo4j_session
+
+    async for session in get_neo4j_session():
+        result = await session.run("""
+            MATCH (d:Document)-[:COVERS]->(t:Topic {name: $topic_name})
+            RETURN d.drive_id as drive_id, d.name as name, d.folder_path as folder_path,
+                   d.summary as snippet
+            ORDER BY d.analyzed_at DESC
+            LIMIT $limit
+        """, {"topic_name": topic_name, "limit": limit})
+        docs = await result.data()
+
+        # Get topics and concepts for each doc
+        for doc in docs:
+            doc["topics"] = [topic_name]
+            concept_result = await session.run("""
+                MATCH (d:Document {drive_id: $drive_id})-[:ABOUT]->(c:Concept)
+                RETURN c.name as name LIMIT 5
+            """, {"drive_id": doc["drive_id"]})
+            doc["concepts"] = [r["name"] for r in await concept_result.data()]
+        return docs
+    return []
+
+
+async def get_documents_by_concept(concept_name: str, limit: int = 20) -> list[dict]:
+    """Get documents linked to a specific concept."""
+    from cognitex.db.neo4j import get_neo4j_session
+
+    async for session in get_neo4j_session():
+        result = await session.run("""
+            MATCH (d:Document)-[:ABOUT]->(c:Concept {name: $concept_name})
+            RETURN d.drive_id as drive_id, d.name as name, d.folder_path as folder_path,
+                   d.summary as snippet
+            ORDER BY d.analyzed_at DESC
+            LIMIT $limit
+        """, {"concept_name": concept_name, "limit": limit})
+        docs = await result.data()
+
+        # Get topics and concepts for each doc
+        for doc in docs:
+            doc["concepts"] = [concept_name]
+            topic_result = await session.run("""
+                MATCH (d:Document {drive_id: $drive_id})-[:COVERS]->(t:Topic)
+                RETURN t.name as name LIMIT 5
+            """, {"drive_id": doc["drive_id"]})
+            doc["topics"] = [r["name"] for r in await topic_result.data()]
+        return docs
+    return []
 
 
 @app.get("/documents", response_class=HTMLResponse)
@@ -1105,10 +1171,10 @@ async def documents_page(
     query = None
     if topic:
         query = f"topic:{topic}"
-        results = await search_documents(topic)
+        results = await get_documents_by_topic(topic)
     elif concept:
         query = f"concept:{concept}"
-        results = await search_documents(concept)
+        results = await get_documents_by_concept(concept)
 
     return templates.TemplateResponse(
         "documents.html",
@@ -1154,6 +1220,245 @@ async def documents_search(request: Request, q: str = ""):
         """
 
     return HTMLResponse(html)
+
+
+# -------------------------------------------------------------------
+# Agent Log
+# -------------------------------------------------------------------
+
+
+@app.get("/agent-log", response_class=HTMLResponse)
+async def agent_log_page(request: Request):
+    """Agent action log page - shows all agent actions."""
+    from cognitex.db.postgres import get_session
+    from sqlalchemy import text
+
+    actions = []
+    stats = {"total": 0, "last_24h": 0, "failed": 0, "action_types": 0, "sources": 0}
+    action_counts = []
+    source_counts = []
+
+    try:
+        async for session in get_session():
+            # Ensure the agent_actions table exists
+            try:
+                await session.execute(text("""
+                    CREATE TABLE IF NOT EXISTS agent_actions (
+                        id TEXT PRIMARY KEY,
+                        timestamp TIMESTAMP DEFAULT NOW(),
+                        action_type TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        summary TEXT,
+                        details JSONB DEFAULT '{}',
+                        status TEXT DEFAULT 'completed',
+                        error TEXT
+                    )
+                """))
+                await session.commit()
+            except Exception:
+                pass  # Table may already exist
+
+            # Get recent actions
+            result = await session.execute(text("""
+                SELECT id, timestamp, action_type, source, summary, details, status, error
+                FROM agent_actions
+                ORDER BY timestamp DESC
+                LIMIT 100
+            """))
+            actions = [{
+                "id": row.id,
+                "timestamp": row.timestamp.isoformat() if row.timestamp else None,
+                "action_type": row.action_type,
+                "source": row.source,
+                "summary": row.summary,
+                "details": row.details,
+                "status": row.status,
+                "error": row.error,
+            } for row in result.fetchall()]
+
+            # Get stats
+            stat_result = await session.execute(text("""
+                SELECT
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '24 hours') as last_24h,
+                    COUNT(*) FILTER (WHERE status = 'failed') as failed,
+                    COUNT(DISTINCT action_type) as action_types,
+                    COUNT(DISTINCT source) as sources
+                FROM agent_actions
+            """))
+            stat_row = stat_result.fetchone()
+            if stat_row:
+                stats = {
+                    "total": stat_row.total or 0,
+                    "last_24h": stat_row.last_24h or 0,
+                    "failed": stat_row.failed or 0,
+                    "action_types": stat_row.action_types or 0,
+                    "sources": stat_row.sources or 0,
+                }
+
+            # Action type counts
+            action_result = await session.execute(text("""
+                SELECT action_type, COUNT(*) as count
+                FROM agent_actions
+                GROUP BY action_type
+                ORDER BY count DESC
+            """))
+            action_counts = [{"action_type": row.action_type, "count": row.count}
+                             for row in action_result.fetchall()]
+
+            # Source counts
+            source_result = await session.execute(text("""
+                SELECT source, COUNT(*) as count
+                FROM agent_actions
+                GROUP BY source
+                ORDER BY count DESC
+            """))
+            source_counts = [{"source": row.source, "count": row.count}
+                              for row in source_result.fetchall()]
+            break
+    except Exception as e:
+        logger.warning("Failed to load agent actions", error=str(e))
+
+    return templates.TemplateResponse(
+        "agent_log.html",
+        {
+            "request": request,
+            "actions": actions,
+            "stats": stats,
+            "action_counts": action_counts,
+            "source_counts": source_counts,
+        },
+    )
+
+
+@app.get("/agent-log/{action_id}", response_class=HTMLResponse)
+async def agent_log_detail(action_id: str):
+    """Get action details for modal."""
+    from cognitex.db.postgres import get_session
+    from sqlalchemy import text
+    import json
+
+    async for session in get_session():
+        result = await session.execute(text("""
+            SELECT * FROM agent_actions WHERE id = :action_id
+        """), {"action_id": action_id})
+        row = result.fetchone()
+
+        if not row:
+            return HTMLResponse("<p>Action not found</p>")
+
+        # Format the details
+        status_color = "#2e7d32" if row.status == "completed" else "#c62828"
+        html = f"""
+        <div style="display: grid; gap: 1rem;">
+            <div>
+                <strong>Action Type:</strong> <code>{row.action_type}</code>
+            </div>
+            <div>
+                <strong>Source:</strong> <span style="color: #1565c0;">{row.source}</span>
+            </div>
+            <div>
+                <strong>Status:</strong> <span style="color: {status_color};">{row.status}</span>
+            </div>
+        """
+
+        if row.summary:
+            html += f"""
+            <div>
+                <strong>Summary:</strong>
+                <p style="margin: 0.5rem 0; padding: 0.5rem; background: #f8f9fa; border-radius: 4px;">{row.summary}</p>
+            </div>
+            """
+
+        if row.details:
+            try:
+                details = row.details if isinstance(row.details, dict) else json.loads(row.details)
+                details_str = json.dumps(details, indent=2)
+            except:
+                details_str = str(row.details)
+            html += f"""
+            <div>
+                <strong>Details:</strong>
+                <pre style="margin: 0.5rem 0; padding: 0.5rem; background: #f8f9fa; border-radius: 4px; overflow-x: auto; font-size: 0.85rem; white-space: pre-wrap;">{details_str[:1000]}</pre>
+            </div>
+            """
+
+        if row.error:
+            html += f"""
+            <div>
+                <strong>Error:</strong>
+                <p style="margin: 0.5rem 0; padding: 0.5rem; background: #ffebee; border-radius: 4px; color: #c62828;">{row.error}</p>
+            </div>
+            """
+
+        html += f"""
+            <div style="font-size: 0.85rem; color: #666;">
+                Timestamp: {row.timestamp.isoformat() if row.timestamp else '-'}
+            </div>
+        </div>
+        """
+
+        return HTMLResponse(html)
+
+    return HTMLResponse("<p>Error loading action</p>")
+
+
+# -------------------------------------------------------------------
+# Autonomous Agent
+# -------------------------------------------------------------------
+
+
+@app.post("/api/agent/run-cycle")
+async def run_autonomous_cycle():
+    """Manually trigger an autonomous agent cycle."""
+    try:
+        from cognitex.agent.autonomous import get_autonomous_agent
+        agent = await get_autonomous_agent()
+        result = await agent.run_once()
+        return JSONResponse({"status": "success", "result": result})
+    except Exception as e:
+        logger.error("Failed to run autonomous cycle", error=str(e))
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+
+@app.get("/api/agent/status")
+async def get_autonomous_status():
+    """Get autonomous agent status."""
+    from cognitex.config import get_settings
+    settings = get_settings()
+
+    try:
+        from cognitex.agent.autonomous import get_autonomous_agent
+        agent = await get_autonomous_agent()
+        running = agent._running
+    except Exception:
+        running = False
+
+    return JSONResponse({
+        "enabled": settings.autonomous_agent_enabled,
+        "running": running,
+        "interval_minutes": settings.autonomous_agent_interval_minutes,
+    })
+
+
+@app.post("/api/agent/test-notification")
+async def test_agent_notification():
+    """Test the Discord notification system."""
+    try:
+        from cognitex.agent.tools import SendNotificationTool
+
+        tool = SendNotificationTool()
+        result = await tool.execute(
+            message="**Test Notification**\n\nThis is a test from the autonomous agent notification system.",
+            urgency="normal"
+        )
+
+        if result.success:
+            return JSONResponse({"status": "success", "message": "Notification sent"})
+        else:
+            return JSONResponse({"status": "error", "error": result.error}, status_code=500)
+    except Exception as e:
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
 
 # -------------------------------------------------------------------
@@ -1340,13 +1645,12 @@ async def api_graph_data(
 ):
     """Get graph data for D3.js visualization.
 
-    Args:
-        center: Node ID to center the graph on (format: "type:id", e.g., "person:email@example.com")
-        node_type: Filter by single node type (deprecated, use types)
-        types: Comma-separated list of types to include (e.g., "Person,Task,Goal")
-        depth: How many relationship hops from center node (1-3)
-        limit: Maximum number of nodes to return
-        hide_completed: If true, exclude tasks with status='completed' (default: true)
+    Behavior:
+    - No types selected: Return empty graph
+    - One type selected: Return nodes of that type only (no connections)
+    - Two+ types selected: Return nodes of those types AND connections between them
+
+    Topics and Concepts are sorted by reference count (most connected first).
     """
     from cognitex.db.neo4j import get_neo4j_session
 
@@ -1354,22 +1658,38 @@ async def api_graph_data(
     links = []
     seen_nodes = set()
 
+    # Parse types parameter
+    allowed_types = []
+    if types:
+        allowed_types = [t.strip() for t in types.split(",") if t.strip()]
+    elif node_type:
+        allowed_types = [node_type]
+
+    # No types selected = empty graph
+    if not allowed_types:
+        return JSONResponse({"nodes": [], "links": []})
+
     async for session in get_neo4j_session():
         if center:
             # Parse center node - format is "type:id"
             parts = center.split(":", 1)
             if len(parts) == 2:
                 center_type, center_id = parts
-                # Query centered on specific node
-                query = """
-                MATCH path = (start)-[r*1..$depth]-(end)
-                WHERE (start:Person AND start.email = $center_id)
+                # Query centered on specific node - only show selected types
+                type_list = "['" + "','".join(allowed_types) + "']"
+                query = f"""
+                MATCH path = (start)-[r*1..{min(depth, 3)}]-(end)
+                WHERE ((start:Person AND start.email = $center_id)
                    OR (start:Task AND start.id = $center_id)
                    OR (start:Project AND start.id = $center_id)
                    OR (start:Goal AND start.id = $center_id)
                    OR (start:Document AND start.drive_id = $center_id)
                    OR (start:Email AND start.message_id = $center_id)
                    OR (start:Event AND start.gcal_id = $center_id)
+                   OR (start:Topic AND start.name = $center_id)
+                   OR (start:Concept AND start.name = $center_id))
+                  AND labels(start)[0] IN {type_list}
+                  AND labels(end)[0] IN {type_list}
                 WITH start, end, r, path
                 LIMIT $limit
                 RETURN DISTINCT
@@ -1382,7 +1702,9 @@ async def api_graph_data(
                         WHEN 'Document' THEN start.drive_id
                         WHEN 'Email' THEN start.message_id
                         WHEN 'Event' THEN start.gcal_id
-                        ELSE coalesce(start.id, start.email, start.drive_id)
+                        WHEN 'Topic' THEN start.name
+                        WHEN 'Concept' THEN start.name
+                        ELSE coalesce(start.id, start.email, start.drive_id, start.name)
                     END as start_id,
                     CASE labels(start)[0]
                         WHEN 'Person' THEN coalesce(start.name, start.email)
@@ -1392,6 +1714,8 @@ async def api_graph_data(
                         WHEN 'Document' THEN start.name
                         WHEN 'Email' THEN start.subject
                         WHEN 'Event' THEN start.title
+                        WHEN 'Topic' THEN start.name
+                        WHEN 'Concept' THEN start.name
                         ELSE coalesce(start.title, start.name, start.subject)
                     END as start_label,
                     labels(end)[0] as end_type,
@@ -1403,7 +1727,9 @@ async def api_graph_data(
                         WHEN 'Document' THEN end.drive_id
                         WHEN 'Email' THEN end.message_id
                         WHEN 'Event' THEN end.gcal_id
-                        ELSE coalesce(end.id, end.email, end.drive_id)
+                        WHEN 'Topic' THEN end.name
+                        WHEN 'Concept' THEN end.name
+                        ELSE coalesce(end.id, end.email, end.drive_id, end.name)
                     END as end_id,
                     CASE labels(end)[0]
                         WHEN 'Person' THEN coalesce(end.name, end.email)
@@ -1413,138 +1739,225 @@ async def api_graph_data(
                         WHEN 'Document' THEN end.name
                         WHEN 'Email' THEN end.subject
                         WHEN 'Event' THEN end.title
+                        WHEN 'Topic' THEN end.name
+                        WHEN 'Concept' THEN end.name
                         ELSE coalesce(end.title, end.name, end.subject)
                     END as end_label,
                     type(r[0]) as rel_type
                 """
                 result = await session.run(query, {
                     "center_id": center_id,
-                    "depth": min(depth, 3),
                     "limit": limit * 2,
                 })
+                data = await result.data()
+
+                for row in data:
+                    start_key = f"{row['start_type']}:{row['start_id']}"
+                    if start_key not in seen_nodes and row['start_id']:
+                        seen_nodes.add(start_key)
+                        nodes.append({
+                            "id": start_key,
+                            "type": row["start_type"],
+                            "label": row["start_label"] or row["start_id"] or "Unknown",
+                        })
+
+                    end_key = f"{row['end_type']}:{row['end_id']}"
+                    if end_key not in seen_nodes and row['end_id']:
+                        seen_nodes.add(end_key)
+                        nodes.append({
+                            "id": end_key,
+                            "type": row["end_type"],
+                            "label": row["end_label"] or row["end_id"] or "Unknown",
+                        })
+
+                    if row['start_id'] and row['end_id']:
+                        links.append({
+                            "source": start_key,
+                            "target": end_key,
+                            "type": row["rel_type"],
+                        })
         else:
-            # Overview query - get most connected nodes
-            # Parse types parameter (comma-separated) or fall back to node_type
-            allowed_types = []
-            if types:
-                allowed_types = [t.strip() for t in types.split(",") if t.strip()]
-            elif node_type:
-                allowed_types = [node_type]
+            # Overview query - behavior depends on number of types selected
+            if len(allowed_types) == 1:
+                # Single type: get nodes of that type only, sorted by connections
+                single_type = allowed_types[0]
 
-            # Default interesting types if nothing specified
-            if not allowed_types:
-                allowed_types = ['Person', 'Task', 'Project', 'Goal', 'Email', 'Event', 'Repository', 'Topic', 'Concept', 'Document']
+                # Build completed filter for Task type
+                completed_filter = ""
+                if hide_completed and single_type == 'Task':
+                    completed_filter = "AND n.status <> 'completed'"
 
-            # Build type filter - only filter the primary node, allow any connected nodes
-            # This way when you select "Person", you see Person nodes and what they connect to
-            type_list = "['" + "','".join(allowed_types) + "']"
-            type_filter = f"WHERE labels(n)[0] IN {type_list}"
+                # For Topic/Concept, order by connection count
+                if single_type in ('Topic', 'Concept'):
+                    query = f"""
+                    MATCH (n:{single_type})
+                    OPTIONAL MATCH (n)-[r]-()
+                    WITH n, count(r) as conn_count
+                    ORDER BY conn_count DESC
+                    LIMIT $limit
+                    RETURN
+                        '{single_type}' as node_type,
+                        n.name as node_id,
+                        n.name as node_label,
+                        conn_count
+                    """
+                else:
+                    query = f"""
+                    MATCH (n:{single_type})
+                    WHERE true {completed_filter}
+                    OPTIONAL MATCH (n)-[r]-()
+                    WITH n, count(r) as conn_count
+                    ORDER BY conn_count DESC
+                    LIMIT $limit
+                    RETURN
+                        '{single_type}' as node_type,
+                        CASE '{single_type}'
+                            WHEN 'Person' THEN n.email
+                            WHEN 'Task' THEN n.id
+                            WHEN 'Project' THEN n.id
+                            WHEN 'Goal' THEN n.id
+                            WHEN 'Document' THEN n.drive_id
+                            WHEN 'Email' THEN n.message_id
+                            WHEN 'Event' THEN n.gcal_id
+                            WHEN 'Repository' THEN n.id
+                            ELSE coalesce(n.id, n.email, n.drive_id, n.name)
+                        END as node_id,
+                        CASE '{single_type}'
+                            WHEN 'Person' THEN coalesce(n.name, n.email)
+                            WHEN 'Task' THEN n.title
+                            WHEN 'Project' THEN n.title
+                            WHEN 'Goal' THEN n.title
+                            WHEN 'Document' THEN n.name
+                            WHEN 'Email' THEN n.subject
+                            WHEN 'Event' THEN n.title
+                            WHEN 'Repository' THEN n.full_name
+                            ELSE coalesce(n.title, n.name, n.subject)
+                        END as node_label,
+                        conn_count
+                    """
+                result = await session.run(query, {"limit": limit})
+                data = await result.data()
 
-            # Add filter to exclude completed tasks if requested
-            if hide_completed:
-                type_filter += " AND NOT (labels(n)[0] = 'Task' AND n.status = 'completed')"
+                for row in data:
+                    if row['node_id']:
+                        node_key = f"{row['node_type']}:{row['node_id']}"
+                        if node_key not in seen_nodes:
+                            seen_nodes.add(node_key)
+                            nodes.append({
+                                "id": node_key,
+                                "type": row["node_type"],
+                                "label": row["node_label"] or row["node_id"] or "Unknown",
+                            })
+                # No links for single type
+            else:
+                # Multiple types: get connections between ALL pairs of selected types
+                # Both endpoints must be in selected types
+                type_list = "['" + "','".join(allowed_types) + "']"
 
-            query = f"""
-            MATCH (n)-[r]-(m)
-            {type_filter}
-            WITH n, m, r
-            LIMIT $limit
-            RETURN DISTINCT
-                labels(n)[0] as start_type,
-                CASE labels(n)[0]
-                    WHEN 'Person' THEN n.email
-                    WHEN 'Task' THEN n.id
-                    WHEN 'Project' THEN n.id
-                    WHEN 'Goal' THEN n.id
-                    WHEN 'Document' THEN n.drive_id
-                    WHEN 'Email' THEN n.message_id
-                    WHEN 'Event' THEN n.gcal_id
-                    WHEN 'Repository' THEN n.id
-                    WHEN 'Topic' THEN n.name
-                    WHEN 'Concept' THEN n.name
-                    ELSE coalesce(n.id, n.email, n.drive_id, n.name)
-                END as start_id,
-                CASE labels(n)[0]
-                    WHEN 'Person' THEN coalesce(n.name, n.email)
-                    WHEN 'Task' THEN n.title
-                    WHEN 'Project' THEN n.title
-                    WHEN 'Goal' THEN n.title
-                    WHEN 'Document' THEN n.name
-                    WHEN 'Email' THEN n.subject
-                    WHEN 'Event' THEN n.title
-                    WHEN 'Repository' THEN n.full_name
-                    WHEN 'Topic' THEN n.name
-                    WHEN 'Concept' THEN n.name
-                    ELSE coalesce(n.title, n.name, n.subject)
-                END as start_label,
-                labels(m)[0] as end_type,
-                CASE labels(m)[0]
-                    WHEN 'Person' THEN m.email
-                    WHEN 'Task' THEN m.id
-                    WHEN 'Project' THEN m.id
-                    WHEN 'Goal' THEN m.id
-                    WHEN 'Document' THEN m.drive_id
-                    WHEN 'Email' THEN m.message_id
-                    WHEN 'Event' THEN m.gcal_id
-                    WHEN 'Repository' THEN m.id
-                    WHEN 'Topic' THEN m.name
-                    WHEN 'Concept' THEN m.name
-                    ELSE coalesce(m.id, m.email, m.drive_id, m.name)
-                END as end_id,
-                CASE labels(m)[0]
-                    WHEN 'Person' THEN coalesce(m.name, m.email)
-                    WHEN 'Task' THEN m.title
-                    WHEN 'Project' THEN m.title
-                    WHEN 'Goal' THEN m.title
-                    WHEN 'Document' THEN m.name
-                    WHEN 'Email' THEN m.subject
-                    WHEN 'Event' THEN m.title
-                    WHEN 'Repository' THEN m.full_name
-                    WHEN 'Topic' THEN m.name
-                    WHEN 'Concept' THEN m.name
-                    ELSE coalesce(m.title, m.name, m.subject)
-                END as end_label,
-                type(r) as rel_type
-            """
-            result = await session.run(query, {"limit": limit * 2})
+                # Build completed filter
+                completed_filter = ""
+                if hide_completed:
+                    completed_filter = "AND NOT (labels(n)[0] = 'Task' AND n.status = 'completed') AND NOT (labels(m)[0] = 'Task' AND m.status = 'completed')"
 
-        data = await result.data()
+                # For better Topic/Concept ordering, use a subquery approach
+                query = f"""
+                MATCH (n)-[r]-(m)
+                WHERE labels(n)[0] IN {type_list}
+                  AND labels(m)[0] IN {type_list}
+                  {completed_filter}
+                WITH n, m, r
+                LIMIT $limit
+                RETURN DISTINCT
+                    labels(n)[0] as start_type,
+                    CASE labels(n)[0]
+                        WHEN 'Person' THEN n.email
+                        WHEN 'Task' THEN n.id
+                        WHEN 'Project' THEN n.id
+                        WHEN 'Goal' THEN n.id
+                        WHEN 'Document' THEN n.drive_id
+                        WHEN 'Email' THEN n.message_id
+                        WHEN 'Event' THEN n.gcal_id
+                        WHEN 'Repository' THEN n.id
+                        WHEN 'Topic' THEN n.name
+                        WHEN 'Concept' THEN n.name
+                        ELSE coalesce(n.id, n.email, n.drive_id, n.name)
+                    END as start_id,
+                    CASE labels(n)[0]
+                        WHEN 'Person' THEN coalesce(n.name, n.email)
+                        WHEN 'Task' THEN n.title
+                        WHEN 'Project' THEN n.title
+                        WHEN 'Goal' THEN n.title
+                        WHEN 'Document' THEN n.name
+                        WHEN 'Email' THEN n.subject
+                        WHEN 'Event' THEN n.title
+                        WHEN 'Repository' THEN n.full_name
+                        WHEN 'Topic' THEN n.name
+                        WHEN 'Concept' THEN n.name
+                        ELSE coalesce(n.title, n.name, n.subject)
+                    END as start_label,
+                    labels(m)[0] as end_type,
+                    CASE labels(m)[0]
+                        WHEN 'Person' THEN m.email
+                        WHEN 'Task' THEN m.id
+                        WHEN 'Project' THEN m.id
+                        WHEN 'Goal' THEN m.id
+                        WHEN 'Document' THEN m.drive_id
+                        WHEN 'Email' THEN m.message_id
+                        WHEN 'Event' THEN m.gcal_id
+                        WHEN 'Repository' THEN m.id
+                        WHEN 'Topic' THEN m.name
+                        WHEN 'Concept' THEN m.name
+                        ELSE coalesce(m.id, m.email, m.drive_id, m.name)
+                    END as end_id,
+                    CASE labels(m)[0]
+                        WHEN 'Person' THEN coalesce(m.name, m.email)
+                        WHEN 'Task' THEN m.title
+                        WHEN 'Project' THEN m.title
+                        WHEN 'Goal' THEN m.title
+                        WHEN 'Document' THEN m.name
+                        WHEN 'Email' THEN m.subject
+                        WHEN 'Event' THEN m.title
+                        WHEN 'Repository' THEN m.full_name
+                        WHEN 'Topic' THEN m.name
+                        WHEN 'Concept' THEN m.name
+                        ELSE coalesce(m.title, m.name, m.subject)
+                    END as end_label,
+                    type(r) as rel_type
+                """
+                result = await session.run(query, {"limit": limit * 3})
+                data = await result.data()
 
-        for row in data:
-            # Add start node
-            start_key = f"{row['start_type']}:{row['start_id']}"
-            if start_key not in seen_nodes and row['start_id']:
-                seen_nodes.add(start_key)
-                nodes.append({
-                    "id": start_key,
-                    "type": row["start_type"],
-                    "label": row["start_label"] or row["start_id"] or "Unknown",
-                })
+                for row in data:
+                    start_key = f"{row['start_type']}:{row['start_id']}"
+                    if start_key not in seen_nodes and row['start_id']:
+                        seen_nodes.add(start_key)
+                        nodes.append({
+                            "id": start_key,
+                            "type": row["start_type"],
+                            "label": row["start_label"] or row["start_id"] or "Unknown",
+                        })
 
-            # Add end node
-            end_key = f"{row['end_type']}:{row['end_id']}"
-            if end_key not in seen_nodes and row['end_id']:
-                seen_nodes.add(end_key)
-                nodes.append({
-                    "id": end_key,
-                    "type": row["end_type"],
-                    "label": row["end_label"] or row["end_id"] or "Unknown",
-                })
+                    end_key = f"{row['end_type']}:{row['end_id']}"
+                    if end_key not in seen_nodes and row['end_id']:
+                        seen_nodes.add(end_key)
+                        nodes.append({
+                            "id": end_key,
+                            "type": row["end_type"],
+                            "label": row["end_label"] or row["end_id"] or "Unknown",
+                        })
 
-            # Add link
-            if row['start_id'] and row['end_id']:
-                links.append({
-                    "source": start_key,
-                    "target": end_key,
-                    "type": row["rel_type"],
-                })
+                    if row['start_id'] and row['end_id']:
+                        links.append({
+                            "source": start_key,
+                            "target": end_key,
+                            "type": row["rel_type"],
+                        })
 
         break
 
     # Limit nodes if too many
     if len(nodes) > limit:
         nodes = nodes[:limit]
-        # Filter links to only include nodes that are still present
         node_ids = {n["id"] for n in nodes}
         links = [l for l in links if l["source"] in node_ids and l["target"] in node_ids]
 

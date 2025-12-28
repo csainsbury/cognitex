@@ -18,7 +18,14 @@
         <input type="date" name="target_date" value="{{ project.target_date[:10] if project.target_date else '' }}" form="project-edit-{{ project.id }}">
     </td>
     <td>{{ project.done_count|default(0) }}/{{ project.task_count|default(0) }}</td>
-    <td>{{ project.goal or '-' }}</td>
+    <td>
+        <select name="goal_id" form="project-edit-{{ project.id }}">
+            <option value="">None</option>
+            {% for goal in goals %}
+            <option value="{{ goal.id }}" {% if goal.id in (project.goal_ids or []) %}selected{% endif %}>{{ goal.title }}</option>
+            {% endfor %}
+        </select>
+    </td>
     <td>
         <select name="repository_id" form="project-edit-{{ project.id }}">
             <option value="">None</option>

@@ -144,6 +144,18 @@ class Settings(BaseSettings):
         description="Default energy level if not specified",
     )
 
+    # Autonomous Agent
+    autonomous_agent_enabled: bool = Field(
+        default=True,
+        description="Enable the autonomous agent loop for proactive graph management",
+    )
+    autonomous_agent_interval_minutes: int = Field(
+        default=15,
+        ge=5,
+        le=60,
+        description="How often the autonomous agent runs (minutes)",
+    )
+
     @property
     def is_development(self) -> bool:
         return self.environment == "development"

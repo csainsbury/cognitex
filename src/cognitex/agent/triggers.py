@@ -47,6 +47,9 @@ class TriggerSystem:
         # Start context pack trigger system
         await self._start_context_pack_triggers()
 
+        # Start autonomous agent
+        await self._start_autonomous_agent()
+
         # Start scheduler
         self.scheduler.start()
         self._running = True
@@ -63,12 +66,28 @@ class TriggerSystem:
         except Exception as e:
             logger.warning("Failed to start context pack triggers", error=str(e))
 
+    async def _start_autonomous_agent(self) -> None:
+        """Start the autonomous agent for proactive graph management."""
+        try:
+            from cognitex.agent.autonomous import start_autonomous_agent
+            await start_autonomous_agent()
+            logger.info("Autonomous agent started")
+        except Exception as e:
+            logger.warning("Failed to start autonomous agent", error=str(e))
+
     async def stop(self) -> None:
         """Stop the trigger system."""
         if not self._running:
             return
 
         logger.info("Stopping trigger system")
+
+        # Stop autonomous agent
+        try:
+            from cognitex.agent.autonomous import stop_autonomous_agent
+            await stop_autonomous_agent()
+        except Exception:
+            pass
 
         # Stop context pack triggers
         try:
@@ -324,25 +343,32 @@ class TriggerSystem:
     async def _morning_briefing(self) -> None:
         """Handle morning briefing trigger."""
         logger.info("Triggering morning briefing")
+        from cognitex.agent.action_log import log_action
         try:
             briefing = await self.agent.morning_briefing()
             # Send via Discord notification
             await self._send_notification(briefing, urgency="normal")
+            await log_action("morning_briefing", "trigger", summary=briefing[:200] if briefing else "Generated morning briefing")
         except Exception as e:
             logger.error("Morning briefing failed", error=str(e))
+            await log_action("morning_briefing", "trigger", status="failed", error=str(e))
 
     async def _evening_review(self) -> None:
         """Handle evening review trigger."""
         logger.info("Triggering evening review")
+        from cognitex.agent.action_log import log_action
         try:
             review = await self.agent.evening_review()
             await self._send_notification(review, urgency="low")
+            await log_action("evening_review", "trigger", summary=review[:200] if review else "Generated evening review")
         except Exception as e:
             logger.error("Evening review failed", error=str(e))
+            await log_action("evening_review", "trigger", status="failed", error=str(e))
 
     async def _hourly_check(self) -> None:
         """Handle hourly monitoring check."""
         logger.debug("Triggering hourly check")
+        from cognitex.agent.action_log import log_action
         try:
             # Use ReAct agent to check for urgent items
             response = await self.agent.chat(
@@ -350,14 +376,19 @@ class TriggerSystem:
                 "that need immediate attention? Only notify me if something is truly urgent."
             )
             # Only send notification if the agent found something urgent
-            if response and "no urgent" not in response.lower() and "nothing urgent" not in response.lower():
+            has_urgent = response and "no urgent" not in response.lower() and "nothing urgent" not in response.lower()
+            if has_urgent:
                 await self._send_notification(response, urgency="normal")
+            await log_action("hourly_check", "trigger",
+                           summary=f"{'Found urgent items' if has_urgent else 'No urgent items'}: {response[:100] if response else ''}")
         except Exception as e:
             logger.error("Hourly check failed", error=str(e))
+            await log_action("hourly_check", "trigger", status="failed", error=str(e))
 
     async def _check_overdue_tasks(self) -> None:
         """Check for overdue tasks and escalate if needed."""
         logger.info("Checking for overdue tasks")
+        from cognitex.agent.action_log import log_action
         try:
             from cognitex.agent.tools import GetTasksTool
 
@@ -378,13 +409,22 @@ class TriggerSystem:
                             f"**Overdue Task Check**\n\n{response}",
                             urgency="normal"
                         )
+                    await log_action("overdue_check", "trigger",
+                                   summary=f"Found {len(overdue_tasks)} overdue tasks",
+                                   details={"task_count": len(overdue_tasks), "tasks": task_titles})
+                else:
+                    await log_action("overdue_check", "trigger", summary="No overdue tasks")
+            else:
+                await log_action("overdue_check", "trigger", summary="No overdue tasks")
 
         except Exception as e:
             logger.error("Overdue check failed", error=str(e))
+            await log_action("overdue_check", "trigger", status="failed", error=str(e))
 
     async def _github_sync(self) -> None:
         """Daily sync of configured GitHub repositories."""
         from cognitex.config import get_settings
+        from cognitex.agent.action_log import log_action
 
         settings = get_settings()
         repos_str = settings.github_auto_sync_repos
@@ -430,8 +470,13 @@ class TriggerSystem:
                     urgency="low"
                 )
 
+            await log_action("github_sync", "trigger",
+                           summary=f"Synced {len(synced)} repos, {len(failed)} failed",
+                           details={"synced": synced, "failed": failed})
+
         except Exception as e:
             logger.error("GitHub sync failed", error=str(e))
+            await log_action("github_sync", "trigger", status="failed", error=str(e))
 
     async def _drive_poll(self) -> None:
         """
@@ -560,12 +605,16 @@ class TriggerSystem:
             await redis.set("cognitex:drive:page_token", new_token)
 
             # Log summary
+            from cognitex.agent.action_log import log_action
             if indexed_files:
                 logger.info(
                     "Drive poll complete",
                     changes=len(relevant_changes),
                     indexed=len(indexed_files),
                 )
+                await log_action("drive_poll", "trigger",
+                               summary=f"Indexed {len(indexed_files)} files from {len(relevant_changes)} changes",
+                               details={"indexed": [f['name'] for f in indexed_files[:10]], "change_count": len(relevant_changes)})
 
                 # Notify about significant changes (3+ files or important docs)
                 if len(indexed_files) >= 3:
@@ -576,9 +625,18 @@ class TriggerSystem:
                         + ("..." if len(indexed_files) > 5 else ""),
                         urgency="low"
                     )
+            elif relevant_changes:
+                await log_action("drive_poll", "trigger",
+                               summary=f"Found {len(relevant_changes)} changes, no files indexed")
+            # else: no changes - don't log (too noisy every 15 min)
 
         except Exception as e:
             logger.error("Drive poll failed", error=str(e))
+            try:
+                from cognitex.agent.action_log import log_action
+                await log_action("drive_poll", "trigger", status="failed", error=str(e))
+            except Exception:
+                pass
 
     # =========================================================================
     # Event trigger handlers
@@ -602,6 +660,7 @@ class TriggerSystem:
         history_id = email_data.get("history_id")
         email_address = email_data.get("email_address")
         logger.info("Processing Gmail push notification", history_id=history_id, email_address=email_address)
+        from cognitex.agent.action_log import log_action
 
         try:
             from cognitex.db.redis import get_redis
@@ -707,8 +766,14 @@ class TriggerSystem:
                         f"**Email Action Needed**\n\n{response}",
                         urgency="normal"
                     )
+                    await log_action("email_analysis", "email",
+                                   summary=f"Action needed: {response[:150]}",
+                                   details={"email_count": len(actionable_emails), "notified": True})
                 else:
                     logger.info("No concrete action items found, skipping notification")
+                    await log_action("email_analysis", "email",
+                                   summary=f"No action needed for {len(actionable_emails)} email(s)",
+                                   details={"email_count": len(actionable_emails), "notified": False})
 
             # Trigger context pack refresh for related events
             try:
@@ -995,9 +1060,16 @@ class TriggerSystem:
     async def _send_notification(self, message: str, urgency: str = "normal") -> None:
         """Send a notification via the notification tool."""
         from cognitex.agent.tools import SendNotificationTool
+        from cognitex.agent.action_log import log_action
 
         tool = SendNotificationTool()
         await tool.execute(message=message, urgency=urgency)
+        await log_action(
+            "notification_sent",
+            "trigger",
+            summary=f"[{urgency}] {message[:100]}...",
+            details={"urgency": urgency, "message_length": len(message)}
+        )
 
     def trigger_now(self, trigger_id: str) -> None:
         """Manually trigger a scheduled job immediately."""

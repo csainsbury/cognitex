@@ -400,10 +400,17 @@ async function loadGraph() {
     const checkedTypes = Array.from(document.querySelectorAll('.type-filter:checked'))
         .map(cb => cb.value);
 
-    let url = `/api/graph/data?depth=${depth}&limit=${limit}`;
-    if (checkedTypes.length > 0) {
-        url += `&types=${encodeURIComponent(checkedTypes.join(','))}`;
+    // No types checked = show empty graph with message
+    if (checkedTypes.length === 0) {
+        graphData = { nodes: [], links: [] };
+        renderGraph();
+        updateStats();
+        loading.style.display = 'none';
+        return;
     }
+
+    let url = `/api/graph/data?depth=${depth}&limit=${limit}`;
+    url += `&types=${encodeURIComponent(checkedTypes.join(','))}`;
     if (centerNode) {
         url += `&center=${encodeURIComponent(centerNode)}`;
     }
@@ -411,20 +418,7 @@ async function loadGraph() {
     try {
         const response = await fetch(url);
         graphData = await response.json();
-
-        // Apply type filters
-        const activeTypes = new Set(
-            Array.from(document.querySelectorAll('.type-filter:checked'))
-                .map(cb => cb.value)
-        );
-
-        graphData.nodes = graphData.nodes.filter(n => activeTypes.has(n.type));
-        const nodeIds = new Set(graphData.nodes.map(n => n.id));
-        graphData.links = graphData.links.filter(l =>
-            nodeIds.has(l.source) && nodeIds.has(l.target) ||
-            nodeIds.has(l.source.id) && nodeIds.has(l.target.id)
-        );
-
+        // API now handles all filtering - no additional filtering needed
         renderGraph();
         updateStats();
     } catch (err) {
@@ -436,7 +430,17 @@ async function loadGraph() {
 
 function updateStats() {
     const stats = document.getElementById('graph-stats');
-    stats.textContent = `${graphData.nodes.length} nodes, ${graphData.links.length} links`;
+    const checkedCount = document.querySelectorAll('.type-filter:checked').length;
+
+    if (checkedCount === 0) {
+        stats.textContent = 'Select node types to display';
+    } else if (graphData.nodes.length === 0) {
+        stats.textContent = 'No nodes found for selected types';
+    } else if (checkedCount === 1) {
+        stats.textContent = `${graphData.nodes.length} nodes (single type - no connections shown)`;
+    } else {
+        stats.textContent = `${graphData.nodes.length} nodes, ${graphData.links.length} connections`;
+    }
 }
 
 function renderGraph() {
@@ -444,6 +448,17 @@ function renderGraph() {
     container.selectAll('*').remove();
 
     if (graphData.nodes.length === 0) {
+        // Show empty state message in the center of the graph
+        const rect = document.getElementById('graph-svg').getBoundingClientRect();
+        container.append('text')
+            .attr('x', rect.width / 2)
+            .attr('y', rect.height / 2)
+            .attr('text-anchor', 'middle')
+            .attr('fill', '#666')
+            .attr('font-size', '14px')
+            .text(document.querySelectorAll('.type-filter:checked').length === 0
+                ? 'Select node types to display'
+                : 'No nodes found for selected types');
         return;
     }
 

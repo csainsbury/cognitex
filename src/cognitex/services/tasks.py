@@ -350,8 +350,9 @@ class ProjectService:
         description: str | None = None,
         status: str | None = None,
         target_date: str | None = None,
+        goal_id: str | None = None,
     ) -> dict | None:
-        """Update project properties."""
+        """Update project properties and goal link."""
         async for session in get_neo4j_session():
             project = await gs.update_project(
                 session,
@@ -363,6 +364,18 @@ class ProjectService:
             )
 
             if project:
+                # Update goal link if specified (empty string = unlink, None = no change)
+                if goal_id is not None:
+                    # First remove any existing goal link
+                    await session.run("""
+                        MATCH (p:Project {id: $project_id})-[r:PART_OF]->(:Goal)
+                        DELETE r
+                    """, {"project_id": project_id})
+
+                    # Then add new link if goal_id is not empty
+                    if goal_id:
+                        await gs.link_project_to_goal(session, project_id, goal_id)
+
                 logger.info("Updated project", project_id=project_id)
             return project
 
