@@ -2360,6 +2360,38 @@ async def link_chunk_to_person(
     await session.run(query, chunk_id=chunk_id, identifier=person_identifier)
 
 
+async def link_chunk_to_organization(
+    session: AsyncSession,
+    chunk_id: str,
+    org_name: str,
+    org_type: str = "",
+) -> None:
+    """Create INVOLVES relationship between Chunk and Organization."""
+    normalized = org_name.strip()
+    query = """
+    MATCH (c:Chunk {id: $chunk_id})
+    MERGE (o:Organization {name: $org_name})
+    ON CREATE SET o.type = $org_type
+    MERGE (c)-[:INVOLVES]->(o)
+    """
+    await session.run(query, chunk_id=chunk_id, org_name=normalized, org_type=org_type)
+
+
+async def link_chunk_to_semantic_tag(
+    session: AsyncSession,
+    chunk_id: str,
+    tag_name: str,
+) -> None:
+    """Create TAGGED_AS relationship between Chunk and SemanticTag for clustering."""
+    normalized = tag_name.lower().strip().replace(" ", "_")
+    query = """
+    MATCH (c:Chunk {id: $chunk_id})
+    MERGE (t:SemanticTag {name: $tag_name})
+    MERGE (c)-[:TAGGED_AS]->(t)
+    """
+    await session.run(query, chunk_id=chunk_id, tag_name=normalized)
+
+
 async def get_unanalyzed_chunks(
     session: AsyncSession,
     limit: int = 100,

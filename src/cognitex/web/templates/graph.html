@@ -1,0 +1,835 @@
+{% extends "base.html" %}
+
+{% block title %}Knowledge Graph - Cognitex{% endblock %}
+
+{% block content %}
+<style>
+    .graph-container {
+        display: grid;
+        grid-template-columns: 250px 1fr 280px;
+        gap: 1rem;
+        height: calc(100vh - 120px);
+    }
+
+    /* Left sidebar - controls */
+    .graph-controls {
+        background: #fff;
+        border-radius: 5px;
+        padding: 1rem;
+        overflow-y: auto;
+    }
+    .control-section {
+        margin-bottom: 1.5rem;
+    }
+    .control-section h3 {
+        font-size: 0.85rem;
+        color: #666;
+        margin-bottom: 0.5rem;
+        text-transform: uppercase;
+    }
+    .control-section label {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.9rem;
+        padding: 0.25rem 0;
+        cursor: pointer;
+    }
+    .control-section input[type="checkbox"] {
+        width: 16px;
+        height: 16px;
+    }
+    .control-section input[type="range"] {
+        width: 100%;
+    }
+    .search-input {
+        width: 100%;
+        padding: 0.5rem;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-size: 0.9rem;
+    }
+    .search-results {
+        max-height: 200px;
+        overflow-y: auto;
+        margin-top: 0.5rem;
+    }
+    .search-result {
+        padding: 0.5rem;
+        cursor: pointer;
+        border-radius: 3px;
+        font-size: 0.85rem;
+    }
+    .search-result:hover {
+        background: #f0f9ff;
+    }
+    .search-result-type {
+        font-size: 0.7rem;
+        color: #666;
+    }
+
+    /* Main graph area */
+    .graph-svg-container {
+        background: #fff;
+        border-radius: 5px;
+        overflow: hidden;
+        position: relative;
+    }
+    #graph-svg {
+        width: 100%;
+        height: 100%;
+    }
+    .graph-loading {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        color: #666;
+    }
+    .graph-stats {
+        position: absolute;
+        bottom: 10px;
+        left: 10px;
+        font-size: 0.75rem;
+        color: #666;
+        background: rgba(255,255,255,0.9);
+        padding: 0.25rem 0.5rem;
+        border-radius: 3px;
+    }
+
+    /* Right sidebar - info panel */
+    .graph-info {
+        background: #fff;
+        border-radius: 5px;
+        padding: 1rem;
+        overflow-y: auto;
+    }
+    .node-info-empty {
+        color: #666;
+        font-size: 0.9rem;
+        text-align: center;
+        padding: 2rem 1rem;
+    }
+    .node-info-header {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+    }
+    .node-type-badge {
+        display: inline-block;
+        padding: 0.2rem 0.5rem;
+        border-radius: 3px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        color: #fff;
+    }
+    .node-info-title {
+        font-size: 1.1rem;
+        font-weight: 600;
+        word-break: break-word;
+    }
+    .node-connections {
+        margin-top: 1rem;
+    }
+    .node-connections h4 {
+        font-size: 0.8rem;
+        color: #666;
+        text-transform: uppercase;
+        margin-bottom: 0.5rem;
+    }
+    .connection-item {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.4rem;
+        font-size: 0.85rem;
+        cursor: pointer;
+        border-radius: 3px;
+    }
+    .connection-item:hover {
+        background: #f5f5f5;
+    }
+    .connection-type {
+        font-size: 0.7rem;
+        color: #888;
+        min-width: 80px;
+    }
+    .connection-label {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .btn-center {
+        width: 100%;
+        margin-top: 1rem;
+    }
+
+    /* Link controls */
+    .link-controls {
+        margin-top: 1rem;
+        padding-top: 1rem;
+        border-top: 1px solid #eee;
+    }
+    .link-controls h4 {
+        font-size: 0.8rem;
+        color: #666;
+        text-transform: uppercase;
+        margin-bottom: 0.5rem;
+    }
+    .link-form {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+    .link-form select, .link-form input {
+        padding: 0.4rem;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-size: 0.85rem;
+    }
+    .link-form .btn-link {
+        padding: 0.4rem 0.75rem;
+        font-size: 0.85rem;
+    }
+    .link-status {
+        font-size: 0.8rem;
+        padding: 0.25rem;
+        border-radius: 3px;
+        margin-top: 0.25rem;
+    }
+    .link-status.success {
+        background: #dcfce7;
+        color: #166534;
+    }
+    .link-status.error {
+        background: #fee2e2;
+        color: #991b1b;
+    }
+    .unlink-btn {
+        font-size: 0.7rem;
+        padding: 0.15rem 0.3rem;
+        margin-left: 0.25rem;
+        background: #ef4444;
+        color: white;
+        border: none;
+        border-radius: 3px;
+        cursor: pointer;
+    }
+    .unlink-btn:hover {
+        background: #dc2626;
+    }
+
+    /* Node colors */
+    .node-Person { fill: #3b82f6; }
+    .node-Task { fill: #22c55e; }
+    .node-Project { fill: #f59e0b; }
+    .node-Goal { fill: #8b5cf6; }
+    .node-Email { fill: #6b7280; }
+    .node-Event { fill: #ec4899; }
+    .node-Document { fill: #14b8a6; }
+    .node-Repository { fill: #0ea5e9; }
+    .node-Topic { fill: #a855f7; }
+    .node-Concept { fill: #f97316; }
+
+    .badge-Person { background: #3b82f6; }
+    .badge-Task { background: #22c55e; }
+    .badge-Project { background: #f59e0b; }
+    .badge-Goal { background: #8b5cf6; }
+    .badge-Email { background: #6b7280; }
+    .badge-Event { background: #ec4899; }
+    .badge-Document { background: #14b8a6; }
+    .badge-Repository { background: #0ea5e9; }
+    .badge-Topic { background: #a855f7; }
+    .badge-Concept { background: #f97316; }
+
+    /* Link styling */
+    .link {
+        stroke: #999;
+        stroke-opacity: 0.6;
+    }
+    .link-label {
+        font-size: 8px;
+        fill: #666;
+    }
+
+    /* Node labels */
+    .node-label {
+        font-size: 10px;
+        fill: #333;
+        pointer-events: none;
+    }
+
+    /* Selected node */
+    .node-selected {
+        stroke: #000;
+        stroke-width: 3px;
+    }
+
+    /* Legend */
+    .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin-top: 1rem;
+        padding-top: 1rem;
+        border-top: 1px solid #eee;
+    }
+    .legend-item {
+        display: flex;
+        align-items: center;
+        gap: 0.25rem;
+        font-size: 0.75rem;
+    }
+    .legend-color {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+    }
+</style>
+
+<div class="graph-container">
+    <!-- Left sidebar: Controls -->
+    <div class="graph-controls">
+        <div class="control-section">
+            <h3>Search</h3>
+            <input type="text" class="search-input" id="node-search" placeholder="Search nodes...">
+            <div class="search-results" id="search-results"></div>
+        </div>
+
+        <div class="control-section">
+            <h3>Node Types</h3>
+            <label><input type="checkbox" class="type-filter" value="Person" checked> Person</label>
+            <label><input type="checkbox" class="type-filter" value="Task" checked> Task</label>
+            <label><input type="checkbox" class="type-filter" value="Project" checked> Project</label>
+            <label><input type="checkbox" class="type-filter" value="Goal" checked> Goal</label>
+            <label><input type="checkbox" class="type-filter" value="Email" checked> Email</label>
+            <label><input type="checkbox" class="type-filter" value="Event" checked> Event</label>
+            <label><input type="checkbox" class="type-filter" value="Document" checked> Document</label>
+            <label><input type="checkbox" class="type-filter" value="Repository" checked> Repository</label>
+            <label><input type="checkbox" class="type-filter" value="Topic" checked> Topic</label>
+            <label><input type="checkbox" class="type-filter" value="Concept" checked> Concept</label>
+        </div>
+
+        <div class="control-section">
+            <h3>Depth: <span id="depth-value">2</span></h3>
+            <input type="range" id="depth-slider" min="1" max="3" value="2">
+        </div>
+
+        <div class="control-section">
+            <h3>Limit: <span id="limit-value">100</span></h3>
+            <input type="range" id="limit-slider" min="25" max="200" step="25" value="100">
+        </div>
+
+        <div class="control-section">
+            <button class="btn btn-secondary" id="reset-view" style="width:100%">Reset View</button>
+            <button class="btn btn-primary" id="reload-graph" style="width:100%; margin-top:0.5rem">Reload Graph</button>
+        </div>
+
+        <div class="legend">
+            <div class="legend-item"><div class="legend-color" style="background:#3b82f6"></div>Person</div>
+            <div class="legend-item"><div class="legend-color" style="background:#22c55e"></div>Task</div>
+            <div class="legend-item"><div class="legend-color" style="background:#f59e0b"></div>Project</div>
+            <div class="legend-item"><div class="legend-color" style="background:#8b5cf6"></div>Goal</div>
+            <div class="legend-item"><div class="legend-color" style="background:#6b7280"></div>Email</div>
+            <div class="legend-item"><div class="legend-color" style="background:#ec4899"></div>Event</div>
+            <div class="legend-item"><div class="legend-color" style="background:#14b8a6"></div>Document</div>
+            <div class="legend-item"><div class="legend-color" style="background:#0ea5e9"></div>Repository</div>
+        </div>
+    </div>
+
+    <!-- Main graph area -->
+    <div class="graph-svg-container">
+        <div class="graph-loading" id="loading">Loading graph...</div>
+        <svg id="graph-svg"></svg>
+        <div class="graph-stats" id="graph-stats"></div>
+    </div>
+
+    <!-- Right sidebar: Info panel -->
+    <div class="graph-info" id="info-panel">
+        <div class="node-info-empty">
+            Click a node to see details.<br><br>
+            Double-click to center the graph on that node.
+        </div>
+    </div>
+</div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+// Graph state
+let graphData = { nodes: [], links: [] };
+let simulation = null;
+let selectedNode = null;
+let centerNode = null;
+
+// D3 selections
+const svg = d3.select('#graph-svg');
+const container = svg.append('g');
+
+// Zoom behavior
+const zoom = d3.zoom()
+    .scaleExtent([0.1, 4])
+    .on('zoom', (event) => container.attr('transform', event.transform));
+
+svg.call(zoom);
+
+// Color scale by type
+const typeColors = {
+    'Person': '#3b82f6',
+    'Task': '#22c55e',
+    'Project': '#f59e0b',
+    'Goal': '#8b5cf6',
+    'Email': '#6b7280',
+    'Event': '#ec4899',
+    'Document': '#14b8a6',
+    'Repository': '#0ea5e9',
+    'Topic': '#a855f7',
+    'Concept': '#f97316'
+};
+
+// Load graph data
+async function loadGraph() {
+    const loading = document.getElementById('loading');
+    loading.style.display = 'block';
+
+    const depth = document.getElementById('depth-slider').value;
+    const limit = document.getElementById('limit-slider').value;
+
+    // Get checked types
+    const checkedTypes = Array.from(document.querySelectorAll('.type-filter:checked'))
+        .map(cb => cb.value);
+
+    let url = `/api/graph/data?depth=${depth}&limit=${limit}`;
+    if (checkedTypes.length > 0) {
+        url += `&types=${encodeURIComponent(checkedTypes.join(','))}`;
+    }
+    if (centerNode) {
+        url += `&center=${encodeURIComponent(centerNode)}`;
+    }
+
+    try {
+        const response = await fetch(url);
+        graphData = await response.json();
+
+        // Apply type filters
+        const activeTypes = new Set(
+            Array.from(document.querySelectorAll('.type-filter:checked'))
+                .map(cb => cb.value)
+        );
+
+        graphData.nodes = graphData.nodes.filter(n => activeTypes.has(n.type));
+        const nodeIds = new Set(graphData.nodes.map(n => n.id));
+        graphData.links = graphData.links.filter(l =>
+            nodeIds.has(l.source) && nodeIds.has(l.target) ||
+            nodeIds.has(l.source.id) && nodeIds.has(l.target.id)
+        );
+
+        renderGraph();
+        updateStats();
+    } catch (err) {
+        console.error('Failed to load graph:', err);
+    } finally {
+        loading.style.display = 'none';
+    }
+}
+
+function updateStats() {
+    const stats = document.getElementById('graph-stats');
+    stats.textContent = `${graphData.nodes.length} nodes, ${graphData.links.length} links`;
+}
+
+function renderGraph() {
+    // Clear existing
+    container.selectAll('*').remove();
+
+    if (graphData.nodes.length === 0) {
+        return;
+    }
+
+    // Get SVG dimensions
+    const rect = document.getElementById('graph-svg').getBoundingClientRect();
+    const width = rect.width;
+    const height = rect.height;
+
+    // Create simulation
+    simulation = d3.forceSimulation(graphData.nodes)
+        .force('link', d3.forceLink(graphData.links).id(d => d.id).distance(80))
+        .force('charge', d3.forceManyBody().strength(-200))
+        .force('center', d3.forceCenter(width / 2, height / 2))
+        .force('collision', d3.forceCollide().radius(30));
+
+    // Create links
+    const link = container.append('g')
+        .attr('class', 'links')
+        .selectAll('line')
+        .data(graphData.links)
+        .join('line')
+        .attr('class', 'link')
+        .attr('stroke-width', 1.5);
+
+    // Create link labels (relationship type)
+    const linkLabels = container.append('g')
+        .attr('class', 'link-labels')
+        .selectAll('text')
+        .data(graphData.links)
+        .join('text')
+        .attr('class', 'link-label')
+        .text(d => d.type);
+
+    // Create nodes
+    const node = container.append('g')
+        .attr('class', 'nodes')
+        .selectAll('circle')
+        .data(graphData.nodes)
+        .join('circle')
+        .attr('r', 8)
+        .attr('fill', d => typeColors[d.type] || '#999')
+        .attr('stroke', '#fff')
+        .attr('stroke-width', 1.5)
+        .call(drag(simulation))
+        .on('click', (event, d) => selectNode(d))
+        .on('dblclick', (event, d) => centerOnNode(d));
+
+    // Create node labels
+    const labels = container.append('g')
+        .attr('class', 'labels')
+        .selectAll('text')
+        .data(graphData.nodes)
+        .join('text')
+        .attr('class', 'node-label')
+        .attr('dx', 12)
+        .attr('dy', 4)
+        .text(d => truncate(d.label, 20));
+
+    // Add tooltips
+    node.append('title')
+        .text(d => `${d.type}: ${d.label}`);
+
+    // Update positions on tick
+    simulation.on('tick', () => {
+        link
+            .attr('x1', d => d.source.x)
+            .attr('y1', d => d.source.y)
+            .attr('x2', d => d.target.x)
+            .attr('y2', d => d.target.y);
+
+        linkLabels
+            .attr('x', d => (d.source.x + d.target.x) / 2)
+            .attr('y', d => (d.source.y + d.target.y) / 2);
+
+        node
+            .attr('cx', d => d.x)
+            .attr('cy', d => d.y);
+
+        labels
+            .attr('x', d => d.x)
+            .attr('y', d => d.y);
+    });
+}
+
+function drag(simulation) {
+    function dragstarted(event) {
+        if (!event.active) simulation.alphaTarget(0.3).restart();
+        event.subject.fx = event.subject.x;
+        event.subject.fy = event.subject.y;
+    }
+
+    function dragged(event) {
+        event.subject.fx = event.x;
+        event.subject.fy = event.y;
+    }
+
+    function dragended(event) {
+        if (!event.active) simulation.alphaTarget(0);
+        event.subject.fx = null;
+        event.subject.fy = null;
+    }
+
+    return d3.drag()
+        .on('start', dragstarted)
+        .on('drag', dragged)
+        .on('end', dragended);
+}
+
+function truncate(str, len) {
+    if (!str) return '';
+    return str.length > len ? str.substring(0, len) + '...' : str;
+}
+
+// Linkable types map
+const linkableTypes = {
+    'Task': ['Project', 'Goal', 'Person'],
+    'Project': ['Goal', 'Person', 'Repository'],
+    'Goal': ['Person', 'Goal']
+};
+
+// Current link targets cache
+let linkTargetsCache = {};
+
+async function selectNode(node) {
+    selectedNode = node;
+
+    // Highlight selected node
+    container.selectAll('circle')
+        .classed('node-selected', d => d.id === node.id);
+
+    // Update info panel
+    const panel = document.getElementById('info-panel');
+
+    // Find connections
+    const connections = graphData.links.filter(l =>
+        (l.source.id === node.id || l.target.id === node.id) ||
+        (l.source === node.id || l.target === node.id)
+    ).map(l => {
+        const isSource = (l.source.id === node.id || l.source === node.id);
+        const other = isSource ? (l.target.id ? l.target : graphData.nodes.find(n => n.id === l.target))
+                               : (l.source.id ? l.source : graphData.nodes.find(n => n.id === l.source));
+        return {
+            type: l.type,
+            direction: isSource ? '->' : '<-',
+            node: other,
+            canUnlink: isSource  // Can only unlink if this is the source node
+        };
+    });
+
+    let connectionsHtml = '';
+    if (connections.length > 0) {
+        connectionsHtml = `
+            <div class="node-connections">
+                <h4>Connections (${connections.length})</h4>
+                ${connections.slice(0, 20).map(c => `
+                    <div class="connection-item">
+                        <span class="connection-type">${c.direction} ${c.type}</span>
+                        <span class="connection-label" onclick="centerOnNode(${JSON.stringify(c.node).replace(/"/g, '&quot;')})" style="cursor:pointer">${c.node ? c.node.label : 'Unknown'}</span>
+                        ${c.canUnlink && c.node ? `<button class="unlink-btn" onclick="unlinkNodes('${node.type}', '${getNodeRealId(node)}', '${c.node.type}', '${getNodeRealId(c.node)}', '${c.type}')" title="Remove link">x</button>` : ''}
+                    </div>
+                `).join('')}
+                ${connections.length > 20 ? `<div style="color:#666;font-size:0.8rem;padding:0.5rem">...and ${connections.length - 20} more</div>` : ''}
+            </div>
+        `;
+    }
+
+    // Link controls (only for linkable node types)
+    let linkControlsHtml = '';
+    if (linkableTypes[node.type]) {
+        linkControlsHtml = `
+            <div class="link-controls">
+                <h4>Link to...</h4>
+                <div class="link-form">
+                    <select id="link-type-select" onchange="loadLinkTargets('${node.type}', this.value)">
+                        <option value="">Select type</option>
+                        ${linkableTypes[node.type].map(t => `<option value="${t}">${t}</option>`).join('')}
+                    </select>
+                    <select id="link-target-select" disabled>
+                        <option value="">Select target</option>
+                    </select>
+                    <button class="btn btn-primary btn-link" onclick="createLink('${node.type}', '${getNodeRealId(node)}')" id="link-create-btn" disabled>
+                        Create Link
+                    </button>
+                    <div id="link-status"></div>
+                </div>
+            </div>
+        `;
+    }
+
+    panel.innerHTML = `
+        <div class="node-info-header">
+            <span class="node-type-badge badge-${node.type}">${node.type}</span>
+        </div>
+        <div class="node-info-title">${node.label}</div>
+        <div style="font-size:0.8rem;color:#666;margin-top:0.25rem;word-break:break-all">${node.id}</div>
+        ${connectionsHtml}
+        ${linkControlsHtml}
+        <button class="btn btn-primary btn-center" onclick="centerOnNode(${JSON.stringify(node).replace(/"/g, '&quot;')})">
+            Center on this node
+        </button>
+    `;
+}
+
+// Get the real ID from a composite node ID (e.g., "Task:abc123" -> "abc123")
+function getNodeRealId(node) {
+    if (!node || !node.id) return '';
+    const parts = node.id.split(':');
+    return parts.length > 1 ? parts.slice(1).join(':') : node.id;
+}
+
+// Load link targets for a given target type
+async function loadLinkTargets(sourceType, targetType) {
+    const targetSelect = document.getElementById('link-target-select');
+    const createBtn = document.getElementById('link-create-btn');
+
+    if (!targetType) {
+        targetSelect.innerHTML = '<option value="">Select target</option>';
+        targetSelect.disabled = true;
+        createBtn.disabled = true;
+        return;
+    }
+
+    targetSelect.innerHTML = '<option value="">Loading...</option>';
+    targetSelect.disabled = true;
+
+    try {
+        const response = await fetch(`/api/graph/link-targets?node_type=${sourceType}&limit=50`);
+        const data = await response.json();
+
+        // Filter by selected type
+        const targets = data.targets.filter(t => t.type === targetType);
+        linkTargetsCache = {};
+        targets.forEach(t => linkTargetsCache[t.id] = t);
+
+        targetSelect.innerHTML = '<option value="">Select target</option>' +
+            targets.map(t => `<option value="${t.id}">${t.label}</option>`).join('');
+        targetSelect.disabled = false;
+        targetSelect.onchange = () => {
+            createBtn.disabled = !targetSelect.value;
+        };
+    } catch (err) {
+        console.error('Failed to load link targets:', err);
+        targetSelect.innerHTML = '<option value="">Error loading</option>';
+    }
+}
+
+// Create a link between nodes
+async function createLink(sourceType, sourceId) {
+    const targetSelect = document.getElementById('link-target-select');
+    const typeSelect = document.getElementById('link-type-select');
+    const statusEl = document.getElementById('link-status');
+
+    const targetId = targetSelect.value;
+    const targetType = typeSelect.value;
+
+    if (!targetId || !targetType) return;
+
+    try {
+        const params = new URLSearchParams({
+            source_type: sourceType,
+            source_id: sourceId,
+            target_type: targetType,
+            target_id: targetId,
+            relationship: 'auto',
+            action: 'create'
+        });
+
+        const response = await fetch('/api/graph/link?' + params, { method: 'POST' });
+        const result = await response.json();
+
+        if (result.success) {
+            statusEl.className = 'link-status success';
+            statusEl.textContent = `Linked! (${result.relationship})`;
+            // Reload graph to show new link
+            setTimeout(() => loadGraph(), 500);
+        } else {
+            statusEl.className = 'link-status error';
+            statusEl.textContent = result.error || 'Failed to create link';
+        }
+    } catch (err) {
+        statusEl.className = 'link-status error';
+        statusEl.textContent = 'Error: ' + err.message;
+    }
+}
+
+// Remove a link between nodes
+async function unlinkNodes(sourceType, sourceId, targetType, targetId, relType) {
+    if (!confirm(`Remove ${relType} link?`)) return;
+
+    try {
+        const params = new URLSearchParams({
+            source_type: sourceType,
+            source_id: sourceId,
+            target_type: targetType,
+            target_id: targetId,
+            relationship: relType,
+            action: 'delete'
+        });
+
+        const response = await fetch('/api/graph/link?' + params, { method: 'POST' });
+        const result = await response.json();
+
+        if (result.success) {
+            // Reload graph to reflect change
+            loadGraph();
+        } else {
+            alert('Failed to remove link: ' + (result.error || 'Unknown error'));
+        }
+    } catch (err) {
+        alert('Error: ' + err.message);
+    }
+}
+
+function centerOnNode(node) {
+    if (!node || !node.id) return;
+    centerNode = node.id;
+    loadGraph();
+}
+
+// Search functionality
+let searchTimeout;
+document.getElementById('node-search').addEventListener('input', (e) => {
+    clearTimeout(searchTimeout);
+    const query = e.target.value.trim();
+
+    if (query.length < 2) {
+        document.getElementById('search-results').innerHTML = '';
+        return;
+    }
+
+    searchTimeout = setTimeout(async () => {
+        try {
+            const response = await fetch(`/api/graph/search?q=${encodeURIComponent(query)}`);
+            const results = await response.json();
+
+            const resultsEl = document.getElementById('search-results');
+            resultsEl.innerHTML = results.map(r => `
+                <div class="search-result" onclick='centerOnNode(${JSON.stringify(r)})'>
+                    <div>${r.label}</div>
+                    <div class="search-result-type">${r.type}</div>
+                </div>
+            `).join('') || '<div style="padding:0.5rem;color:#666">No results</div>';
+        } catch (err) {
+            console.error('Search failed:', err);
+        }
+    }, 200);
+});
+
+// Depth slider
+document.getElementById('depth-slider').addEventListener('input', (e) => {
+    document.getElementById('depth-value').textContent = e.target.value;
+});
+document.getElementById('depth-slider').addEventListener('change', loadGraph);
+
+// Limit slider
+document.getElementById('limit-slider').addEventListener('input', (e) => {
+    document.getElementById('limit-value').textContent = e.target.value;
+});
+document.getElementById('limit-slider').addEventListener('change', loadGraph);
+
+// Type filters
+document.querySelectorAll('.type-filter').forEach(cb => {
+    cb.addEventListener('change', loadGraph);
+});
+
+// Reset view button
+document.getElementById('reset-view').addEventListener('click', () => {
+    centerNode = null;
+    selectedNode = null;
+    svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity);
+    loadGraph();
+});
+
+// Reload button
+document.getElementById('reload-graph').addEventListener('click', loadGraph);
+
+// Handle window resize
+window.addEventListener('resize', () => {
+    if (simulation) {
+        const rect = document.getElementById('graph-svg').getBoundingClientRect();
+        simulation.force('center', d3.forceCenter(rect.width / 2, rect.height / 2));
+        simulation.alpha(0.3).restart();
+    }
+});
+
+// Initial load
+loadGraph();
+</script>
+{% endblock %}

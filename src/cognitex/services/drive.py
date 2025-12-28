@@ -186,6 +186,10 @@ class DriveService:
                 if mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
                     return self._extract_docx_text(content)
 
+                # Handle XLSX - convert to CSV-like text
+                if mime_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+                    return self._extract_xlsx_text(content)
+
                 # Plain text types
                 try:
                     return content.decode("utf-8")
@@ -227,6 +231,27 @@ class DriveService:
             return None
         except Exception as e:
             logger.warning("Failed to extract DOCX text", error=str(e))
+            return None
+
+    def _extract_xlsx_text(self, content: bytes) -> str | None:
+        """Extract text from XLSX bytes as CSV-like format."""
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+            text_parts = []
+            for sheet in wb.worksheets:
+                text_parts.append(f"=== Sheet: {sheet.title} ===")
+                for row in sheet.iter_rows(max_row=1000, values_only=True):  # Limit rows
+                    row_text = "\t".join(str(c) if c is not None else "" for c in row)
+                    if row_text.strip():
+                        text_parts.append(row_text)
+            wb.close()
+            return "\n".join(text_parts) if text_parts else None
+        except ImportError:
+            logger.warning("openpyxl not installed, cannot extract XLSX text")
+            return None
+        except Exception as e:
+            logger.warning("Failed to extract XLSX text", error=str(e))
             return None
 
     def get_sharing_info(self, file_id: str) -> list[dict]:

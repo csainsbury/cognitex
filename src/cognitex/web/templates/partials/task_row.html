@@ -9,7 +9,8 @@
     <td><span class="badge badge-{{ task.status }}">{{ task.status }}</span></td>
     <td>{{ task.due[:10] if task.due else '-' }}</td>
     <td>{{ task.project or '-' }}</td>
-    <td colspan="2">
+    <td>{{ task.goal or '-' }}</td>
+    <td>
         {% if task.people %}
         <span class="people-list">{{ task.people | join(', ') }}</span>
         {% else %}

@@ -5204,7 +5204,9 @@ def link_mappings_cmd(
 def link_suggestions_cmd(
     approve: str = typer.Option(None, "--approve", "-a", help="Approve suggestion by ID"),
     reject: str = typer.Option(None, "--reject", "-r", help="Reject suggestion by ID"),
-    limit: int = typer.Option(20, "--limit", "-l", help="Number to show"),
+    approve_all: bool = typer.Option(False, "--approve-all", help="Approve all pending suggestions"),
+    min_confidence: float = typer.Option(0.0, "--min-confidence", "-c", help="Min confidence for batch approve (0.0-1.0)"),
+    limit: int = typer.Option(20, "--limit", "-l", help="Number to show (or max to batch approve)"),
 ) -> None:
     """View and manage suggested links."""
     async def run():
@@ -5220,6 +5222,22 @@ def link_suggestions_cmd(
                 await init_linking_schema(session)
 
             linking = get_linking_service()
+
+            # Batch approve all (or filtered by confidence)
+            if approve_all:
+                async for session in get_session():
+                    approved, failed = await linking.batch_approve_suggestions(
+                        session,
+                        min_confidence=min_confidence,
+                        limit=limit if limit != 20 else None,
+                    )
+                if approved > 0:
+                    console.print(f"[green]✓ Approved {approved} suggestions[/green]")
+                if failed > 0:
+                    console.print(f"[yellow]! {failed} failed to create links[/yellow]")
+                if approved == 0 and failed == 0:
+                    console.print("[dim]No pending suggestions to approve[/dim]")
+                return
 
             if approve:
                 async for session in get_session():
@@ -5251,7 +5269,7 @@ def link_suggestions_cmd(
                 return
 
             table = Table()
-            table.add_column("ID")
+            table.add_column("ID", no_wrap=True)
             table.add_column("Source")
             table.add_column("Target")
             table.add_column("Confidence")
@@ -5259,11 +5277,11 @@ def link_suggestions_cmd(
 
             for s in suggestions:
                 table.add_row(
-                    s["id"][:12],
+                    s["id"],  # Full ID needed for --approve/--reject
                     f"{s['source_type']}: {s.get('source_name') or s['source_id'][:20]}",
                     f"{s['target_type']}: {s.get('target_name') or s['target_id'][:20]}",
                     f"{s['confidence']:.0%}",
-                    (s.get("reason") or "-")[:30],
+                    (s.get("reason") or "-")[:40],
                 )
             console.print(table)
 
@@ -5338,6 +5356,139 @@ def project_content_cmd(
     asyncio.run(run())
 
 
+@app.command("analyze-links")
+def analyze_links_cmd(
+    node_type: str = typer.Option(None, "--type", "-t", help="Node type to analyze (Task, Project, Goal)"),
+    limit: int = typer.Option(10, "--limit", "-l", help="Number of nodes to analyze"),
+    auto_apply: bool = typer.Option(False, "--auto", "-a", help="Auto-apply high-confidence links (>=80%)"),
+    show_unlinked: bool = typer.Option(False, "--show-unlinked", "-u", help="Only show unlinked nodes without analyzing"),
+) -> None:
+    """Analyze unlinked nodes and suggest relationships using AI.
+
+    Uses the LLM to examine tasks, projects, and goals that have few or no
+    relationships and suggests appropriate links based on their names and descriptions.
+
+    Examples:
+      cognitex analyze-links                    # Analyze 10 unlinked nodes
+      cognitex analyze-links --type Task        # Only analyze tasks
+      cognitex analyze-links --limit 20 --auto  # Analyze 20, auto-apply high confidence
+      cognitex analyze-links --show-unlinked    # Just show what needs linking
+    """
+    async def run():
+        from cognitex.db.postgres import init_postgres, close_postgres, get_session
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.services.linking import get_linking_service, init_linking_schema
+
+        await init_postgres()
+        await init_neo4j()
+
+        try:
+            async for session in get_session():
+                await init_linking_schema(session)
+
+            linking = get_linking_service()
+
+            if show_unlinked:
+                # Just show unlinked nodes
+                unlinked = await linking.get_unlinked_nodes(node_type=node_type, limit=limit)
+
+                if not unlinked:
+                    console.print("[dim]No unlinked nodes found[/dim]")
+                    return
+
+                console.print(f"\n[bold]Unlinked Nodes ({len(unlinked)} found)[/bold]\n")
+
+                table = Table()
+                table.add_column("Type")
+                table.add_column("Name")
+                table.add_column("Relationships")
+                table.add_column("Description")
+
+                for node in unlinked:
+                    table.add_row(
+                        node["type"],
+                        (node.get("name") or "-")[:40],
+                        str(node.get("rel_count", 0)),
+                        (node.get("description") or "-")[:50],
+                    )
+
+                console.print(table)
+                console.print("\n[dim]Use 'analyze-links' without --show-unlinked to generate suggestions[/dim]")
+                return
+
+            # Run analysis
+            console.print(f"[cyan]Analyzing unlinked nodes...[/cyan]")
+            if auto_apply:
+                console.print("[yellow]Auto-apply enabled: High confidence links (>=80%) will be created automatically[/yellow]")
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                task = progress.add_task("Analyzing with LLM...", total=None)
+
+                async for session in get_session():
+                    suggestions = await linking.analyze_and_suggest_links(
+                        session,
+                        node_type=node_type,
+                        limit=limit,
+                        auto_apply=auto_apply,
+                    )
+
+                progress.update(task, completed=True)
+
+            if not suggestions:
+                console.print("\n[dim]No suggestions generated. Nodes may already be well-linked or no matches found.[/dim]")
+                return
+
+            # Display results
+            console.print(f"\n[bold]Link Suggestions ({len(suggestions)} generated)[/bold]\n")
+
+            table = Table()
+            table.add_column("Source")
+            table.add_column("Target")
+            table.add_column("Confidence")
+            table.add_column("Status")
+            table.add_column("Reason")
+
+            auto_count = 0
+            pending_count = 0
+
+            for s in suggestions:
+                status = s.get("status", "pending")
+                if status == "auto_applied":
+                    auto_count += 1
+                    status_display = "[green]auto-applied[/green]"
+                else:
+                    pending_count += 1
+                    status_display = "[yellow]pending[/yellow]"
+
+                table.add_row(
+                    s["source"][:30],
+                    s["target"][:30],
+                    f"{s['confidence']:.0%}",
+                    status_display,
+                    (s.get("reason") or "-")[:35],
+                )
+
+            console.print(table)
+
+            # Summary
+            console.print(f"\n[bold]Summary:[/bold]")
+            if auto_count > 0:
+                console.print(f"  [green]Auto-applied: {auto_count}[/green]")
+            if pending_count > 0:
+                console.print(f"  [yellow]Pending approval: {pending_count}[/yellow]")
+                console.print("\n[dim]Use 'cognitex link-suggestions' to review and approve pending suggestions[/dim]")
+
+        finally:
+            await close_postgres()
+            await close_neo4j()
+
+    asyncio.run(run())
+
+
 @app.command("init-linking")
 def init_linking_cmd() -> None:
     """Initialize linking schema (folder/contact mappings, suggestions)."""
@@ -5358,6 +5509,293 @@ def init_linking_cmd() -> None:
 
         finally:
             await close_postgres()
+
+    asyncio.run(run())
+
+
+@app.command("drive-metadata")
+def drive_metadata_cmd(
+    limit: int = typer.Option(None, "--limit", "-l", help="Limit number of files to index"),
+) -> None:
+    """Index all Drive files for metadata (name, folder path, etc.)."""
+    async def run():
+        from cognitex.db.postgres import init_postgres, close_postgres
+        from cognitex.services.drive_metadata import DriveMetadataIndexer
+
+        await init_postgres()
+
+        try:
+            indexer = DriveMetadataIndexer()
+            console.print("[cyan]Indexing Drive file metadata...[/cyan]")
+
+            stats = await indexer.index_all_files(limit=limit)
+
+            console.print("\n[green]✓ Drive metadata indexing complete[/green]")
+            console.print(f"  Total files: {stats['total']}")
+            console.print(f"  Priority folder files: {stats['priority']}")
+            if stats['errors'] > 0:
+                console.print(f"  [yellow]Errors: {stats['errors']}[/yellow]")
+
+        finally:
+            await close_postgres()
+
+    asyncio.run(run())
+
+
+@app.command("semantic-analyze")
+def semantic_analyze_cmd(
+    folder: str = typer.Option(None, "--folder", "-f", help="Specific folder to analyze"),
+    limit: int = typer.Option(None, "--limit", "-l", help="Limit number of files"),
+    force: bool = typer.Option(False, "--force", help="Re-analyze already processed files"),
+    max_size: int = typer.Option(5, "--max-size", "-s", help="Max file size in MB (default 5)"),
+) -> None:
+    """Run semantic analysis on priority folder documents using Gemini."""
+    async def run():
+        from cognitex.db.postgres import init_postgres, close_postgres
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.services.semantic_analysis import SemanticAnalyzer
+
+        await init_postgres()
+        await init_neo4j()
+
+        try:
+            analyzer = SemanticAnalyzer()
+            console.print("[cyan]Running semantic analysis on priority documents...[/cyan]")
+            if folder:
+                console.print(f"  Folder filter: {folder}")
+            console.print(f"  Max file size: {max_size}MB")
+
+            stats = await analyzer.analyze_priority_files(
+                folder=folder,
+                limit=limit,
+                skip_analyzed=not force,
+                max_file_size_mb=max_size,
+            )
+
+            console.print("\n[green]✓ Semantic analysis complete[/green]")
+            console.print(f"  Documents analyzed: {stats['analyzed']}")
+            console.print(f"  Skipped (no content): {stats['skipped']}")
+            if stats.get('skipped_size', 0) > 0:
+                console.print(f"  Skipped (too large): {stats['skipped_size']}")
+            if stats['errors'] > 0:
+                console.print(f"  [yellow]Errors: {stats['errors']}[/yellow]")
+
+        finally:
+            await close_postgres()
+            await close_neo4j()
+
+    asyncio.run(run())
+
+
+@app.command("semantic-status")
+def semantic_status_cmd() -> None:
+    """Show semantic analysis progress and statistics."""
+    async def run():
+        from cognitex.db.postgres import init_postgres, close_postgres, get_session
+        from sqlalchemy import text
+
+        await init_postgres()
+
+        try:
+            async for session in get_session():
+                # Get drive files stats
+                try:
+                    result = await session.execute(text("""
+                        SELECT
+                            COUNT(*) as total_files,
+                            COUNT(*) FILTER (WHERE is_priority) as priority_files,
+                            COUNT(DISTINCT folder_path) as unique_folders
+                        FROM drive_files
+                    """))
+                    drive_stats = result.mappings().one_or_none()
+                except Exception:
+                    drive_stats = None
+
+                # Get analysis stats
+                try:
+                    result = await session.execute(text("""
+                        SELECT COUNT(*) as analyzed_count
+                        FROM document_analysis
+                    """))
+                    analysis_stats = result.mappings().one_or_none()
+                except Exception:
+                    analysis_stats = None
+
+                # Get concept/topic counts from analysis
+                try:
+                    result = await session.execute(text("""
+                        SELECT
+                            SUM(jsonb_array_length(key_concepts)) as total_concepts,
+                            SUM(jsonb_array_length(topics)) as total_topics
+                        FROM document_analysis
+                    """))
+                    semantic_stats = result.mappings().one_or_none()
+                except Exception:
+                    semantic_stats = None
+
+                console.print("\n[bold]Drive File Index[/bold]")
+                if drive_stats and drive_stats['total_files']:
+                    console.print(f"  Total indexed files: {drive_stats['total_files']}")
+                    console.print(f"  Priority folder files: {drive_stats['priority_files']}")
+                    console.print(f"  Unique folders: {drive_stats['unique_folders']}")
+                else:
+                    console.print("  [dim]No files indexed yet. Run: cognitex drive-metadata[/dim]")
+
+                console.print("\n[bold]Semantic Analysis[/bold]")
+                if analysis_stats and analysis_stats['analyzed_count']:
+                    analyzed = analysis_stats['analyzed_count']
+                    priority = drive_stats['priority_files'] if drive_stats else 0
+                    console.print(f"  Documents analyzed: {analyzed}")
+                    if priority > 0:
+                        pct = (analyzed / priority) * 100
+                        console.print(f"  Progress: {pct:.1f}% of priority files")
+
+                    if semantic_stats:
+                        console.print(f"  Total concepts extracted: {semantic_stats['total_concepts'] or 0}")
+                        console.print(f"  Total topics extracted: {semantic_stats['total_topics'] or 0}")
+                else:
+                    console.print("  [dim]No documents analyzed yet. Run: cognitex semantic-analyze[/dim]")
+
+                # Show error count
+                try:
+                    result = await session.execute(text("""
+                        SELECT COUNT(DISTINCT file_id) as error_count FROM analysis_errors
+                    """))
+                    error_stats = result.mappings().one_or_none()
+                    if error_stats and error_stats['error_count']:
+                        console.print(f"  [yellow]Files with errors: {error_stats['error_count']} (run: cognitex semantic-errors)[/yellow]")
+                except Exception:
+                    pass
+
+        finally:
+            await close_postgres()
+
+    asyncio.run(run())
+
+
+@app.command("semantic-errors")
+def semantic_errors_cmd(
+    limit: int = typer.Option(50, "--limit", "-l", help="Max errors to show"),
+    retry: bool = typer.Option(False, "--retry", "-r", help="Retry failed files"),
+) -> None:
+    """Show files that failed semantic analysis (for retry)."""
+    async def run():
+        from cognitex.db.postgres import init_postgres, close_postgres, get_session
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.services.semantic_analysis import ensure_tables
+        from sqlalchemy import text
+
+        await init_postgres()
+        if retry:
+            # Neo4j needed for save_analysis() -> _update_graph()
+            await init_neo4j()
+        await ensure_tables()  # Ensure analysis_errors table exists
+
+        try:
+            async for session in get_session():
+                # Get failed files with their error info
+                result = await session.execute(text("""
+                    SELECT
+                        ae.file_id,
+                        df.name as file_name,
+                        df.folder_path,
+                        ae.error_type,
+                        ae.error_message,
+                        ae.created_at,
+                        COUNT(*) OVER (PARTITION BY ae.file_id) as attempt_count
+                    FROM analysis_errors ae
+                    LEFT JOIN drive_files df ON ae.file_id = df.id
+                    WHERE ae.file_id NOT IN (SELECT file_id FROM document_analysis)
+                    ORDER BY ae.created_at DESC
+                    LIMIT :limit
+                """), {"limit": limit})
+                errors = result.mappings().all()
+
+                if not errors:
+                    console.print("[green]No failed analyses to show.[/green]")
+                    return
+
+                # Get unique file count
+                unique_files = len(set(e['file_id'] for e in errors))
+                console.print(f"\n[bold]Analysis Errors[/bold] ({unique_files} unique files)\n")
+
+                table = Table(show_header=True, header_style="bold")
+                table.add_column("File Name", style="cyan", max_width=40)
+                table.add_column("Folder", style="dim", max_width=30)
+                table.add_column("Error Type", style="yellow")
+                table.add_column("Attempts", justify="right")
+                table.add_column("Last Error", style="red", max_width=50)
+
+                seen_files = set()
+                for error in errors:
+                    if error['file_id'] in seen_files:
+                        continue
+                    seen_files.add(error['file_id'])
+
+                    file_name = error['file_name'] or error['file_id'][:20] + "..."
+                    folder = error['folder_path'] or "-"
+                    if len(folder) > 30:
+                        folder = "..." + folder[-27:]
+
+                    error_msg = error['error_message'] or "-"
+                    if len(error_msg) > 50:
+                        error_msg = error_msg[:47] + "..."
+
+                    table.add_row(
+                        file_name,
+                        folder,
+                        error['error_type'],
+                        str(error['attempt_count']),
+                        error_msg,
+                    )
+
+                console.print(table)
+
+                if retry:
+                    console.print("\n[bold]Retrying failed files...[/bold]")
+                    from cognitex.services.semantic_analysis import SemanticAnalyzer
+                    from cognitex.services.drive import get_drive_service
+
+                    analyzer = SemanticAnalyzer()
+                    drive = get_drive_service()
+
+                    # Get unique file IDs that haven't been analyzed
+                    result = await session.execute(text("""
+                        SELECT DISTINCT ae.file_id, df.mime_type
+                        FROM analysis_errors ae
+                        JOIN drive_files df ON ae.file_id = df.id
+                        WHERE ae.file_id NOT IN (SELECT file_id FROM document_analysis)
+                        LIMIT :limit
+                    """), {"limit": limit})
+                    retry_files = result.mappings().all()
+
+                    success = 0
+                    failed = 0
+                    for file in retry_files:
+                        try:
+                            content = drive.get_file_content(file['file_id'], file['mime_type'])
+                            if content:
+                                analysis = await analyzer.analyze_document(file['file_id'], content)
+                                if analysis:
+                                    await analyzer.save_analysis(analysis)
+                                    success += 1
+                                    console.print(f"  [green]OK[/green] {file['file_id'][:20]}...")
+                                else:
+                                    failed += 1
+                            else:
+                                failed += 1
+                        except Exception as e:
+                            failed += 1
+                            console.print(f"  [red]FAIL[/red] {file['file_id'][:20]}... - {str(e)[:50]}")
+
+                    console.print(f"\n[bold]Retry complete:[/bold] {success} succeeded, {failed} failed")
+                else:
+                    console.print("\n[dim]To retry failed files: cognitex semantic-errors --retry[/dim]")
+
+        finally:
+            await close_postgres()
+            if retry:
+                await close_neo4j()
 
     asyncio.run(run())
 

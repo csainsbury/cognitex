@@ -268,17 +268,19 @@ async def task_edit_form(request: Request, task_id: str):
     """Return inline edit form for a task (HTMX partial)."""
     task_service = get_task_service()
     project_service = get_project_service()
+    goal_service = get_goal_service()
 
     task = await task_service.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
     projects = await project_service.list(limit=100)
+    goals = await goal_service.list(limit=100)
     people = await get_people()
 
     return templates.TemplateResponse(
         "partials/task_edit.html",
-        {"request": request, "task": task, "projects": projects, "people": people},
+        {"request": request, "task": task, "projects": projects, "goals": goals, "people": people},
     )
 
 
@@ -307,6 +309,7 @@ async def task_update(
     due_date: Annotated[str | None, Form()] = None,
     description: Annotated[str | None, Form()] = None,
     project_id: Annotated[str | None, Form()] = None,
+    goal_id: Annotated[str | None, Form()] = None,
     people: Annotated[list[str] | None, Form()] = None,
 ):
     """Update a task and return the updated row."""
@@ -326,7 +329,7 @@ async def task_update(
 
     # Handle relationships
     from cognitex.db.neo4j import get_neo4j_session
-    from cognitex.db.graph_schema import link_task_to_person, link_task_to_project
+    from cognitex.db.graph_schema import link_task_to_person, link_task_to_project, link_task_to_goal
 
     async for session in get_neo4j_session():
         # Remove old people relationships
@@ -347,6 +350,14 @@ async def task_update(
         )
         if project_id:
             await link_task_to_project(session, task_id, project_id)
+
+        # Update goal link (remove old, add new if specified)
+        await session.run(
+            "MATCH (t:Task {id: $task_id})-[r:CONTRIBUTES_TO]->(:Goal) DELETE r",
+            {"task_id": task_id}
+        )
+        if goal_id:
+            await link_task_to_goal(session, task_id, goal_id)
         break
 
     # Re-fetch to get relationships
@@ -1305,6 +1316,486 @@ async def api_chat_clear():
         return JSONResponse({"error": str(e)}, status_code=500)
     finally:
         await redis.close()
+
+
+# -------------------------------------------------------------------
+# Graph Visualization
+# -------------------------------------------------------------------
+
+
+@app.get("/graph", response_class=HTMLResponse)
+async def graph_page(request: Request):
+    """Graph visualization page for exploring the knowledge graph."""
+    return templates.TemplateResponse("graph.html", {"request": request})
+
+
+@app.get("/api/graph/data")
+async def api_graph_data(
+    center: str | None = None,
+    node_type: str | None = None,
+    types: str | None = None,  # Comma-separated list of types to include
+    depth: int = 2,
+    limit: int = 100,
+    hide_completed: bool = True,  # Hide completed tasks by default
+):
+    """Get graph data for D3.js visualization.
+
+    Args:
+        center: Node ID to center the graph on (format: "type:id", e.g., "person:email@example.com")
+        node_type: Filter by single node type (deprecated, use types)
+        types: Comma-separated list of types to include (e.g., "Person,Task,Goal")
+        depth: How many relationship hops from center node (1-3)
+        limit: Maximum number of nodes to return
+        hide_completed: If true, exclude tasks with status='completed' (default: true)
+    """
+    from cognitex.db.neo4j import get_neo4j_session
+
+    nodes = []
+    links = []
+    seen_nodes = set()
+
+    async for session in get_neo4j_session():
+        if center:
+            # Parse center node - format is "type:id"
+            parts = center.split(":", 1)
+            if len(parts) == 2:
+                center_type, center_id = parts
+                # Query centered on specific node
+                query = """
+                MATCH path = (start)-[r*1..$depth]-(end)
+                WHERE (start:Person AND start.email = $center_id)
+                   OR (start:Task AND start.id = $center_id)
+                   OR (start:Project AND start.id = $center_id)
+                   OR (start:Goal AND start.id = $center_id)
+                   OR (start:Document AND start.drive_id = $center_id)
+                   OR (start:Email AND start.message_id = $center_id)
+                   OR (start:Event AND start.gcal_id = $center_id)
+                WITH start, end, r, path
+                LIMIT $limit
+                RETURN DISTINCT
+                    labels(start)[0] as start_type,
+                    CASE labels(start)[0]
+                        WHEN 'Person' THEN start.email
+                        WHEN 'Task' THEN start.id
+                        WHEN 'Project' THEN start.id
+                        WHEN 'Goal' THEN start.id
+                        WHEN 'Document' THEN start.drive_id
+                        WHEN 'Email' THEN start.message_id
+                        WHEN 'Event' THEN start.gcal_id
+                        ELSE coalesce(start.id, start.email, start.drive_id)
+                    END as start_id,
+                    CASE labels(start)[0]
+                        WHEN 'Person' THEN coalesce(start.name, start.email)
+                        WHEN 'Task' THEN start.title
+                        WHEN 'Project' THEN start.title
+                        WHEN 'Goal' THEN start.title
+                        WHEN 'Document' THEN start.name
+                        WHEN 'Email' THEN start.subject
+                        WHEN 'Event' THEN start.title
+                        ELSE coalesce(start.title, start.name, start.subject)
+                    END as start_label,
+                    labels(end)[0] as end_type,
+                    CASE labels(end)[0]
+                        WHEN 'Person' THEN end.email
+                        WHEN 'Task' THEN end.id
+                        WHEN 'Project' THEN end.id
+                        WHEN 'Goal' THEN end.id
+                        WHEN 'Document' THEN end.drive_id
+                        WHEN 'Email' THEN end.message_id
+                        WHEN 'Event' THEN end.gcal_id
+                        ELSE coalesce(end.id, end.email, end.drive_id)
+                    END as end_id,
+                    CASE labels(end)[0]
+                        WHEN 'Person' THEN coalesce(end.name, end.email)
+                        WHEN 'Task' THEN end.title
+                        WHEN 'Project' THEN end.title
+                        WHEN 'Goal' THEN end.title
+                        WHEN 'Document' THEN end.name
+                        WHEN 'Email' THEN end.subject
+                        WHEN 'Event' THEN end.title
+                        ELSE coalesce(end.title, end.name, end.subject)
+                    END as end_label,
+                    type(r[0]) as rel_type
+                """
+                result = await session.run(query, {
+                    "center_id": center_id,
+                    "depth": min(depth, 3),
+                    "limit": limit * 2,
+                })
+        else:
+            # Overview query - get most connected nodes
+            # Parse types parameter (comma-separated) or fall back to node_type
+            allowed_types = []
+            if types:
+                allowed_types = [t.strip() for t in types.split(",") if t.strip()]
+            elif node_type:
+                allowed_types = [node_type]
+
+            # Default interesting types if nothing specified
+            if not allowed_types:
+                allowed_types = ['Person', 'Task', 'Project', 'Goal', 'Email', 'Event', 'Repository', 'Topic', 'Concept', 'Document']
+
+            # Build type filter - only filter the primary node, allow any connected nodes
+            # This way when you select "Person", you see Person nodes and what they connect to
+            type_list = "['" + "','".join(allowed_types) + "']"
+            type_filter = f"WHERE labels(n)[0] IN {type_list}"
+
+            # Add filter to exclude completed tasks if requested
+            if hide_completed:
+                type_filter += " AND NOT (labels(n)[0] = 'Task' AND n.status = 'completed')"
+
+            query = f"""
+            MATCH (n)-[r]-(m)
+            {type_filter}
+            WITH n, m, r
+            LIMIT $limit
+            RETURN DISTINCT
+                labels(n)[0] as start_type,
+                CASE labels(n)[0]
+                    WHEN 'Person' THEN n.email
+                    WHEN 'Task' THEN n.id
+                    WHEN 'Project' THEN n.id
+                    WHEN 'Goal' THEN n.id
+                    WHEN 'Document' THEN n.drive_id
+                    WHEN 'Email' THEN n.message_id
+                    WHEN 'Event' THEN n.gcal_id
+                    WHEN 'Repository' THEN n.id
+                    WHEN 'Topic' THEN n.name
+                    WHEN 'Concept' THEN n.name
+                    ELSE coalesce(n.id, n.email, n.drive_id, n.name)
+                END as start_id,
+                CASE labels(n)[0]
+                    WHEN 'Person' THEN coalesce(n.name, n.email)
+                    WHEN 'Task' THEN n.title
+                    WHEN 'Project' THEN n.title
+                    WHEN 'Goal' THEN n.title
+                    WHEN 'Document' THEN n.name
+                    WHEN 'Email' THEN n.subject
+                    WHEN 'Event' THEN n.title
+                    WHEN 'Repository' THEN n.full_name
+                    WHEN 'Topic' THEN n.name
+                    WHEN 'Concept' THEN n.name
+                    ELSE coalesce(n.title, n.name, n.subject)
+                END as start_label,
+                labels(m)[0] as end_type,
+                CASE labels(m)[0]
+                    WHEN 'Person' THEN m.email
+                    WHEN 'Task' THEN m.id
+                    WHEN 'Project' THEN m.id
+                    WHEN 'Goal' THEN m.id
+                    WHEN 'Document' THEN m.drive_id
+                    WHEN 'Email' THEN m.message_id
+                    WHEN 'Event' THEN m.gcal_id
+                    WHEN 'Repository' THEN m.id
+                    WHEN 'Topic' THEN m.name
+                    WHEN 'Concept' THEN m.name
+                    ELSE coalesce(m.id, m.email, m.drive_id, m.name)
+                END as end_id,
+                CASE labels(m)[0]
+                    WHEN 'Person' THEN coalesce(m.name, m.email)
+                    WHEN 'Task' THEN m.title
+                    WHEN 'Project' THEN m.title
+                    WHEN 'Goal' THEN m.title
+                    WHEN 'Document' THEN m.name
+                    WHEN 'Email' THEN m.subject
+                    WHEN 'Event' THEN m.title
+                    WHEN 'Repository' THEN m.full_name
+                    WHEN 'Topic' THEN m.name
+                    WHEN 'Concept' THEN m.name
+                    ELSE coalesce(m.title, m.name, m.subject)
+                END as end_label,
+                type(r) as rel_type
+            """
+            result = await session.run(query, {"limit": limit * 2})
+
+        data = await result.data()
+
+        for row in data:
+            # Add start node
+            start_key = f"{row['start_type']}:{row['start_id']}"
+            if start_key not in seen_nodes and row['start_id']:
+                seen_nodes.add(start_key)
+                nodes.append({
+                    "id": start_key,
+                    "type": row["start_type"],
+                    "label": row["start_label"] or row["start_id"] or "Unknown",
+                })
+
+            # Add end node
+            end_key = f"{row['end_type']}:{row['end_id']}"
+            if end_key not in seen_nodes and row['end_id']:
+                seen_nodes.add(end_key)
+                nodes.append({
+                    "id": end_key,
+                    "type": row["end_type"],
+                    "label": row["end_label"] or row["end_id"] or "Unknown",
+                })
+
+            # Add link
+            if row['start_id'] and row['end_id']:
+                links.append({
+                    "source": start_key,
+                    "target": end_key,
+                    "type": row["rel_type"],
+                })
+
+        break
+
+    # Limit nodes if too many
+    if len(nodes) > limit:
+        nodes = nodes[:limit]
+        # Filter links to only include nodes that are still present
+        node_ids = {n["id"] for n in nodes}
+        links = [l for l in links if l["source"] in node_ids and l["target"] in node_ids]
+
+    return JSONResponse({"nodes": nodes, "links": links})
+
+
+@app.get("/api/graph/search")
+async def api_graph_search(q: str = "", limit: int = 20):
+    """Search for nodes by name/title to center the graph on."""
+    from cognitex.db.neo4j import get_neo4j_session
+
+    if not q or len(q) < 2:
+        return JSONResponse([])
+
+    async for session in get_neo4j_session():
+        query = """
+        CALL {
+            MATCH (p:Person)
+            WHERE toLower(p.name) CONTAINS toLower($query)
+               OR toLower(p.email) CONTAINS toLower($query)
+            RETURN 'Person' as type, p.email as id, coalesce(p.name, p.email) as label
+            LIMIT 5
+
+            UNION ALL
+
+            MATCH (t:Task)
+            WHERE toLower(t.title) CONTAINS toLower($query)
+            RETURN 'Task' as type, t.id as id, t.title as label
+            LIMIT 5
+
+            UNION ALL
+
+            MATCH (p:Project)
+            WHERE toLower(p.title) CONTAINS toLower($query)
+            RETURN 'Project' as type, p.id as id, p.title as label
+            LIMIT 5
+
+            UNION ALL
+
+            MATCH (g:Goal)
+            WHERE toLower(g.title) CONTAINS toLower($query)
+            RETURN 'Goal' as type, g.id as id, g.title as label
+            LIMIT 5
+        }
+        RETURN type, id, label
+        LIMIT $limit
+        """
+        result = await session.run(query, {"query": q, "limit": limit})
+        data = await result.data()
+
+        return JSONResponse([
+            {"id": f"{row['type']}:{row['id']}", "type": row["type"], "label": row["label"]}
+            for row in data
+            if row["id"]
+        ])
+
+    return JSONResponse([])
+
+
+@app.post("/api/graph/link")
+async def api_graph_link(
+    source_type: str,
+    source_id: str,
+    target_type: str,
+    target_id: str,
+    relationship: str,
+    action: str = "create",  # "create" or "delete"
+):
+    """Create or delete a relationship between two nodes."""
+    from cognitex.db.neo4j import get_neo4j_session
+    from cognitex.db.graph_schema import (
+        link_task_to_project, link_task_to_goal, link_task_to_person,
+        link_project_to_goal, link_project_to_person, link_project_to_repository,
+        link_goal_to_person, link_goal_parent,
+    )
+
+    # Map of valid relationships by source->target types
+    # Each entry: (source_type, target_type) -> (relationship_type, link_function)
+    valid_links = {
+        ("Task", "Project"): ("PART_OF", link_task_to_project),
+        ("Task", "Goal"): ("CONTRIBUTES_TO", link_task_to_goal),
+        ("Task", "Person"): ("INVOLVES", link_task_to_person),
+        ("Project", "Goal"): ("PART_OF", link_project_to_goal),
+        ("Project", "Person"): ("INVOLVES", link_project_to_person),
+        ("Project", "Repository"): ("USES", link_project_to_repository),
+        ("Goal", "Person"): ("OWNED_BY", link_goal_to_person),
+        ("Goal", "Goal"): ("PARENT_OF", link_goal_parent),
+    }
+
+    link_key = (source_type, target_type)
+    if link_key not in valid_links:
+        return JSONResponse(
+            {"success": False, "error": f"Cannot link {source_type} to {target_type}"},
+            status_code=400
+        )
+
+    rel_type, link_func = valid_links[link_key]
+
+    async for session in get_neo4j_session():
+        try:
+            if action == "delete":
+                # Delete the relationship
+                query = f"""
+                MATCH (s:{source_type} {{id: $source_id}})-[r:{rel_type}]->(t:{target_type} {{id: $target_id}})
+                DELETE r
+                RETURN count(r) as deleted
+                """
+                # Handle Person nodes which use email as id
+                if source_type == "Person":
+                    query = query.replace("{id: $source_id}", "{email: $source_id}")
+                if target_type == "Person":
+                    query = query.replace("{id: $target_id}", "{email: $target_id}")
+
+                result = await session.run(query, {
+                    "source_id": source_id,
+                    "target_id": target_id
+                })
+                data = await result.single()
+                return JSONResponse({
+                    "success": True,
+                    "action": "deleted",
+                    "deleted": data["deleted"] if data else 0
+                })
+            else:
+                # Create the relationship using the appropriate link function
+                # Person links use email as identifier
+                if target_type == "Person":
+                    await link_func(session, source_id, target_id)
+                elif source_type == "Person":
+                    # Reverse: we need to call differently
+                    await link_func(session, target_id, source_id)
+                else:
+                    await link_func(session, source_id, target_id)
+
+                return JSONResponse({
+                    "success": True,
+                    "action": "created",
+                    "relationship": rel_type
+                })
+        except Exception as e:
+            return JSONResponse(
+                {"success": False, "error": str(e)},
+                status_code=500
+            )
+
+    return JSONResponse({"success": False, "error": "No session"}, status_code=500)
+
+
+@app.get("/api/graph/link-targets")
+async def api_graph_link_targets(node_type: str, q: str = "", limit: int = 20):
+    """Get possible link targets for a node type."""
+    from cognitex.db.neo4j import get_neo4j_session
+
+    # Define what each node type can link to
+    linkable_types = {
+        "Task": ["Project", "Goal", "Person"],
+        "Project": ["Goal", "Person", "Repository"],
+        "Goal": ["Person", "Goal"],  # Goals can have parent goals
+    }
+
+    if node_type not in linkable_types:
+        return JSONResponse({"targets": [], "linkable_types": []})
+
+    targets = []
+    async for session in get_neo4j_session():
+        for target_type in linkable_types[node_type]:
+            if target_type == "Person":
+                query = """
+                MATCH (p:Person)
+                WHERE $query = '' OR toLower(coalesce(p.name, p.email)) CONTAINS toLower($query)
+                RETURN 'Person' as type, p.email as id, coalesce(p.name, p.email) as label
+                LIMIT $limit
+                """
+            elif target_type == "Goal":
+                query = """
+                MATCH (g:Goal)
+                WHERE $query = '' OR toLower(g.title) CONTAINS toLower($query)
+                RETURN 'Goal' as type, g.id as id, g.title as label
+                LIMIT $limit
+                """
+            elif target_type == "Project":
+                query = """
+                MATCH (p:Project)
+                WHERE $query = '' OR toLower(p.title) CONTAINS toLower($query)
+                RETURN 'Project' as type, p.id as id, p.title as label
+                LIMIT $limit
+                """
+            elif target_type == "Repository":
+                query = """
+                MATCH (r:Repository)
+                WHERE $query = '' OR toLower(r.name) CONTAINS toLower($query)
+                RETURN 'Repository' as type, r.id as id, r.name as label
+                LIMIT $limit
+                """
+            else:
+                continue
+
+            result = await session.run(query, {"query": q, "limit": limit})
+            data = await result.data()
+            targets.extend([
+                {"type": row["type"], "id": row["id"], "label": row["label"]}
+                for row in data if row["id"]
+            ])
+        break
+
+    return JSONResponse({
+        "targets": targets[:limit],
+        "linkable_types": linkable_types.get(node_type, [])
+    })
+
+
+@app.post("/api/graph/analyze")
+async def api_analyze_node(
+    node_type: str,
+    node_id: str,
+    node_name: str,
+    node_description: str | None = None,
+):
+    """Analyze a node and suggest/auto-apply links using AI.
+
+    Called after creating a task/project/goal to suggest relationships.
+    High confidence (>=90%) links are auto-applied.
+    """
+    from cognitex.services.linking import get_linking_service
+    from cognitex.db.postgres import get_postgres_session
+
+    linking_service = get_linking_service()
+
+    try:
+        async for pg_session in get_postgres_session():
+            suggestions = await linking_service.analyze_single_node(
+                pg_session=pg_session,
+                node_type=node_type,
+                node_id=node_id,
+                node_name=node_name,
+                node_description=node_description,
+                auto_apply_threshold=0.9,
+            )
+
+            return JSONResponse({
+                "status": "ok",
+                "suggestions": suggestions,
+                "auto_applied": [s for s in suggestions if s.get("status") == "auto"],
+                "pending": [s for s in suggestions if s.get("status") == "pending"],
+            })
+
+    except Exception as e:
+        return JSONResponse(
+            {"status": "error", "message": str(e)},
+            status_code=500,
+        )
 
 
 # -------------------------------------------------------------------

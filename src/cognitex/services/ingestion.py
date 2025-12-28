@@ -1318,11 +1318,16 @@ async def run_deep_document_indexing(
                     mime_type=mime_type,
                 )
 
-                stats["documents_processed"] += 1
-                stats["chunks_total"] += result["chunks_created"]
-                stats["embeddings_total"] += result["embeddings_created"]
-                folder_stats["docs"] += 1
-                folder_stats["chunks"] += result["chunks_created"]
+                # Only count as processed if new work was done (not skipped)
+                if result["chunks_created"] > 0:
+                    stats["documents_processed"] += 1
+                    stats["chunks_total"] += result["chunks_created"]
+                    stats["embeddings_total"] += result["embeddings_created"]
+                    folder_stats["docs"] += 1
+                    folder_stats["chunks"] += result["chunks_created"]
+                else:
+                    # Document was already indexed with same content
+                    folder_stats["skipped"] += 1
 
                 # Free memory
                 del content
@@ -1668,6 +1673,13 @@ async def analyze_chunk_for_graph(
     """
     Analyze a chunk using LLM and create graph relationships.
 
+    Uses the planner model for deep semantic understanding and extracts:
+    - People (with roles and context)
+    - Organizations
+    - Topics and concepts (with domains)
+    - Semantic tags for clustering
+    - Relationships between entities
+
     Args:
         pg_session: PostgreSQL async session
         neo4j_session: Neo4j async session
@@ -1683,6 +1695,8 @@ async def analyze_chunk_for_graph(
         link_chunk_to_topic,
         link_chunk_to_concept,
         link_chunk_to_person,
+        link_chunk_to_organization,
+        link_chunk_to_semantic_tag,
     )
 
     # Parse chunk_id
@@ -1708,9 +1722,22 @@ async def analyze_chunk_for_graph(
 
     content = row.content
 
-    # Extract entities using LLM
+    # Extract entities using LLM (uses planner model for deep understanding)
     llm = get_llm_service()
     entities = await llm.extract_entities_from_chunk(content, document_name, chunk_index)
+
+    # Normalize key_facts to list of strings (handle both string and dict formats)
+    # New format: [{"fact": "...", "category": "...", "confidence": "..."}]
+    raw_key_facts = entities.get("key_facts", [])
+    key_facts = []
+    for kf in raw_key_facts:
+        if isinstance(kf, dict):
+            # Extract just the fact text from dict format
+            fact_text = kf.get("fact", "")
+            if fact_text:
+                key_facts.append(fact_text)
+        elif isinstance(kf, str) and kf:
+            key_facts.append(kf)
 
     # Create chunk node in graph
     await create_chunk(
@@ -1720,7 +1747,7 @@ async def analyze_chunk_for_graph(
         chunk_index=chunk_index,
         summary=entities.get("summary"),
         content_type=entities.get("content_type"),
-        key_facts=entities.get("key_facts", []),
+        key_facts=key_facts,
     )
 
     # Link to topics
@@ -1729,17 +1756,47 @@ async def analyze_chunk_for_graph(
         if topic:
             await link_chunk_to_topic(neo4j_session, chunk_id, topic)
 
-    # Link to concepts
+    # Link to concepts (handle both string and dict formats)
     concepts = entities.get("concepts", [])
     for concept in concepts:
         if concept:
-            await link_chunk_to_concept(neo4j_session, chunk_id, concept)
+            # New format: {"term": "...", "domain": "...", "definition": "..."}
+            if isinstance(concept, dict):
+                term = concept.get("term", "")
+                if term:
+                    await link_chunk_to_concept(neo4j_session, chunk_id, term)
+            else:
+                await link_chunk_to_concept(neo4j_session, chunk_id, concept)
 
-    # Link to people
+    # Link to people (handle both string and dict formats)
     people = entities.get("people", [])
     for person in people:
         if person:
-            await link_chunk_to_person(neo4j_session, chunk_id, person)
+            # New format: {"name": "...", "role": "...", "context": "..."}
+            if isinstance(person, dict):
+                name = person.get("name", "")
+                if name:
+                    await link_chunk_to_person(neo4j_session, chunk_id, name)
+            else:
+                await link_chunk_to_person(neo4j_session, chunk_id, person)
+
+    # Link to organizations (new in deep extraction)
+    organizations = entities.get("organizations", [])
+    for org in organizations:
+        if org:
+            if isinstance(org, dict):
+                org_name = org.get("name", "")
+                org_type = org.get("type", "")
+                if org_name:
+                    await link_chunk_to_organization(neo4j_session, chunk_id, org_name, org_type)
+            else:
+                await link_chunk_to_organization(neo4j_session, chunk_id, org)
+
+    # Link to semantic tags (for clustering similar content)
+    semantic_tags = entities.get("semantic_tags", [])
+    for tag in semantic_tags:
+        if tag:
+            await link_chunk_to_semantic_tag(neo4j_session, chunk_id, tag)
 
     return {
         "chunk_id": chunk_id,
@@ -1748,7 +1805,10 @@ async def analyze_chunk_for_graph(
         "topics": len(topics),
         "concepts": len(concepts),
         "people": len(people),
+        "organizations": len(organizations),
+        "semantic_tags": len(semantic_tags),
         "key_facts": len(entities.get("key_facts", [])),
+        "actionable_items": len(entities.get("actionable_items", [])),
     }
 
 

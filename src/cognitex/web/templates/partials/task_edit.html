@@ -31,7 +31,15 @@
             {% endfor %}
         </select>
     </td>
-    <td colspan="2">
+    <td>
+        <select name="goal_id" form="task-edit-{{ task.id }}">
+            <option value="">None</option>
+            {% for goal in goals %}
+            <option value="{{ goal.id }}" {% if task.goal_id == goal.id %}selected{% endif %}>{{ goal.title }}</option>
+            {% endfor %}
+        </select>
+    </td>
+    <td>
         <div class="people-picker" data-form-id="task-edit-{{ task.id }}" data-initial='{{ task.people_full | default([]) | tojson }}'></div>
     </td>
     <td class="actions">

@@ -370,49 +370,82 @@ Return ONLY valid JSON, no other text. Use null for unknown fields."""
         content: str,
         document_name: str,
         chunk_index: int,
+        use_deep_model: bool = True,
     ) -> dict:
         """
         Extract entities and semantic information from a document chunk.
+
+        Uses the planner model (DeepSeek-V3) for deep semantic understanding.
 
         Args:
             content: The chunk text content
             document_name: Name of the source document
             chunk_index: Position of chunk in document
+            use_deep_model: Use planner model for better extraction (default True)
 
         Returns:
-            Dict with people, topics, concepts, summary, and key_facts
+            Dict with people, topics, concepts, relationships, summary, and key_facts
         """
-        # Truncate content if too long
-        content = content[:3000]
+        # Use more content for deep understanding (5000 chars vs 3000)
+        content = content[:5000]
 
-        prompt = f"""Analyze this document chunk and extract structured information.
+        prompt = f"""Analyze this document chunk deeply and extract structured semantic information.
 
 Document: {document_name}
 Chunk #{chunk_index}
 Content:
 {content}
 
-Extract the following as JSON:
+Perform deep analysis and extract as JSON:
 
-1. "people": List of people mentioned (names or email addresses). Include full names when available.
+1. "people": List of people mentioned with context.
+   - Include full names, email addresses, job titles/roles when available
+   - Format as objects: {{"name": "...", "role": "...", "context": "..."}}
+   - Example: {{"name": "Dr. Sarah Chen", "role": "Principal Investigator", "context": "leading the HbA1c study"}}
 
-2. "topics": List of 2-5 main topics/themes discussed. Use concise labels like "diabetes management", "project timeline", "budget planning".
+2. "organizations": List of organizations, companies, institutions mentioned.
+   - Format: {{"name": "...", "type": "...", "context": "..."}}
+   - Types: company, university, hospital, government, nonprofit, team
 
-3. "concepts": List of important domain concepts, technical terms, or entities mentioned (e.g., "HbA1c", "blood pressure", "Q4 deadline", "API endpoint").
+3. "topics": List of 3-7 semantic topics/themes discussed.
+   - Be specific and use domain language: "type 2 diabetes management", "continuous glucose monitoring"
+   - Include both primary topic and subtopics
 
-4. "summary": A 1-2 sentence summary of what this chunk is about.
+4. "concepts": List of domain concepts with definitions.
+   - Format: {{"term": "...", "domain": "...", "definition": "..."}}
+   - Domains: medical, technical, business, legal, scientific, etc.
+   - Example: {{"term": "HbA1c", "domain": "medical", "definition": "glycated hemoglobin measure of blood sugar over 3 months"}}
 
-5. "key_facts": List of specific factual claims or data points (dates, numbers, decisions, etc.).
+5. "relationships": List of relationships between entities.
+   - Format: {{"from": "...", "relationship": "...", "to": "..."}}
+   - Example: {{"from": "Dr. Chen", "relationship": "supervises", "to": "research team"}}
+   - Example: {{"from": "Study A", "relationship": "funded_by", "to": "NHS"}}
 
-6. "content_type": One of: "data", "narrative", "code", "mixed", "correspondence", "notes"
+6. "summary": A 2-3 sentence comprehensive summary capturing the key information.
 
-Return ONLY valid JSON, no markdown formatting."""
+7. "key_facts": List of specific, verifiable facts.
+   - Include dates, numbers, decisions, outcomes, metrics
+   - Format: {{"fact": "...", "category": "...", "confidence": "high|medium"}}
+   - Categories: metric, date, decision, outcome, requirement
+
+8. "content_type": Primary type: "research", "correspondence", "data", "narrative", "code", "meeting_notes", "planning", "report"
+
+9. "semantic_tags": List of 3-5 high-level tags for clustering similar content.
+   - Examples: "healthcare_research", "project_management", "financial_planning", "technical_documentation"
+
+10. "actionable_items": Any tasks, to-dos, or action items mentioned.
+    - Format: {{"action": "...", "assignee": "...", "deadline": "..."}}
+
+Return ONLY valid JSON, no markdown formatting or explanation."""
+
+        # Use planner model for deep understanding
+        model = self.primary_model if use_deep_model else self.fast_model
 
         try:
             response = await self.complete(
                 prompt,
-                model=self.fast_model,
-                max_tokens=1024,
+                model=model,
+                max_tokens=2048,
                 temperature=0.1,
             )
 
@@ -423,24 +456,50 @@ Return ONLY valid JSON, no markdown formatting."""
 
             result = json.loads(response)
 
+            # Normalize people format (support both old string format and new object format)
+            people = result.get("people", [])
+            normalized_people = []
+            for p in people:
+                if isinstance(p, str):
+                    normalized_people.append({"name": p, "role": "", "context": ""})
+                elif isinstance(p, dict):
+                    normalized_people.append(p)
+
+            # Normalize concepts format
+            concepts = result.get("concepts", [])
+            normalized_concepts = []
+            for c in concepts:
+                if isinstance(c, str):
+                    normalized_concepts.append({"term": c, "domain": "", "definition": ""})
+                elif isinstance(c, dict):
+                    normalized_concepts.append(c)
+
             return {
-                "people": result.get("people", []),
+                "people": normalized_people,
+                "organizations": result.get("organizations", []),
                 "topics": result.get("topics", []),
-                "concepts": result.get("concepts", []),
+                "concepts": normalized_concepts,
+                "relationships": result.get("relationships", []),
                 "summary": result.get("summary", ""),
                 "key_facts": result.get("key_facts", []),
                 "content_type": result.get("content_type", "mixed"),
+                "semantic_tags": result.get("semantic_tags", []),
+                "actionable_items": result.get("actionable_items", []),
             }
 
         except json.JSONDecodeError as e:
             logger.warning("Failed to parse entity extraction response", error=str(e))
             return {
                 "people": [],
+                "organizations": [],
                 "topics": [],
                 "concepts": [],
+                "relationships": [],
                 "summary": "",
                 "key_facts": [],
                 "content_type": "unknown",
+                "semantic_tags": [],
+                "actionable_items": [],
                 "parse_error": str(e),
             }
 
