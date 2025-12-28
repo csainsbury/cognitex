@@ -55,7 +55,7 @@
 \maketitle
 
 \begin{abstract}
-We present \cognitex{}, a personal agent architecture designed to reduce cognitive overhead for knowledge workers by unifying email, calendar, document, and code repository data into a hybrid semantic knowledge graph. The system implements a hierarchical large language model (LLM) architecture with distinct reasoning and execution tiers, combined with a three-level risk stratification framework (read-only, auto-execute, approval-required) that balances autonomous operation with human agency. A key innovation is the \textbf{autonomous graph orchestration layer}: an always-running agent that proactively monitors graph health, creates connections between related entities (documents to projects, repositories to projects, tasks to goals), and surfaces items requiring human attention via Discord notifications. The architecture integrates three complementary knowledge representations: a Neo4j property graph capturing entities and relationships, PostgreSQL with pgvector extensions for 768-dimensional semantic embeddings, and Redis-backed working memory for session context. The agent employs a ReAct-style (Reason + Act) planning loop with decision trace capture, an executive function layer modeling user cognitive state, and externalized prompt templates for iterative refinement. \cognitex{} represents a reference implementation for trustworthy personal AI systems that maintain transparency while providing meaningful cognitive assistance through both reactive and proactive behaviors.
+We present \cognitex{}, a personal agent architecture designed to reduce cognitive overhead for knowledge workers by unifying email, calendar, document, and code repository data into a hybrid semantic knowledge graph. The system implements a hierarchical large language model (LLM) architecture with distinct reasoning and execution tiers, combined with a three-level risk stratification framework (read-only, auto-execute, approval-required) that balances autonomous operation with human agency. A key innovation is the \textbf{Digital Twin} capability: an autonomous agent that learns the user's communication style from sent emails and can draft replies, compile context packs for upcoming meetings, and suggest focus time blocks for stalled projects. The agent proactively monitors graph health, creates connections between related entities, and surfaces items requiring human attention via Discord notifications. A dedicated review dashboard enables users to approve, edit, or discard agent-generated drafts before execution. The architecture integrates three complementary knowledge representations: a Neo4j property graph capturing entities and relationships, PostgreSQL with pgvector extensions for 768-dimensional semantic embeddings, and Redis-backed working memory for session context. The agent employs a ReAct-style (Reason + Act) planning loop with decision trace capture, an executive function layer modeling user cognitive state, and externalized prompt templates for iterative refinement. \cognitex{} represents a reference implementation for trustworthy personal AI systems that maintain transparency while providing meaningful cognitive assistance through both reactive and proactive behaviors.
 \end{abstract}
 
 \noindent\textbf{Keywords:} Personal agents, Knowledge graphs, Large language models, Cognitive load management, Semantic search, ReAct agents, Autonomous orchestration, Human-AI collaboration
@@ -74,6 +74,8 @@ This paper presents \cognitex{}, a personal agent system that addresses these ch
 
 \begin{enumerate}
     \item \textbf{Hybrid Knowledge Representation}: We integrate property graphs (Neo4j), vector embeddings (PostgreSQL/pgvector), and key-value caching (Redis) to capture complementary aspects of personal knowledge---relationships, semantic similarity, and session context respectively.
+
+    \item \textbf{Digital Twin Agent}: An autonomous agent that learns the user's writing style from sent emails and acts on their behalf---drafting email replies, compiling context packs for meetings, and suggesting focus time blocks---with a dedicated review dashboard for approval before execution.
 
     \item \textbf{Autonomous Graph Orchestration}: An always-running agent loop that proactively monitors graph state, identifies connection opportunities (documents matching project names, repositories matching projects, orphaned tasks), creates links automatically, and surfaces ambiguous items for human review via Discord notifications.
 
@@ -234,6 +236,9 @@ Goal & id, title, timeframe, target\_date & Strategic objectives \\
 Chunk & id, chunk\_index, summary & Document segments \\
 Topic & name & Extracted themes \\
 Concept & name & Domain concepts \\
+EmailDraft & id, to, subject, body, status & Agent-drafted replies \\
+ContextPack & id, title, summary, key\_points & Meeting briefings \\
+SuggestedBlock & id, title, duration, status & Focus time suggestions \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -470,6 +475,75 @@ CREATE TABLE agent_actions (
 \end{lstlisting}
 
 The web dashboard provides a dedicated Agent Log page for reviewing action history with filtering by status and source.
+
+\subsection{Digital Twin Capabilities}
+
+Beyond graph maintenance, the autonomous agent implements ``Digital Twin'' functionality---acting on behalf of the user when they are unavailable.
+
+\subsubsection{Perception Layer}
+
+The Graph Observer includes specialized perception methods for Digital Twin operation:
+
+\begin{lstlisting}[language=Python]
+class GraphObserver:
+    async def get_user_writing_samples(self, limit=5):
+        """Fetch recent emails SENT BY user for style learning."""
+
+    async def get_actionable_emails(self, limit=10):
+        """Get emails needing response (actionable/urgent,
+           no reply sent, no draft created)."""
+
+    async def get_pending_calendar_blocks(self, days=7):
+        """Get meetings needing preparation."""
+
+    async def get_projects_with_recent_blocks(self, days=7):
+        """Track projects already suggested for focus time."""
+\end{lstlisting}
+
+\subsubsection{Digital Twin Actions}
+
+Three new action types extend the autonomous agent's capabilities:
+
+\paragraph{DRAFT\_EMAIL:} Draft a reply to an incoming email in the user's voice. The agent learns communication style from the user's sent email samples and generates contextually appropriate responses.
+
+\begin{lstlisting}[language=Python]
+{
+    "action": "DRAFT_EMAIL",
+    "email_id": "...",
+    "to": "recipient@example.com",
+    "subject": "Re: ...",
+    "body": "Draft content matching user's style",
+    "reason": "Why this email needs response"
+}
+\end{lstlisting}
+
+\paragraph{COMPILE\_CONTEXT\_PACK:} Prepare a briefing document for an upcoming meeting, gathering relevant documents, tasks, and key points.
+
+\paragraph{SCHEDULE\_BLOCK:} Suggest focus time blocks for projects needing attention. Links to the relevant project and includes duration and rationale.
+
+\subsubsection{Skip Tracking}
+
+To prevent the agent from repeatedly suggesting the same actions after user dismissal, the system tracks actioned items:
+
+\begin{itemize}
+    \item Emails with any \texttt{EmailDraft} linked (regardless of draft status) are excluded from \texttt{get\_actionable\_emails()}
+    \item Calendar events with any \texttt{ContextPack} linked are excluded from \texttt{get\_pending\_calendar\_blocks()}
+    \item Projects with recent \texttt{SuggestedBlock} nodes are included in a skip list passed to the LLM prompt
+\end{itemize}
+
+This ensures that when users discard, approve, or edit agent outputs, the agent respects those decisions and does not recreate identical suggestions.
+
+\subsubsection{Review Dashboard}
+
+A dedicated ``Twin'' page in the web dashboard enables review of agent-generated outputs:
+
+\begin{itemize}
+    \item \textbf{Email Drafts}: View full draft with original email context; approve (send), edit then send, or discard
+    \item \textbf{Context Packs}: View gathered context for meetings; archive when no longer needed
+    \item \textbf{Suggested Blocks}: Review focus time suggestions; approve (add to calendar) or dismiss
+\end{itemize}
+
+All items show the agent's reasoning for the suggestion, enabling informed user decisions.
 
 \section{Executive Function Layer}
 \label{sec:executive}
@@ -760,12 +834,20 @@ The web dashboard provides a comprehensive interface for system interaction and 
 
 \paragraph{Agent Log:} Autonomous agent action history with:
 \begin{itemize}
-    \item Action timeline (link\_document, link\_repository, create\_task, flag\_for\_review, etc.)
+    \item Action timeline (link\_document, link\_repository, create\_task, draft\_email, etc.)
     \item Filtering by status (completed, failed, pending) and source (agent, trigger, user)
     \item Statistics: total actions, last 24h, failed count
     \item Action type and source breakdowns
     \item Manual ``Run Cycle Now'' button for testing
     \item Autonomous agent status indicator
+\end{itemize}
+
+\paragraph{Twin (Digital Twin Review):} Review and approve agent-generated outputs:
+\begin{itemize}
+    \item \textbf{Email Drafts}: Pending drafts with approve/edit/discard actions; shows recipient, subject, body, and agent's reasoning
+    \item \textbf{Context Packs}: Meeting briefings with key points and linked documents/tasks; archive action
+    \item \textbf{Suggested Blocks}: Focus time suggestions with project, duration, and timing; approve (add to calendar) or dismiss
+    \item Stats showing counts of pending items in each category
 \end{itemize}
 
 \paragraph{State:} Operating mode management and interruption firewall status with queued item display.
@@ -1032,37 +1114,47 @@ CREATE INDEX chunk_analyzed FOR (c:Chunk) ON (c.analyzed);
 \section{Autonomous Agent Prompt Template}
 \label{app:prompt}
 
-The autonomous agent uses an externalized prompt template stored at \texttt{src/cognitex/prompts/autonomous\_agent.md}. Key sections include:
+The autonomous agent uses an externalized prompt template stored at \texttt{src/cognitex/prompts/autonomous\_agent.md}. The prompt implements a ``Digital Twin'' persona:
 
-\begin{lstlisting}[caption={Autonomous agent prompt structure (abbreviated)}]
-# Autonomous Agent System Prompt
+\begin{lstlisting}[caption={Digital Twin agent prompt structure (abbreviated)}]
+# Digital Twin Autonomous Agent
 
-You are an autonomous agent managing a knowledge graph.
-Your PRIMARY job is to CREATE CONNECTIONS between
-related entities. You have FULL AUTONOMY - act decisively.
+You are a Digital Twin - an autonomous agent that acts on
+behalf of the user when they're not available.
 
-## CRITICAL RULES:
-1. Every item in "Connection Opportunities" MUST result
-   in a LINK action - these are pre-validated matches
-2. NEVER use FLAG_FOR_REVIEW for items already in
-   Connection Opportunities
-3. FLAG_FOR_REVIEW is ONLY for completely ambiguous
-   situations not covered by connection opportunities
+## Your Mission:
+1. RESPOND - Draft email replies in the user's voice
+2. PREPARE - Compile context packs for upcoming meetings
+3. ORGANIZE - Link documents, tasks, and projects
+4. SURFACE - Flag truly ambiguous items for human judgment
 
-## Current State:
-- Recent changes (24h): {total_changes_24h}
+## The User's Writing Style:
+{writing_samples_text}
+
+## Current State Summary:
+- Emails awaiting response: {emails_needing_response}
+- Meetings needing prep: {meetings_needing_prep}
 - Connection opportunities: {connection_opportunities}
-...
 
-## Available Actions:
+## Priority 1: Emails Needing Response
+{pending_emails_text}
+
+## Priority 2: Upcoming Meetings Needing Context
+{upcoming_calendar_text}
+
+## Already Actioned (Skip These):
+{skip_list_text}
+
+## Available Actions (in priority order):
+DRAFT_EMAIL, COMPILE_CONTEXT_PACK, SCHEDULE_BLOCK,
 LINK_DOCUMENT, LINK_REPOSITORY, LINK_TASK,
 LINK_PROJECT_TO_GOAL, CREATE_TASK, FLAG_FOR_REVIEW
 
-## Instructions:
-- Convert EVERY connection opportunity into a LINK action
-- For projects with no tasks, use CREATE_TASK
-- Maximum 5 actions per cycle
-- Return JSON array ONLY, no explanation
+## Decision Rules:
+1. DRAFT_EMAIL takes priority for actionable emails
+2. Prepare context packs for meetings without context
+3. Auto-link everything in Connection Opportunities
+4. Maximum 5 actions per cycle
 \end{lstlisting}
 
 \section{Agent Action Types}
@@ -1075,7 +1167,12 @@ LINK_PROJECT_TO_GOAL, CREATE_TASK, FLAG_FOR_REVIEW
 \toprule
 \textbf{Action Type} & \textbf{Description} \\
 \midrule
-autonomous\_cycle & Cycle completion summary \\
+\multicolumn{2}{l}{\textit{Digital Twin Actions}} \\
+draft\_email & Email reply drafted for user review \\
+compile\_context\_pack & Meeting briefing compiled \\
+schedule\_block & Focus time block suggested \\
+\midrule
+\multicolumn{2}{l}{\textit{Graph Maintenance Actions}} \\
 link\_document & Document linked to project \\
 link\_repository & Repository linked to project \\
 link\_task & Task linked to project \\
@@ -1083,6 +1180,9 @@ link\_project\_to\_goal & Project linked to goal \\
 create\_task & New task created \\
 update\_project\_status & Project status changed \\
 flag\_for\_review & Item flagged for human review \\
+\midrule
+\multicolumn{2}{l}{\textit{System Actions}} \\
+autonomous\_cycle & Cycle completion summary \\
 notification\_sent & Discord notification delivered \\
 autonomous\_agent\_started & Agent loop started \\
 autonomous\_agent\_stopped & Agent loop stopped \\
