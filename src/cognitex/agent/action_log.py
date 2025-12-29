@@ -127,6 +127,50 @@ async def get_recent_actions(limit: int = 100) -> list[dict]:
     return []
 
 
+async def get_recent_notifications(hours: int = 48) -> list[dict]:
+    """
+    Get recent notification-related actions for context.
+
+    This helps the agent avoid sending duplicate or repetitive notifications
+    by showing what was already notified about.
+
+    Args:
+        hours: How many hours back to look (default 48)
+
+    Returns:
+        List of notification actions with summary and details
+    """
+    from cognitex.db.postgres import get_session
+
+    async for session in get_session():
+        result = await session.execute(text("""
+            SELECT
+                timestamp,
+                action_type,
+                summary,
+                details
+            FROM agent_actions
+            WHERE timestamp > NOW() - INTERVAL '%s hours'
+              AND action_type IN (
+                  'notification_sent', 'schedule_block', 'compile_context_pack',
+                  'draft_email', 'morning_briefing', 'evening_review',
+                  'email_analysis', 'overdue_check'
+              )
+              AND status = 'completed'
+            ORDER BY timestamp DESC
+            LIMIT 50
+        """ % hours))
+
+        return [{
+            "timestamp": row.timestamp.strftime("%Y-%m-%d %H:%M") if row.timestamp else None,
+            "action_type": row.action_type,
+            "summary": row.summary,
+            "details": row.details,
+        } for row in result.fetchall()]
+
+    return []
+
+
 async def get_action_stats() -> dict:
     """Get action statistics."""
     from cognitex.db.postgres import get_session

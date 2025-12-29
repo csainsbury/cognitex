@@ -964,17 +964,10 @@ class LinkingService:
         Returns:
             List of suggestions created
         """
-        from together import Together
-        from cognitex.config import get_settings
+        from cognitex.services.llm import get_llm_service
         import json
 
-        settings = get_settings()
-        api_key = settings.together_api_key.get_secret_value()
-        if not api_key:
-            logger.warning("TOGETHER_API_KEY not configured")
-            return []
-
-        client = Together(api_key=api_key)
+        llm = get_llm_service()
 
         # Get unlinked nodes
         unlinked = await self.get_unlinked_nodes(node_type=node_type, limit=limit)
@@ -999,14 +992,12 @@ class LinkingService:
             prompt = self._build_link_analysis_prompt(node, targets)
 
             try:
-                response = client.chat.completions.create(
-                    model=settings.together_model_planner,
-                    messages=[{"role": "user", "content": prompt}],
+                content = await llm.complete(
+                    prompt,
                     max_tokens=1024,
                     temperature=0.2,
                 )
-
-                content = response.choices[0].message.content.strip()
+                content = content.strip()
 
                 # Parse JSON response
                 if "```json" in content:
@@ -1225,14 +1216,9 @@ Rules:
 
         Returns list of suggestions created.
         """
-        from together import Together
+        from cognitex.services.llm import get_llm_service
 
-        api_key = settings.together_api_key
-        if not api_key:
-            logger.warning("No Together API key configured")
-            return []
-
-        client = Together(api_key=api_key)
+        llm = get_llm_service()
 
         # Get potential targets for this node type
         targets = await self.get_potential_targets(node_type)
@@ -1252,14 +1238,12 @@ Rules:
         prompt = self._build_link_analysis_prompt(node, targets)
 
         try:
-            response = client.chat.completions.create(
-                model=settings.together_model_planner,
-                messages=[{"role": "user", "content": prompt}],
+            content = await llm.complete(
+                prompt,
                 max_tokens=1024,
                 temperature=0.2,
             )
-
-            content = response.choices[0].message.content.strip()
+            content = content.strip()
 
             # Parse JSON response
             if "```json" in content:

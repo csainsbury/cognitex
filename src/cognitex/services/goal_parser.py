@@ -13,7 +13,6 @@ import re
 from dataclasses import dataclass, field
 
 import structlog
-from together import Together
 
 from cognitex.config import get_settings
 
@@ -82,12 +81,50 @@ If the goal is simple, return minimal structure.
 
 
 class GoalParser:
-    """Parses goal descriptions into structured data using LLM."""
+    """Parses goal descriptions into structured data using LLM (multi-provider)."""
 
     def __init__(self):
         settings = get_settings()
-        self._client = Together(api_key=settings.together_api_key.get_secret_value())
-        self._model = settings.together_model_executor  # Use faster model for parsing
+        self._provider = settings.llm_provider
+
+        # Initialize the appropriate client based on provider
+        if self._provider == "google":
+            import google.generativeai as genai
+            api_key = settings.google_ai_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("GOOGLE_AI_API_KEY not configured")
+            genai.configure(api_key=api_key)
+            self._client = genai
+            self._model = settings.google_model_executor
+            logger.debug("GoalParser using Google Gemini", model=self._model)
+
+        elif self._provider == "anthropic":
+            from anthropic import Anthropic
+            api_key = settings.anthropic_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("ANTHROPIC_API_KEY not configured")
+            self._client = Anthropic(api_key=api_key)
+            self._model = settings.anthropic_model_executor
+            logger.debug("GoalParser using Anthropic Claude", model=self._model)
+
+        elif self._provider == "openai":
+            from openai import OpenAI
+            api_key = settings.openai_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY not configured")
+            self._client = OpenAI(api_key=api_key)
+            self._model = settings.openai_model_executor
+            logger.debug("GoalParser using OpenAI", model=self._model)
+
+        else:  # together (default)
+            from together import Together
+            api_key = settings.together_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("TOGETHER_API_KEY not configured")
+            self._client = Together(api_key=api_key)
+            self._model = settings.together_model_executor
+            self._provider = "together"
+            logger.debug("GoalParser using Together.ai", model=self._model)
 
     async def parse(self, goal_text: str, context: str | None = None) -> ParsedGoal:
         """
@@ -105,17 +142,38 @@ class GoalParser:
             prompt += f"\n\nAdditional context:\n{context}"
 
         try:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": EXTRACTION_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=1500,
-                temperature=0.2,  # Low temp for consistent extraction
-            )
+            # Route to appropriate provider API
+            if self._provider == "google":
+                model = self._client.GenerativeModel(self._model)
+                response = model.generate_content(
+                    f"{EXTRACTION_PROMPT}\n\n{prompt}",
+                    generation_config={
+                        "max_output_tokens": 1500,
+                        "temperature": 0.2,
+                    },
+                )
+                content = response.text.strip()
 
-            content = response.choices[0].message.content.strip()
+            elif self._provider == "anthropic":
+                response = self._client.messages.create(
+                    model=self._model,
+                    max_tokens=1500,
+                    system=EXTRACTION_PROMPT,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                content = response.content[0].text.strip()
+
+            else:  # openai/together
+                response = self._client.chat.completions.create(
+                    model=self._model,
+                    messages=[
+                        {"role": "system", "content": EXTRACTION_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=1500,
+                    temperature=0.2,
+                )
+                content = response.choices[0].message.content.strip()
 
             # Extract JSON from response
             parsed = self._extract_json(content)

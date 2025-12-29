@@ -19,26 +19,21 @@ async def startup(ctx: dict) -> None:
     await init_postgres()
     await init_neo4j()
 
-    # Initialize Redis for agent triggers
+    # Initialize Redis for caching/state
     from cognitex.db.redis import init_redis
     await init_redis()
 
-    # Start the Agent Trigger System (Scheduler & Event Listeners)
-    from cognitex.agent.triggers import start_triggers
-    ctx["trigger_system"] = await start_triggers()
+    # NOTE: Trigger system (scheduler, briefings) runs in Discord bot only
+    # to avoid duplicate morning briefings and notifications.
+    # Worker is for ARQ background jobs only.
 
     ctx["initialized"] = True
-    logger.info("Worker initialized with agent triggers")
+    logger.info("Worker initialized (triggers run in Discord bot)")
 
 
 async def shutdown(ctx: dict) -> None:
     """Cleanup connections on worker shutdown."""
     logger.info("Worker shutting down")
-
-    # Stop agent triggers first
-    if "trigger_system" in ctx:
-        from cognitex.agent.triggers import stop_triggers
-        await stop_triggers()
 
     # Close database connections
     from cognitex.db.redis import close_redis

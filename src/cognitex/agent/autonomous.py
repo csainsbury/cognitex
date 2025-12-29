@@ -268,6 +268,19 @@ class AutonomousAgent:
             skip_lines.append(f"- Projects with recent focus blocks (skip SCHEDULE_BLOCK): {', '.join(list(projects_with_blocks)[:5])}")
         skip_list_text = "\n".join(skip_lines) if skip_lines else "  (none)"
 
+        # Get recent notification history so agent can avoid repetitive notifications
+        from cognitex.agent.action_log import get_recent_notifications
+        recent_notifications = await get_recent_notifications(hours=48)
+
+        # Format notification history for context
+        if recent_notifications:
+            notif_lines = []
+            for n in recent_notifications[:20]:  # Last 20 notifications
+                notif_lines.append(f"  - [{n['timestamp']}] {n['action_type']}: {n['summary'][:100] if n.get('summary') else 'No summary'}")
+            notification_history_text = "\n".join(notif_lines)
+        else:
+            notification_history_text = "  (No recent notifications)"
+
         prompt = format_prompt(
             "autonomous_agent",
             # Summary stats
@@ -286,6 +299,7 @@ class AutonomousAgent:
             projects_text=projects_text,
             orphaned_text=orphaned_text,
             skip_list_text=skip_list_text,
+            notification_history_text=notification_history_text,
         )
 
         try:

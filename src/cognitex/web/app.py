@@ -1732,6 +1732,242 @@ async def delete_draft(draft_id: str):
     raise HTTPException(status_code=500, detail="Failed to delete draft")
 
 
+@app.get("/api/twin/drafts/{draft_id}/context")
+async def get_draft_deep_context(draft_id: str):
+    """Build a context pack for the email being replied to.
+
+    Uses LLM to analyze the email, extract requirements and deliverables,
+    then searches the graph for relevant documents, tasks, and context.
+    """
+    import json
+    from cognitex.db.neo4j import get_neo4j_session
+    from cognitex.agent.graph_observer import GraphObserver
+    from cognitex.services.llm import LLMService
+
+    async for session in get_neo4j_session():
+        # Get the original email's gmail_id
+        query = """
+        MATCH (d:EmailDraft {id: $draft_id})-[:REPLY_TO]->(e:Email)
+        RETURN e.gmail_id as gmail_id, e.subject as subject
+        """
+        result = await session.run(query, {"draft_id": draft_id})
+        data = await result.single()
+
+        if not data:
+            raise HTTPException(status_code=404, detail="Draft not found")
+
+        gmail_id = data.get("gmail_id")
+        if not gmail_id:
+            return HTMLResponse("""
+                <div class="context-panel" style="background: #fef3c7; padding: 1rem; margin: 1rem 0; border-radius: 5px;">
+                    <strong>No original email found</strong>
+                    <p>Unable to build context pack - original email reference missing.</p>
+                </div>
+            """)
+
+        # Get deep context (full body, thread history, etc.)
+        observer = GraphObserver(session)
+        context = await observer.get_email_deep_context(gmail_id)
+
+        # If we don't have the email body, we can't analyze it
+        if not context.get("full_body"):
+            return HTMLResponse("""
+                <div class="context-panel" style="background: #fef3c7; padding: 1rem; margin: 1rem 0; border-radius: 5px;">
+                    <strong>Email content not available</strong>
+                    <p>Could not retrieve full email body for analysis.</p>
+                </div>
+            """)
+
+        # Use LLM to analyze the email and extract requirements
+        try:
+            llm = LLMService()
+            analysis_prompt = f"""Analyze this email and extract what is being requested or needed for a response.
+
+EMAIL SUBJECT: {data.get("subject", "No subject")}
+
+EMAIL BODY:
+{context["full_body"][:4000]}
+
+SENDER: {context.get("sender_name", "Unknown")} ({context.get("sender_email", "unknown")})
+
+Analyze and return a JSON object with:
+{{
+    "summary": "1-2 sentence summary of what this email is about",
+    "deliverables": ["list of specific things being asked for or needed"],
+    "key_requirements": ["specific requirements, constraints, or instructions mentioned"],
+    "deadlines": ["any dates or deadlines mentioned"],
+    "questions_to_answer": ["specific questions asked that need answers"],
+    "stakeholders_mentioned": ["names or roles of people mentioned"],
+    "topics_for_search": ["2-3 key topics/keywords to search for related documents"],
+    "suggested_response_points": ["key points to address in the response"]
+}}
+
+Return ONLY valid JSON, no other text."""
+
+            analysis_response = await llm.complete(
+                analysis_prompt,
+                max_tokens=1024,
+                temperature=0.2,
+            )
+
+            # Parse the analysis
+            analysis_text = analysis_response.strip()
+            if analysis_text.startswith("```"):
+                analysis_text = analysis_text.split("\n", 1)[1]
+                analysis_text = analysis_text.rsplit("```", 1)[0]
+
+            analysis = json.loads(analysis_text)
+
+        except Exception as e:
+            logger.warning("LLM analysis failed", error=str(e))
+            analysis = {
+                "summary": "Could not analyze email",
+                "deliverables": [],
+                "key_requirements": [],
+                "deadlines": [],
+                "questions_to_answer": [],
+                "stakeholders_mentioned": [],
+                "topics_for_search": [],
+                "suggested_response_points": [],
+            }
+
+        # Search for related documents based on the analysis
+        related_docs = []
+        if analysis.get("topics_for_search"):
+            try:
+                from cognitex.db.postgres import get_session
+                from cognitex.services.ingestion import search_chunks_semantic
+
+                search_query = " ".join(analysis["topics_for_search"][:3])
+                async for pg_session in get_session():
+                    chunks = await search_chunks_semantic(pg_session, search_query, limit=5)
+                    break
+
+                for chunk in chunks:
+                    drive_id = chunk.get("drive_id")
+                    if drive_id:
+                        doc_query = """
+                        MATCH (d:Document {drive_id: $drive_id})
+                        RETURN d.name as name, d.drive_id as drive_id, d.summary as summary
+                        """
+                        doc_result = await session.run(doc_query, {"drive_id": drive_id})
+                        doc_data = await doc_result.single()
+                        if doc_data:
+                            related_docs.append({
+                                **dict(doc_data),
+                                "relevance": chunk.get("similarity", 0.5),
+                                "matched_content": chunk.get("content", "")[:200],
+                            })
+            except Exception as e:
+                logger.warning("Document search failed", error=str(e))
+
+        # Build HTML response - structured context pack
+        def escape_html(text):
+            if not text:
+                return ""
+            return str(text).replace("<", "&lt;").replace(">", "&gt;")
+
+        html_parts = [
+            '<div class="context-panel" style="background: #f0f9ff; padding: 1rem; margin: 1rem 0; border-radius: 5px; max-height: 600px; overflow-y: auto;">',
+            f'<h4 style="margin-top: 0; border-bottom: 1px solid #bfdbfe; padding-bottom: 0.5rem;">Context Pack: {escape_html(data.get("subject", "Email")[:50])}</h4>',
+        ]
+
+        # Summary
+        if analysis.get("summary"):
+            html_parts.append('<div class="context-section" style="margin-bottom: 1rem; background: #dbeafe; padding: 0.75rem; border-radius: 4px;">')
+            html_parts.append(f'<strong>Summary:</strong> {escape_html(analysis["summary"])}')
+            html_parts.append('</div>')
+
+        # Deliverables - what's being asked for
+        if analysis.get("deliverables"):
+            html_parts.append('<div class="context-section" style="margin-bottom: 1rem;">')
+            html_parts.append('<strong style="color: #1e40af;">Deliverables Requested:</strong>')
+            html_parts.append('<ul style="margin: 0.25rem 0; padding-left: 1.25rem;">')
+            for item in analysis["deliverables"]:
+                html_parts.append(f'<li style="font-size: 0.9rem; margin-bottom: 0.25rem;">{escape_html(item)}</li>')
+            html_parts.append('</ul></div>')
+
+        # Key requirements/instructions
+        if analysis.get("key_requirements"):
+            html_parts.append('<div class="context-section" style="margin-bottom: 1rem;">')
+            html_parts.append('<strong style="color: #1e40af;">Key Requirements:</strong>')
+            html_parts.append('<ul style="margin: 0.25rem 0; padding-left: 1.25rem;">')
+            for item in analysis["key_requirements"]:
+                html_parts.append(f'<li style="font-size: 0.9rem; margin-bottom: 0.25rem;">{escape_html(item)}</li>')
+            html_parts.append('</ul></div>')
+
+        # Questions to answer
+        if analysis.get("questions_to_answer"):
+            html_parts.append('<div class="context-section" style="margin-bottom: 1rem;">')
+            html_parts.append('<strong style="color: #1e40af;">Questions to Answer:</strong>')
+            html_parts.append('<ul style="margin: 0.25rem 0; padding-left: 1.25rem;">')
+            for item in analysis["questions_to_answer"]:
+                html_parts.append(f'<li style="font-size: 0.9rem; margin-bottom: 0.25rem;">{escape_html(item)}</li>')
+            html_parts.append('</ul></div>')
+
+        # Deadlines
+        if analysis.get("deadlines"):
+            html_parts.append('<div class="context-section" style="margin-bottom: 1rem; background: #fef3c7; padding: 0.5rem; border-radius: 4px;">')
+            html_parts.append('<strong style="color: #92400e;">Deadlines:</strong> ')
+            html_parts.append(escape_html(", ".join(analysis["deadlines"])))
+            html_parts.append('</div>')
+
+        # Suggested response points
+        if analysis.get("suggested_response_points"):
+            html_parts.append('<div class="context-section" style="margin-bottom: 1rem;">')
+            html_parts.append('<strong style="color: #047857;">Suggested Response Points:</strong>')
+            html_parts.append('<ul style="margin: 0.25rem 0; padding-left: 1.25rem;">')
+            for item in analysis["suggested_response_points"]:
+                html_parts.append(f'<li style="font-size: 0.9rem; margin-bottom: 0.25rem;">{escape_html(item)}</li>')
+            html_parts.append('</ul></div>')
+
+        # Related documents found
+        if related_docs:
+            html_parts.append('<div class="context-section" style="margin-bottom: 1rem; border-top: 1px solid #bfdbfe; padding-top: 0.75rem;">')
+            html_parts.append(f'<strong>Related Documents ({len(related_docs)}):</strong>')
+            html_parts.append('<ul style="margin: 0.25rem 0; padding-left: 1.25rem;">')
+            for doc in related_docs[:5]:
+                name = escape_html(doc.get("name", "Document"))
+                drive_id = doc.get("drive_id", "")
+                relevance = doc.get("relevance", 0)
+                summary = escape_html((doc.get("summary") or doc.get("matched_content") or "")[:100])
+                html_parts.append(f'<li style="font-size: 0.9rem; margin-bottom: 0.5rem;">')
+                html_parts.append(f'<a href="https://drive.google.com/file/d/{drive_id}/view" target="_blank">{name}</a>')
+                html_parts.append(f' <span style="color: #6b7280;">({relevance:.0%})</span>')
+                if summary:
+                    html_parts.append(f'<br><span style="font-size: 0.8rem; color: #6b7280;">{summary}...</span>')
+                html_parts.append('</li>')
+            html_parts.append('</ul></div>')
+
+        # Related tasks from graph
+        if context.get("related_tasks"):
+            html_parts.append('<div class="context-section" style="margin-bottom: 1rem;">')
+            html_parts.append(f'<strong>Related Tasks ({len(context["related_tasks"])}):</strong>')
+            html_parts.append('<ul style="margin: 0.25rem 0; padding-left: 1.25rem;">')
+            for task in context["related_tasks"]:
+                title = escape_html(task.get("title", "Task"))
+                status = task.get("status", "unknown")
+                project = task.get("project_title", "")
+                status_color = "#047857" if status == "done" else "#d97706" if status == "in_progress" else "#6b7280"
+                html_parts.append(f'<li style="font-size: 0.9rem;">{title} <span style="color: {status_color};">[{status}]</span>{" - " + escape_html(project) if project else ""}</li>')
+            html_parts.append('</ul></div>')
+
+        # Sender context
+        if context.get("sender_context"):
+            sc = context["sender_context"]
+            html_parts.append('<div class="context-section" style="margin-bottom: 0.5rem; font-size: 0.85rem; color: #6b7280;">')
+            html_parts.append(f'<strong>Sender:</strong> {escape_html(sc.get("name") or "Unknown")} ({escape_html(sc.get("org") or "Unknown org")})')
+            html_parts.append(f' - {sc.get("email_count", 0)} prior emails, {sc.get("shared_task_count", 0)} shared tasks')
+            html_parts.append('</div>')
+
+        html_parts.append('<button class="btn btn-secondary btn-sm" onclick="this.parentElement.remove()" style="margin-top: 0.5rem;">Close</button>')
+        html_parts.append('</div>')
+
+        return HTMLResponse("".join(html_parts))
+
+    raise HTTPException(status_code=500, detail="Failed to build context pack")
+
+
 @app.delete("/api/twin/packs/{pack_id}")
 async def archive_pack(pack_id: str):
     """Archive a context pack."""

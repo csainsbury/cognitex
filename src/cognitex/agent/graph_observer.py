@@ -687,3 +687,220 @@ class GraphObserver:
         except Exception as e:
             logger.warning("Failed to get decision context", error=str(e))
             return []
+
+    async def get_email_deep_context(self, gmail_id: str) -> dict:
+        """
+        Get comprehensive context for drafting a response to an email.
+
+        Gathers:
+        - Full email body (fetched from Gmail API if needed)
+        - Thread history (prior messages in the conversation)
+        - Related Drive documents (via semantic search)
+        - Related tasks and projects
+        - Sender relationship context
+
+        Args:
+            gmail_id: The Gmail message ID
+
+        Returns:
+            Dict with full context for email response drafting
+        """
+        context = {
+            "gmail_id": gmail_id,
+            "full_body": None,
+            "thread_history": [],
+            "related_documents": [],
+            "related_tasks": [],
+            "sender_context": None,
+            "action_items_extracted": [],
+        }
+
+        try:
+            # 1. Get email metadata from graph
+            email_query = """
+            MATCH (e:Email {gmail_id: $gmail_id})
+            OPTIONAL MATCH (e)-[:SENT_BY]->(sender:Person)
+            RETURN
+                e.gmail_id as gmail_id,
+                e.thread_id as thread_id,
+                e.subject as subject,
+                e.snippet as snippet,
+                e.body as body,
+                e.date as date,
+                e.classification as classification,
+                sender.email as sender_email,
+                sender.name as sender_name,
+                sender.org as sender_org,
+                sender.role as sender_role
+            """
+            result = await self.session.run(email_query, {"gmail_id": gmail_id})
+            email_data = await result.single()
+
+            if not email_data:
+                logger.warning("Email not found in graph", gmail_id=gmail_id)
+                return context
+
+            email_dict = dict(email_data)
+            context["subject"] = email_dict.get("subject")
+            context["sender_email"] = email_dict.get("sender_email")
+            context["sender_name"] = email_dict.get("sender_name")
+
+            # 2. Get full email body from Gmail API if not stored
+            full_body = email_dict.get("body")
+            if not full_body or len(full_body) < 100:
+                try:
+                    from cognitex.services.gmail import GmailService, extract_email_body
+                    gmail = GmailService()
+                    full_message = gmail.get_message(gmail_id, format="full")
+                    full_body = extract_email_body(full_message, max_length=10000)
+                    context["full_body"] = full_body
+                except Exception as e:
+                    logger.warning("Failed to fetch full email body", error=str(e))
+                    context["full_body"] = email_dict.get("snippet", "")
+            else:
+                context["full_body"] = full_body
+
+            # 3. Get thread history (other emails in same thread)
+            thread_id = email_dict.get("thread_id")
+            if thread_id:
+                thread_query = """
+                MATCH (e:Email {thread_id: $thread_id})
+                WHERE e.gmail_id <> $gmail_id
+                OPTIONAL MATCH (e)-[:SENT_BY]->(sender:Person)
+                RETURN
+                    e.gmail_id as gmail_id,
+                    e.subject as subject,
+                    coalesce(e.body, e.snippet) as body,
+                    e.date as date,
+                    sender.name as sender_name,
+                    sender.email as sender_email
+                ORDER BY e.date ASC
+                LIMIT 10
+                """
+                thread_result = await self.session.run(
+                    thread_query, {"thread_id": thread_id, "gmail_id": gmail_id}
+                )
+                thread_data = await thread_result.data()
+                context["thread_history"] = thread_data
+
+            # 4. Semantic search for related Drive documents
+            search_text = f"{email_dict.get('subject', '')} {context['full_body'][:500] if context['full_body'] else ''}"
+            if search_text.strip():
+                try:
+                    from cognitex.db.postgres import get_session
+                    from cognitex.services.ingestion import search_chunks_semantic
+
+                    async for pg_session in get_session():
+                        chunks = await search_chunks_semantic(pg_session, search_text, limit=5)
+                        break
+
+                    # Get document details from graph
+                    for chunk in chunks:
+                        drive_id = chunk.get("drive_id")
+                        if drive_id:
+                            doc_query = """
+                            MATCH (d:Document {drive_id: $drive_id})
+                            RETURN d.name as name, d.drive_id as drive_id,
+                                   d.summary as summary, d.mime_type as mime_type
+                            """
+                            doc_result = await self.session.run(doc_query, {"drive_id": drive_id})
+                            doc_data = await doc_result.single()
+                            if doc_data:
+                                context["related_documents"].append({
+                                    **dict(doc_data),
+                                    "relevance": chunk.get("similarity", 0.5),
+                                    "matched_content": chunk.get("content", "")[:200],
+                                })
+                except Exception as e:
+                    logger.warning("Failed to search related documents", error=str(e))
+
+            # 5. Find related tasks (by sender or subject keywords)
+            sender_email = email_dict.get("sender_email")
+            if sender_email:
+                task_query = """
+                MATCH (t:Task)
+                WHERE t.status IN ['pending', 'in_progress']
+                  AND (
+                    t.source_id = $gmail_id
+                    OR toLower(t.title) CONTAINS toLower($subject_keyword)
+                    OR EXISTS {
+                      MATCH (t)-[:ASSIGNED_TO|INVOLVES]->(p:Person {email: $sender_email})
+                    }
+                  )
+                OPTIONAL MATCH (t)-[:BELONGS_TO]->(proj:Project)
+                RETURN
+                    t.id as id,
+                    t.title as title,
+                    t.status as status,
+                    t.due as due,
+                    proj.title as project_title
+                LIMIT 5
+                """
+                # Extract first significant word from subject for keyword matching
+                subject = email_dict.get("subject", "")
+                subject_keyword = next(
+                    (w for w in subject.split() if len(w) > 4 and w.lower() not in ["about", "follow", "update"]),
+                    subject[:20]
+                )
+                task_result = await self.session.run(task_query, {
+                    "gmail_id": gmail_id,
+                    "sender_email": sender_email,
+                    "subject_keyword": subject_keyword,
+                })
+                task_data = await task_result.data()
+                context["related_tasks"] = task_data
+
+            # 6. Get sender relationship context
+            if sender_email:
+                sender_query = """
+                MATCH (p:Person {email: $email})
+                OPTIONAL MATCH (p)<-[:SENT_BY]-(e:Email)
+                WITH p, count(e) as email_count, max(e.date) as last_email
+                OPTIONAL MATCH (p)-[:ATTENDED]-(ev:Event)
+                WITH p, email_count, last_email, count(ev) as meeting_count
+                OPTIONAL MATCH (p)<-[:INVOLVES|ASSIGNED_TO]-(t:Task)
+                WHERE t.status IN ['pending', 'in_progress']
+                RETURN
+                    p.name as name,
+                    p.org as org,
+                    p.role as role,
+                    email_count,
+                    last_email,
+                    meeting_count,
+                    count(t) as shared_task_count
+                """
+                sender_result = await self.session.run(sender_query, {"email": sender_email})
+                sender_data = await sender_result.single()
+                if sender_data:
+                    context["sender_context"] = dict(sender_data)
+
+            # 7. Extract action items from the email body using simple pattern matching
+            if context["full_body"]:
+                action_patterns = [
+                    "please ", "could you ", "can you ", "would you ",
+                    "need to ", "should ", "must ", "by ", "deadline",
+                    "action required", "follow up", "let me know",
+                ]
+                body_lower = context["full_body"].lower()
+                sentences = context["full_body"].split(".")
+                for sentence in sentences:
+                    sentence_lower = sentence.lower().strip()
+                    if any(p in sentence_lower for p in action_patterns) and len(sentence) > 20:
+                        context["action_items_extracted"].append(sentence.strip())
+                        if len(context["action_items_extracted"]) >= 5:
+                            break
+
+            logger.info(
+                "Built email deep context",
+                gmail_id=gmail_id,
+                has_full_body=bool(context["full_body"]),
+                thread_messages=len(context["thread_history"]),
+                related_docs=len(context["related_documents"]),
+                related_tasks=len(context["related_tasks"]),
+                action_items=len(context["action_items_extracted"]),
+            )
+
+        except Exception as e:
+            logger.error("Failed to build email deep context", gmail_id=gmail_id, error=str(e))
+
+        return context

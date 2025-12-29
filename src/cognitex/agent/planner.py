@@ -1,4 +1,4 @@
-"""Agent Planner - Qwen3-30B-A3B powered reasoning and planning."""
+"""Agent Planner - Multi-provider LLM powered reasoning and planning."""
 
 import json
 from dataclasses import dataclass
@@ -6,7 +6,6 @@ from enum import Enum
 from typing import Any
 
 import structlog
-from together import Together
 
 from cognitex.config import get_settings
 from cognitex.agent.tools import ToolDefinition, ToolRisk, get_tool_registry
@@ -169,13 +168,47 @@ class Planner:
 
     def __init__(self):
         settings = get_settings()
-        api_key = settings.together_api_key.get_secret_value()
-        if not api_key:
-            raise ValueError("TOGETHER_API_KEY not configured")
-
-        self.client = Together(api_key=api_key)
-        self.model = settings.together_model_planner
+        self.provider = settings.llm_provider
         self.registry = get_tool_registry()
+
+        # Initialize the appropriate client based on provider
+        if self.provider == "google":
+            import google.generativeai as genai
+            api_key = settings.google_ai_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("GOOGLE_AI_API_KEY not configured")
+            genai.configure(api_key=api_key)
+            self.client = genai
+            self.model = settings.google_model_planner
+            logger.info("Planner using Google Gemini", model=self.model)
+
+        elif self.provider == "anthropic":
+            from anthropic import Anthropic
+            api_key = settings.anthropic_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("ANTHROPIC_API_KEY not configured")
+            self.client = Anthropic(api_key=api_key)
+            self.model = settings.anthropic_model_planner
+            logger.info("Planner using Anthropic Claude", model=self.model)
+
+        elif self.provider == "openai":
+            from openai import OpenAI
+            api_key = settings.openai_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY not configured")
+            self.client = OpenAI(api_key=api_key)
+            self.model = settings.openai_model_planner
+            logger.info("Planner using OpenAI", model=self.model)
+
+        else:  # together (default)
+            from together import Together
+            api_key = settings.together_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("TOGETHER_API_KEY not configured")
+            self.client = Together(api_key=api_key)
+            self.model = settings.together_model_planner
+            self.provider = "together"
+            logger.info("Planner using Together.ai", model=self.model)
 
         # User profile (could be loaded from config/db)
         self.user_profile = self._load_user_profile()
@@ -242,14 +275,34 @@ class Planner:
         logger.debug("Planning", mode=mode.value, trigger=trigger[:100])
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=2048,
-                temperature=0.3,
-            )
+            # Route to appropriate provider API
+            if self.provider == "google":
+                model = self.client.GenerativeModel(self.model)
+                response = model.generate_content(
+                    prompt,
+                    generation_config={
+                        "max_output_tokens": 2048,
+                        "temperature": 0.3,
+                    },
+                )
+                content = response.text
 
-            content = response.choices[0].message.content
+            elif self.provider == "anthropic":
+                response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=2048,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                content = response.content[0].text
+
+            else:  # openai/together
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=2048,
+                    temperature=0.3,
+                )
+                content = response.choices[0].message.content
 
             # Parse JSON from response
             content = content.strip()

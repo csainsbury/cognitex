@@ -1,11 +1,10 @@
-"""Agent Executors - DeepSeek V3 powered task execution."""
+"""Agent Executors - Multi-provider LLM powered task execution."""
 
 import json
 from abc import ABC, abstractmethod
 from typing import Any
 
 import structlog
-from together import Together
 
 from cognitex.config import get_settings
 from cognitex.agent.tools import ToolResult, get_tool_registry
@@ -14,20 +13,54 @@ logger = structlog.get_logger()
 
 
 class BaseExecutor(ABC):
-    """Base class for all executors."""
+    """Base class for all executors - supports multiple LLM providers."""
 
     name: str
     description: str
 
     def __init__(self):
         settings = get_settings()
-        api_key = settings.together_api_key.get_secret_value()
-        if not api_key:
-            raise ValueError("TOGETHER_API_KEY not configured")
-
-        self.client = Together(api_key=api_key)
-        self.model = settings.together_model_executor
+        self.provider = settings.llm_provider
         self.registry = get_tool_registry()
+
+        # Initialize the appropriate client based on provider
+        if self.provider == "google":
+            import google.generativeai as genai
+            api_key = settings.google_ai_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("GOOGLE_AI_API_KEY not configured")
+            genai.configure(api_key=api_key)
+            self.client = genai
+            self.model = settings.google_model_executor
+            logger.debug("Executor using Google Gemini", model=self.model)
+
+        elif self.provider == "anthropic":
+            from anthropic import Anthropic
+            api_key = settings.anthropic_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("ANTHROPIC_API_KEY not configured")
+            self.client = Anthropic(api_key=api_key)
+            self.model = settings.anthropic_model_executor
+            logger.debug("Executor using Anthropic Claude", model=self.model)
+
+        elif self.provider == "openai":
+            from openai import OpenAI
+            api_key = settings.openai_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY not configured")
+            self.client = OpenAI(api_key=api_key)
+            self.model = settings.openai_model_executor
+            logger.debug("Executor using OpenAI", model=self.model)
+
+        else:  # together (default)
+            from together import Together
+            api_key = settings.together_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("TOGETHER_API_KEY not configured")
+            self.client = Together(api_key=api_key)
+            self.model = settings.together_model_executor
+            self.provider = "together"
+            logger.debug("Executor using Together.ai", model=self.model)
 
     @abstractmethod
     async def execute(self, tool: str, args: dict, reasoning: str) -> ToolResult:
@@ -35,14 +68,34 @@ class BaseExecutor(ABC):
         pass
 
     async def _call_llm(self, prompt: str, max_tokens: int = 1024) -> str:
-        """Make an LLM call for content generation."""
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=max_tokens,
-            temperature=0.4,
-        )
-        return response.choices[0].message.content
+        """Make an LLM call for content generation - routes to appropriate provider."""
+        if self.provider == "google":
+            model = self.client.GenerativeModel(self.model)
+            response = model.generate_content(
+                prompt,
+                generation_config={
+                    "max_output_tokens": max_tokens,
+                    "temperature": 0.4,
+                },
+            )
+            return response.text
+
+        elif self.provider == "anthropic":
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return response.content[0].text
+
+        else:  # openai/together
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=0.4,
+            )
+            return response.choices[0].message.content
 
 
 class EmailExecutor(BaseExecutor):
@@ -69,16 +122,75 @@ Writing style:
             # Direct tool execution
             return await self.registry.execute(tool, **args)
 
+    async def _get_deep_context(self, gmail_id: str) -> dict | None:
+        """Fetch deep context for an email reply."""
+        if not gmail_id:
+            return None
+
+        try:
+            from cognitex.db.neo4j import get_neo4j_session
+            from cognitex.agent.graph_observer import GraphObserver
+
+            async for session in get_neo4j_session():
+                observer = GraphObserver(session)
+                context = await observer.get_email_deep_context(gmail_id)
+                return context
+        except Exception as e:
+            logger.warning("Failed to get deep context", gmail_id=gmail_id, error=str(e))
+            return None
+
     async def _draft_email(self, args: dict, reasoning: str) -> ToolResult:
-        """Draft an email using LLM."""
+        """Draft an email using LLM with deep context."""
         # If body is already provided, use it directly
         if args.get("body"):
             return await self.registry.execute("draft_email", **args)
 
-        # Otherwise, generate the body
+        # Fetch deep context if this is a reply
+        reply_to_id = args.get("reply_to_id")
+        deep_context = await self._get_deep_context(reply_to_id) if reply_to_id else None
+
+        # Build context section for the prompt
+        context_section = f"Context: {reasoning}"
+
+        if deep_context:
+            # Include full email body
+            if deep_context.get("full_body"):
+                context_section += f"\n\n--- Original Email Body ---\n{deep_context['full_body'][:3000]}"
+
+            # Include thread history
+            if deep_context.get("thread_history"):
+                context_section += "\n\n--- Thread History ---"
+                for msg in deep_context["thread_history"][-3:]:  # Last 3 messages
+                    sender = msg.get("sender_name") or msg.get("sender_email", "Unknown")
+                    body_preview = (msg.get("body") or "")[:300]
+                    context_section += f"\n• From {sender}: {body_preview}..."
+
+            # Include action items extracted from email
+            if deep_context.get("action_items_extracted"):
+                context_section += "\n\n--- Action Items in Email ---"
+                for item in deep_context["action_items_extracted"]:
+                    context_section += f"\n• {item[:150]}"
+
+            # Include related documents
+            if deep_context.get("related_documents"):
+                context_section += "\n\n--- Related Documents ---"
+                for doc in deep_context["related_documents"][:3]:
+                    context_section += f"\n• {doc.get('name', 'Document')}"
+                    if doc.get("matched_content"):
+                        context_section += f": {doc['matched_content'][:100]}..."
+
+            # Include sender context
+            if deep_context.get("sender_context"):
+                sc = deep_context["sender_context"]
+                context_section += f"\n\n--- Sender Info ---"
+                context_section += f"\n{sc.get('name', 'Unknown')} ({sc.get('org', 'Unknown org')})"
+                context_section += f" - {sc.get('email_count', 0)} prior emails, {sc.get('shared_task_count', 0)} shared tasks"
+
+        # Build the prompt with enhanced context
         prompt = f"""Write an email body for the following situation.
 
-Context: {reasoning}
+{context_section}
+
 To: {args.get('to', 'unknown')}
 Subject: {args.get('subject', 'No subject')}
 
@@ -87,11 +199,15 @@ Subject: {args.get('subject', 'No subject')}
 Instructions:
 {args.get('instructions', 'Write an appropriate response.')}
 
+IMPORTANT: Address all the key points and action items from the original email.
+If documents or files are mentioned, acknowledge them.
+If there are specific questions, answer them.
+
 Write ONLY the email body. No subject line, no "Dear X" unless appropriate.
 Start directly with the content."""
 
         try:
-            body = await self._call_llm(prompt, max_tokens=512)
+            body = await self._call_llm(prompt, max_tokens=1024)  # Increased for richer responses
             body = body.strip()
 
             # Remove any accidental salutations the model might add

@@ -1,4 +1,7 @@
-"""Together.ai LLM integration for email classification and task inference."""
+"""Multi-provider LLM integration for email classification and task inference.
+
+Supports: Together.ai, Google Gemini, Anthropic Claude, OpenAI
+"""
 
 import asyncio
 import json
@@ -66,19 +69,65 @@ def with_retry(
 
 
 class LLMService:
-    """Service for interacting with Together.ai LLM APIs."""
+    """Service for interacting with LLM APIs (multi-provider support)."""
 
     def __init__(self):
         settings = get_settings()
-        api_key = settings.together_api_key.get_secret_value()
-        if not api_key:
-            raise ValueError("TOGETHER_API_KEY not configured")
+        self.provider = settings.llm_provider
 
-        self.client = Together(api_key=api_key)
-        # Use planner model for primary reasoning tasks
-        self.primary_model = settings.together_model_planner
-        # Use executor model for fast classification
-        self.fast_model = settings.together_model_executor
+        # Initialize the appropriate client based on provider
+        if self.provider == "google":
+            import google.generativeai as genai
+            api_key = settings.google_ai_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("GOOGLE_AI_API_KEY not configured")
+            genai.configure(api_key=api_key)
+            self.client = genai
+            self.primary_model = settings.google_model_planner
+            self.fast_model = settings.google_model_executor
+            logger.info("LLMService using Google Gemini", model=self.primary_model)
+
+        elif self.provider == "anthropic":
+            from anthropic import Anthropic
+            api_key = settings.anthropic_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("ANTHROPIC_API_KEY not configured")
+            self.client = Anthropic(api_key=api_key)
+            self.primary_model = settings.anthropic_model_planner
+            self.fast_model = settings.anthropic_model_executor
+            logger.info("LLMService using Anthropic Claude", model=self.primary_model)
+
+        elif self.provider == "openai":
+            from openai import OpenAI
+            api_key = settings.openai_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY not configured")
+            self.client = OpenAI(api_key=api_key)
+            self.primary_model = settings.openai_model_planner
+            self.fast_model = settings.openai_model_executor
+            logger.info("LLMService using OpenAI", model=self.primary_model)
+
+        else:  # together (default)
+            api_key = settings.together_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("TOGETHER_API_KEY not configured")
+            self.client = Together(api_key=api_key)
+            self.primary_model = settings.together_model_planner
+            self.fast_model = settings.together_model_executor
+            self.provider = "together"
+            logger.info("LLMService using Together.ai", model=self.primary_model)
+
+        # Embeddings always use Together.ai (Anthropic/Google don't have compatible embeddings)
+        # Initialize a separate Together client for embeddings if using a different provider
+        if self.provider != "together":
+            together_key = settings.together_api_key.get_secret_value()
+            if together_key:
+                self._together_client = Together(api_key=together_key)
+            else:
+                self._together_client = None
+                logger.warning("Together API key not set - embeddings will not work")
+        else:
+            self._together_client = self.client
         self.embedding_model = settings.together_model_embedding
 
     @with_retry(max_attempts=3, base_delay=1.0)
@@ -105,18 +154,41 @@ class LLMService:
         """
         model = model or self.primary_model
 
-        kwargs: dict[str, Any] = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
+        if self.provider == "google":
+            # Gemini API
+            genai_model = self.client.GenerativeModel(model)
+            response = genai_model.generate_content(
+                prompt,
+                generation_config={
+                    "max_output_tokens": max_tokens,
+                    "temperature": temperature,
+                },
+            )
+            return response.text
 
-        if response_format:
-            kwargs["response_format"] = response_format
+        elif self.provider == "anthropic":
+            # Anthropic API
+            response = self.client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return response.content[0].text
 
-        response = self.client.chat.completions.create(**kwargs)
-        return response.choices[0].message.content
+        else:
+            # OpenAI/Together format
+            kwargs: dict[str, Any] = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+
+            if response_format:
+                kwargs["response_format"] = response_format
+
+            response = self.client.chat.completions.create(**kwargs)
+            return response.choices[0].message.content
 
     async def classify_email(self, email_data: dict) -> dict:
         """
@@ -353,13 +425,18 @@ Return ONLY valid JSON, no other text. Use null for unknown fields."""
         """
         Generate an embedding vector for the given text.
 
+        Uses Together.ai for embeddings regardless of primary LLM provider.
+
         Args:
             text: Text to embed (max ~8k tokens for m2-bert)
 
         Returns:
             Embedding vector as list of floats
         """
-        response = self.client.embeddings.create(
+        if self._together_client is None:
+            raise ValueError("Together.ai client not configured - embeddings unavailable")
+
+        response = self._together_client.embeddings.create(
             model=self.embedding_model,
             input=text,
         )

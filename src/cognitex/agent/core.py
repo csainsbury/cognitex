@@ -55,6 +55,7 @@ class Agent:
         self._initialized = False
         self._client = None
         self._model = None
+        self._provider = None
 
     async def initialize(self) -> None:
         """Initialize the agent and all subsystems."""
@@ -64,12 +65,42 @@ class Agent:
         logger.info("Initializing agent")
 
         settings = get_settings()
-        api_key = settings.together_api_key.get_secret_value()
-        if not api_key:
-            raise ValueError("TOGETHER_API_KEY not configured")
+        self._provider = settings.llm_provider
 
-        self._client = Together(api_key=api_key)
-        self._model = settings.together_model_planner
+        # Initialize the appropriate LLM client based on provider
+        if self._provider == "google":
+            import google.generativeai as genai
+            api_key = settings.google_ai_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("GOOGLE_AI_API_KEY not configured")
+            genai.configure(api_key=api_key)
+            self._client = genai
+            self._model = settings.google_model_planner
+            logger.info("Using Google Gemini", model=self._model)
+        elif self._provider == "anthropic":
+            from anthropic import Anthropic
+            api_key = settings.anthropic_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("ANTHROPIC_API_KEY not configured")
+            self._client = Anthropic(api_key=api_key)
+            self._model = settings.anthropic_model_planner
+            logger.info("Using Anthropic Claude", model=self._model)
+        elif self._provider == "openai":
+            from openai import OpenAI
+            api_key = settings.openai_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY not configured")
+            self._client = OpenAI(api_key=api_key)
+            self._model = settings.openai_model_planner
+            logger.info("Using OpenAI", model=self._model)
+        else:  # together (default)
+            api_key = settings.together_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("TOGETHER_API_KEY not configured")
+            self._client = Together(api_key=api_key)
+            self._model = settings.together_model_planner
+            self._provider = "together"
+            logger.info("Using Together.ai", model=self._model)
 
         # Initialize memory
         self.memory = await init_memory()
@@ -78,12 +109,72 @@ class Agent:
         self.decision_memory = await init_decision_memory()
 
         self._initialized = True
-        logger.info("Agent initialized")
+        logger.info("Agent initialized", provider=self._provider, model=self._model)
 
     def _ensure_initialized(self) -> None:
         """Ensure agent is initialized."""
         if not self._initialized:
             raise RuntimeError("Agent not initialized. Call initialize() first.")
+
+    def _llm_chat(self, messages: list[dict], max_tokens: int = 2048, temperature: float = 0.3) -> str:
+        """Call the LLM with provider-specific API handling."""
+        if self._provider == "google":
+            # Gemini API format
+            model = self._client.GenerativeModel(self._model)
+            # Convert OpenAI format to Gemini format
+            gemini_messages = []
+            system_prompt = None
+            for msg in messages:
+                role = msg["role"]
+                content = msg["content"]
+                if role == "system":
+                    system_prompt = content
+                elif role == "assistant":
+                    gemini_messages.append({"role": "model", "parts": [content]})
+                else:
+                    gemini_messages.append({"role": "user", "parts": [content]})
+
+            # Prepend system prompt to first user message if present
+            if system_prompt and gemini_messages:
+                first_content = gemini_messages[0]["parts"][0]
+                gemini_messages[0]["parts"][0] = f"{system_prompt}\n\n{first_content}"
+
+            response = model.generate_content(
+                gemini_messages,
+                generation_config={
+                    "max_output_tokens": max_tokens,
+                    "temperature": temperature,
+                },
+            )
+            return response.text
+
+        elif self._provider == "anthropic":
+            # Anthropic API format
+            system_prompt = None
+            anthropic_messages = []
+            for msg in messages:
+                if msg["role"] == "system":
+                    system_prompt = msg["content"]
+                else:
+                    anthropic_messages.append(msg)
+
+            response = self._client.messages.create(
+                model=self._model,
+                max_tokens=max_tokens,
+                system=system_prompt or "",
+                messages=anthropic_messages,
+            )
+            return response.content[0].text
+
+        else:
+            # OpenAI/Together format
+            response = self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            return response.choices[0].message.content
 
     def _build_system_prompt(self) -> str:
         """Build the system prompt with available tools."""
@@ -329,14 +420,8 @@ Example queries:
 
             # Get next thought/action from LLM
             try:
-                response = self._client.chat.completions.create(
-                    model=self._model,
-                    messages=conversation,
-                    max_tokens=2048,
-                    temperature=0.3,
-                )
-
-                content = response.choices[0].message.content.strip()
+                content = self._llm_chat(conversation, max_tokens=2048, temperature=0.3)
+                content = content.strip()
 
                 # Parse JSON response
                 parsed = self._parse_react_response(content)
@@ -555,13 +640,12 @@ Instructions:
 Your response:"""
 
         try:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=[{"role": "user", "content": prompt}],
+            response = self._llm_chat(
+                [{"role": "user", "content": prompt}],
                 max_tokens=1024,
                 temperature=0.4,
             )
-            return response.choices[0].message.content.strip()
+            return response.strip()
         except Exception as e:
             logger.error("Summary generation failed", error=str(e))
             return "I found some information but had trouble summarizing it. Please try asking again."
