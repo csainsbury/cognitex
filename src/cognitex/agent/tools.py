@@ -648,7 +648,12 @@ class AddMemoryTool(BaseTool):
 # =============================================================================
 
 class DraftEmailTool(BaseTool):
-    """Draft an email for user review."""
+    """Draft an email for user review.
+
+    Stores drafts in both Neo4j (for web dashboard visibility) and Redis
+    (for chat/CLI approval workflow). This ensures drafts appear in the
+    Twin dashboard regardless of which interface created them.
+    """
 
     name = "draft_email"
     description = "Create a draft email. Will be staged for user approval before sending."
@@ -671,13 +676,50 @@ class DraftEmailTool(BaseTool):
     ) -> ToolResult:
         from cognitex.agent.memory import get_memory
         from cognitex.db.redis import get_redis
+        from cognitex.db.neo4j import get_neo4j_session
         import uuid
         import json
 
         try:
-            memory = get_memory()
+            draft_id = f"draft_{uuid.uuid4().hex[:12]}"
             approval_id = f"apr_{uuid.uuid4().hex[:12]}"
 
+            # 1. Create Neo4j Node (for Web Dashboard visibility in Twin)
+            try:
+                async for session in get_neo4j_session():
+                    query = """
+                    CREATE (draft:EmailDraft {
+                        id: $draft_id,
+                        to: $to,
+                        subject: $subject,
+                        body: $body,
+                        status: 'pending_review',
+                        created_at: datetime(),
+                        created_by: 'user_agent',
+                        reason: $reason
+                    })
+                    WITH draft
+                    OPTIONAL MATCH (original:Email {gmail_id: $reply_to_id})
+                    FOREACH (_ IN CASE WHEN original IS NOT NULL THEN [1] ELSE [] END |
+                        CREATE (draft)-[:REPLY_TO]->(original)
+                    )
+                    RETURN draft.id
+                    """
+                    await session.run(query, {
+                        "draft_id": draft_id,
+                        "to": to,
+                        "subject": subject,
+                        "body": body,
+                        "reason": reasoning,
+                        "reply_to_id": reply_to_id or ""
+                    })
+                    break
+            except Exception as e:
+                logger.warning("Failed to create Neo4j draft node", error=str(e))
+                # Continue - Redis storage is still valuable
+
+            # 2. Stage approval in Redis (for Chat/CLI workflow)
+            memory = get_memory()
             await memory.working.stage_approval(
                 approval_id=approval_id,
                 action_type="send_email",
@@ -686,11 +728,12 @@ class DraftEmailTool(BaseTool):
                     "subject": subject,
                     "body": body,
                     "reply_to_id": reply_to_id,
+                    "draft_node_id": draft_id,  # Link to graph node
                 },
                 reasoning=reasoning,
             )
 
-            # Send notification to Discord with approval buttons
+            # 3. Send notification to Discord with approval buttons
             try:
                 redis = get_redis()
                 reasoning_line = f"\n_{reasoning}_" if reasoning else ""
@@ -710,12 +753,12 @@ class DraftEmailTool(BaseTool):
             except Exception as e:
                 logger.warning("Failed to send approval notification", error=str(e))
 
-            logger.info("Email draft staged", approval_id=approval_id, to=to)
+            logger.info("Email draft staged", approval_id=approval_id, draft_id=draft_id, to=to)
             return ToolResult(
                 success=True,
                 needs_approval=True,
                 approval_id=approval_id,
-                data={"to": to, "subject": subject},
+                data={"to": to, "subject": subject, "draft_id": draft_id},
             )
         except Exception as e:
             logger.warning("Email draft failed", error=str(e))

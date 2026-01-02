@@ -103,9 +103,13 @@ class GraphObserver:
             return []
 
     async def get_stale_items(self, task_days: int = 7, project_days: int = 14) -> list[dict]:
-        """Get tasks and projects that haven't been updated recently."""
+        """Get tasks and projects that haven't been updated recently.
+
+        Limited to prevent flooding the LLM context window with too many items.
+        Returns oldest items first (most stale).
+        """
         query = """
-        // Stale pending tasks
+        // Stale pending tasks (limited to prevent token explosion)
         MATCH (t:Task)
         WHERE t.status IN ['pending', 'in_progress']
           AND (t.updated_at < datetime() - duration({days: $task_days})
@@ -117,10 +121,12 @@ class GraphObserver:
             t.status as status,
             t.updated_at as last_updated,
             t.due as due_date
+        ORDER BY t.updated_at ASC
+        LIMIT 20
 
         UNION ALL
 
-        // Stale active projects
+        // Stale active projects (limited)
         MATCH (p:Project)
         WHERE p.status = 'active'
           AND (p.updated_at < datetime() - duration({days: $project_days})
@@ -132,6 +138,8 @@ class GraphObserver:
             p.status as status,
             p.updated_at as last_updated,
             null as due_date
+        ORDER BY p.updated_at ASC
+        LIMIT 10
         """
         try:
             result = await self.session.run(query, {
