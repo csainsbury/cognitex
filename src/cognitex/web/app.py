@@ -1659,14 +1659,41 @@ async def get_context_packs() -> list[dict]:
 
 
 async def get_suggested_blocks() -> list[dict]:
-    """Get all pending suggested calendar blocks."""
+    """Get pending suggested calendar blocks that are still relevant.
+
+    Filters out stale blocks based on suggested_day and created_at:
+    - "today" blocks: only valid if created today
+    - "tomorrow" blocks: only valid if created today or yesterday
+    - "next week" blocks: valid if created within last 7 days
+
+    Also deduplicates by project to avoid showing multiple similar suggestions.
+    """
     from cognitex.db.neo4j import get_neo4j_session
 
     async for session in get_neo4j_session():
+        # Filter blocks based on their suggested_day relative to created_at
+        # A "tomorrow" block created 3 days ago is stale
         query = """
         MATCH (sb:SuggestedBlock {status: 'pending_approval'})
+        WHERE
+            // "today" blocks: must be created today
+            (sb.suggested_day = 'today' AND sb.created_at >= datetime() - duration({hours: 18}))
+            OR
+            // "tomorrow" blocks: must be created today or yesterday
+            (sb.suggested_day = 'tomorrow' AND sb.created_at >= datetime() - duration({days: 1, hours: 12}))
+            OR
+            // "next week" blocks: valid for 7 days
+            (sb.suggested_day = 'next week' AND sb.created_at >= datetime() - duration({days: 7}))
+            OR
+            // Any other suggested_day: valid for 3 days
+            (NOT sb.suggested_day IN ['today', 'tomorrow', 'next week']
+             AND sb.created_at >= datetime() - duration({days: 3}))
         OPTIONAL MATCH (sb)-[:FOR_PROJECT]->(p:Project)
         OPTIONAL MATCH (sb)-[:FOR_TASK]->(t:Task)
+        WITH sb, p, t
+        // Deduplicate: keep only the most recent block per project
+        ORDER BY sb.created_at DESC
+        WITH p, t, COLLECT(sb)[0] as sb
         RETURN
             sb.id as id,
             sb.title as title,
@@ -1679,6 +1706,7 @@ async def get_suggested_blocks() -> list[dict]:
             t.id as task_id,
             t.title as task_title
         ORDER BY sb.created_at DESC
+        LIMIT 10
         """
         result = await session.run(query)
         data = await result.data()
