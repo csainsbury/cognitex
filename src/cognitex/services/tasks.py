@@ -856,3 +856,228 @@ def get_codefile_service() -> CodeFileService:
     if _codefile_service is None:
         _codefile_service = CodeFileService()
     return _codefile_service
+
+
+# =============================================================================
+# Phase 4: Duration Calibration (2.1)
+# =============================================================================
+
+async def record_task_timing(
+    task_id: str,
+    started_at: datetime,
+    completed_at: datetime,
+    estimated_minutes: int | None = None,
+    interruption_count: int = 0,
+    context: str | None = None,
+) -> str:
+    """
+    Record actual task timing for duration calibration.
+
+    Args:
+        task_id: The task ID
+        started_at: When work started
+        completed_at: When work completed
+        estimated_minutes: Original estimate if known
+        interruption_count: Number of interruptions during the task
+        context: Time context ('morning', 'afternoon', 'evening', 'fragmented')
+
+    Returns:
+        Timing record ID
+    """
+    from cognitex.db.postgres import get_session
+    from sqlalchemy import text
+
+    timing_id = f"timing_{uuid.uuid4().hex[:12]}"
+    actual_minutes = int((completed_at - started_at).total_seconds() / 60)
+
+    # Get project_id from task
+    project_id = None
+    async for neo_session in get_neo4j_session():
+        result = await neo_session.run("""
+            MATCH (t:Task {id: $task_id})
+            OPTIONAL MATCH (t)-[:BELONGS_TO|PART_OF]->(p:Project)
+            RETURN t.id as task_id, p.id as project_id
+        """, {"task_id": task_id})
+        data = await result.single()
+        if data:
+            project_id = data.get("project_id")
+        break
+
+    async for session in get_session():
+        await session.execute(text("""
+            INSERT INTO task_timing (
+                id, task_id, estimated_minutes, actual_minutes,
+                started_at, completed_at, interruption_count, context, project_id
+            )
+            VALUES (
+                :id, :task_id, :estimated_minutes, :actual_minutes,
+                :started_at, :completed_at, :interruption_count, :context, :project_id
+            )
+        """), {
+            "id": timing_id,
+            "task_id": task_id,
+            "estimated_minutes": estimated_minutes,
+            "actual_minutes": actual_minutes,
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "interruption_count": interruption_count,
+            "context": context,
+            "project_id": project_id,
+        })
+        await session.commit()
+        break
+
+    logger.debug(
+        "Recorded task timing",
+        task_id=task_id,
+        actual_minutes=actual_minutes,
+        estimated_minutes=estimated_minutes,
+    )
+    return timing_id
+
+
+async def get_duration_calibration(min_samples: int = 3) -> dict:
+    """
+    Calculate personal pace factors by project.
+
+    Returns:
+        Dict with project_id as key and calibration data as value:
+        - pace_factor: multiplier to apply (1.0 = accurate, 1.5 = 50% longer)
+        - sample_size: number of data points
+        - variability: standard deviation of the pace factor
+    """
+    from cognitex.db.postgres import get_session
+    from sqlalchemy import text
+
+    calibration = {}
+
+    async for session in get_session():
+        result = await session.execute(text("""
+            SELECT
+                project_id,
+                AVG(actual_minutes::float / NULLIF(estimated_minutes, 0)) as pace_factor,
+                COUNT(*) as sample_size,
+                STDDEV(actual_minutes::float / NULLIF(estimated_minutes, 0)) as variability,
+                AVG(actual_minutes) as avg_actual,
+                AVG(estimated_minutes) as avg_estimated
+            FROM task_timing
+            WHERE estimated_minutes > 0 AND actual_minutes > 0
+            GROUP BY project_id
+            HAVING COUNT(*) >= :min_samples
+        """), {"min_samples": min_samples})
+
+        for row in result.fetchall():
+            calibration[row.project_id or "unassigned"] = {
+                "pace_factor": round(row.pace_factor, 2) if row.pace_factor else 1.0,
+                "sample_size": row.sample_size,
+                "variability": round(row.variability, 2) if row.variability else 0,
+                "avg_actual": round(row.avg_actual, 0) if row.avg_actual else 0,
+                "avg_estimated": round(row.avg_estimated, 0) if row.avg_estimated else 0,
+            }
+        break
+
+    return calibration
+
+
+async def calibrate_estimate(
+    estimated_minutes: int,
+    project_id: str | None = None,
+) -> dict:
+    """
+    Adjust a task estimate based on personal pace.
+
+    Args:
+        estimated_minutes: Original estimate
+        project_id: Optional project context
+
+    Returns:
+        Dict with 'original', 'calibrated', 'pace_factor', 'confidence'
+    """
+    calibration = await get_duration_calibration()
+
+    result = {
+        "original": estimated_minutes,
+        "calibrated": estimated_minutes,
+        "pace_factor": 1.0,
+        "confidence": "low",
+        "source": "default",
+    }
+
+    # Check project-specific calibration
+    if project_id and project_id in calibration:
+        cal = calibration[project_id]
+        result["pace_factor"] = cal["pace_factor"]
+        result["calibrated"] = int(estimated_minutes * cal["pace_factor"])
+        result["source"] = f"project ({cal['sample_size']} samples)"
+
+        # Confidence based on sample size and variability
+        if cal["sample_size"] >= 10 and cal["variability"] < 0.3:
+            result["confidence"] = "high"
+        elif cal["sample_size"] >= 5:
+            result["confidence"] = "medium"
+        else:
+            result["confidence"] = "low"
+
+    # Fall back to overall calibration
+    elif "unassigned" in calibration:
+        cal = calibration["unassigned"]
+        result["pace_factor"] = cal["pace_factor"]
+        result["calibrated"] = int(estimated_minutes * cal["pace_factor"])
+        result["source"] = f"overall ({cal['sample_size']} samples)"
+        result["confidence"] = "low"
+
+    return result
+
+
+async def get_calibration_summary() -> dict:
+    """
+    Get a summary of duration calibration across all projects.
+
+    Returns:
+        Dict with overall stats and per-project breakdown
+    """
+    from cognitex.db.postgres import get_session
+    from sqlalchemy import text
+
+    summary = {
+        "overall": {},
+        "by_project": {},
+        "insights": [],
+    }
+
+    async for session in get_session():
+        # Overall stats
+        result = await session.execute(text("""
+            SELECT
+                COUNT(*) as total_records,
+                AVG(actual_minutes::float / NULLIF(estimated_minutes, 0)) as overall_pace,
+                COUNT(DISTINCT project_id) as projects_tracked,
+                SUM(actual_minutes) as total_minutes_tracked
+            FROM task_timing
+            WHERE estimated_minutes > 0 AND actual_minutes > 0
+        """))
+        row = result.fetchone()
+        if row:
+            summary["overall"] = {
+                "total_records": row.total_records or 0,
+                "overall_pace_factor": round(row.overall_pace, 2) if row.overall_pace else 1.0,
+                "projects_tracked": row.projects_tracked or 0,
+                "total_hours_tracked": round((row.total_minutes_tracked or 0) / 60, 1),
+            }
+
+        # Generate insights
+        calibration = await get_duration_calibration()
+        for project_id, cal in calibration.items():
+            summary["by_project"][project_id] = cal
+
+            if cal["pace_factor"] > 1.3:
+                summary["insights"].append(
+                    f"Tasks in '{project_id}' take {int((cal['pace_factor']-1)*100)}% longer than estimated"
+                )
+            elif cal["pace_factor"] < 0.8:
+                summary["insights"].append(
+                    f"Tasks in '{project_id}' complete {int((1-cal['pace_factor'])*100)}% faster than estimated"
+                )
+        break
+
+    return summary

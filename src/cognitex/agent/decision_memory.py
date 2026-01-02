@@ -797,6 +797,212 @@ class PreferenceRuleMemory:
             """), {"rule_id": rule_id, "trace_id": trace_id})
             await session.commit()
 
+    # =========================================================================
+    # Phase 4: Preference Rule Validation Lifecycle (4.1)
+    # =========================================================================
+
+    async def record_rule_application(
+        self,
+        rule_id: str,
+        trace_id: str,
+        was_successful: bool,
+    ) -> None:
+        """
+        Record when a rule was applied and whether it led to a good outcome.
+
+        Args:
+            rule_id: The rule that was applied
+            trace_id: The decision trace where it was applied
+            was_successful: Whether the decision had quality_score >= 0.7
+        """
+        async for session in self._get_session():
+            await session.execute(text("""
+                UPDATE preference_rules
+                SET applications = COALESCE(applications, 0) + 1,
+                    successful_applications = COALESCE(successful_applications, 0) + :success_inc,
+                    success_rate = CASE
+                        WHEN COALESCE(applications, 0) + 1 > 0
+                        THEN (COALESCE(successful_applications, 0) + :success_inc)::float /
+                             (COALESCE(applications, 0) + 1)
+                        ELSE NULL
+                    END,
+                    last_applied_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = :rule_id
+            """), {
+                "rule_id": rule_id,
+                "success_inc": 1 if was_successful else 0,
+            })
+            await session.commit()
+
+    async def validate_rules(self) -> dict:
+        """
+        Validate all rules based on their application history.
+
+        Updates lifecycle status:
+        - CANDIDATE (< 3 applications)
+        - ACTIVE (3+ applications, > 50% success)
+        - VALIDATED (10+ applications, > 70% success)
+        - DEPRECATED (< 30% success after 5+ applications)
+
+        Returns:
+            Dict with counts of rules in each lifecycle stage
+        """
+        stats = {
+            "validated": 0,
+            "deprecated": 0,
+            "promoted_to_active": 0,
+            "total_evaluated": 0,
+        }
+
+        async for session in self._get_session():
+            # Promote to VALIDATED (10+ applications, >70% success)
+            result = await session.execute(text("""
+                UPDATE preference_rules
+                SET lifecycle = 'validated',
+                    validated_at = NOW(),
+                    updated_at = NOW()
+                WHERE lifecycle IN ('candidate', 'active')
+                  AND applications >= 10
+                  AND success_rate >= 0.7
+                  AND is_active = true
+                RETURNING id
+            """))
+            stats["validated"] = len(result.fetchall())
+
+            # Promote to ACTIVE (3+ applications, >50% success)
+            result = await session.execute(text("""
+                UPDATE preference_rules
+                SET lifecycle = 'active',
+                    updated_at = NOW()
+                WHERE lifecycle = 'candidate'
+                  AND applications >= 3
+                  AND success_rate >= 0.5
+                  AND is_active = true
+                RETURNING id
+            """))
+            stats["promoted_to_active"] = len(result.fetchall())
+
+            # Deprecate (5+ applications, <30% success)
+            result = await session.execute(text("""
+                UPDATE preference_rules
+                SET lifecycle = 'deprecated',
+                    is_active = false,
+                    deprecated_at = NOW(),
+                    deprecation_reason = 'Low success rate after ' || applications || ' applications',
+                    updated_at = NOW()
+                WHERE lifecycle IN ('candidate', 'active')
+                  AND applications >= 5
+                  AND success_rate < 0.3
+                  AND is_active = true
+                RETURNING id
+            """))
+            stats["deprecated"] = len(result.fetchall())
+
+            # Get total evaluated
+            result = await session.execute(text("""
+                SELECT COUNT(*) as total FROM preference_rules
+                WHERE applications > 0
+            """))
+            row = result.fetchone()
+            stats["total_evaluated"] = row.total if row else 0
+
+            await session.commit()
+
+        logger.info("Rule validation complete", **stats)
+        return stats
+
+    async def get_rules_by_lifecycle(self) -> dict:
+        """
+        Get all rules grouped by lifecycle stage.
+
+        Returns:
+            Dict with lifecycle stage as key and list of rules as value
+        """
+        rules_by_stage = {
+            "candidate": [],
+            "active": [],
+            "validated": [],
+            "deprecated": [],
+        }
+
+        async for session in self._get_session():
+            result = await session.execute(text("""
+                SELECT
+                    id, rule_name, rule_type, lifecycle,
+                    confidence, applications, success_rate,
+                    created_at, validated_at, deprecated_at, deprecation_reason
+                FROM preference_rules
+                ORDER BY
+                    CASE lifecycle
+                        WHEN 'validated' THEN 1
+                        WHEN 'active' THEN 2
+                        WHEN 'candidate' THEN 3
+                        WHEN 'deprecated' THEN 4
+                    END,
+                    success_rate DESC NULLS LAST
+            """))
+
+            for row in result.fetchall():
+                stage = row.lifecycle or "candidate"
+                rules_by_stage[stage].append({
+                    "id": row.id,
+                    "name": row.rule_name,
+                    "type": row.rule_type,
+                    "confidence": row.confidence,
+                    "applications": row.applications or 0,
+                    "success_rate": round(row.success_rate * 100, 1) if row.success_rate else None,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                    "validated_at": row.validated_at.isoformat() if row.validated_at else None,
+                    "deprecated_at": row.deprecated_at.isoformat() if row.deprecated_at else None,
+                    "deprecation_reason": row.deprecation_reason,
+                })
+            break
+
+        return rules_by_stage
+
+    async def deprecate_rule(self, rule_id: str, reason: str) -> bool:
+        """Manually deprecate a rule."""
+        async for session in self._get_session():
+            result = await session.execute(text("""
+                UPDATE preference_rules
+                SET lifecycle = 'deprecated',
+                    is_active = false,
+                    deprecated_at = NOW(),
+                    deprecation_reason = :reason,
+                    updated_at = NOW()
+                WHERE id = :rule_id AND is_active = true
+                RETURNING id
+            """), {"rule_id": rule_id, "reason": reason})
+            row = result.fetchone()
+            await session.commit()
+            return row is not None
+
+    async def get_rule_stats(self) -> dict:
+        """Get statistics about preference rules."""
+        async for session in self._get_session():
+            result = await session.execute(text("""
+                SELECT
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE is_active = true) as active,
+                    COUNT(*) FILTER (WHERE lifecycle = 'validated') as validated,
+                    COUNT(*) FILTER (WHERE lifecycle = 'deprecated') as deprecated,
+                    COUNT(*) FILTER (WHERE lifecycle = 'candidate') as candidate,
+                    AVG(success_rate) FILTER (WHERE applications >= 3) as avg_success_rate,
+                    SUM(applications) as total_applications
+                FROM preference_rules
+            """))
+            row = result.fetchone()
+            return {
+                "total": row.total or 0,
+                "active": row.active or 0,
+                "validated": row.validated or 0,
+                "deprecated": row.deprecated or 0,
+                "candidate": row.candidate or 0,
+                "avg_success_rate": round(row.avg_success_rate * 100, 1) if row.avg_success_rate else None,
+                "total_applications": row.total_applications or 0,
+            }
+
 
 # =============================================================================
 # Training Data Export

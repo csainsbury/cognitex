@@ -924,3 +924,267 @@ class GraphObserver:
             logger.error("Failed to build email deep context", gmail_id=gmail_id, error=str(e))
 
         return context
+
+    # =========================================================================
+    # Phase 4 Learning: Deadline & Completion Patterns (1.2)
+    # =========================================================================
+
+    async def get_deadline_patterns(self) -> dict:
+        """
+        Analyze task completion timing relative to deadlines.
+
+        Returns patterns like:
+        - What percentage of tasks are completed late, on-time, early
+        - Which projects have the worst on-time rates
+        - Examples of each timing category
+
+        Returns:
+            Dict with timing distribution and project-level patterns
+        """
+        patterns = {
+            "timing_distribution": {},
+            "by_project": {},
+            "summary": {},
+        }
+
+        try:
+            # Overall timing distribution
+            query = """
+            MATCH (t:Task)
+            WHERE t.completed_at IS NOT NULL AND t.due IS NOT NULL
+            WITH t,
+                 duration.between(datetime(t.completed_at), datetime(t.due)).days as days_before
+            RETURN
+                CASE
+                    WHEN days_before < -7 THEN 'very_late'
+                    WHEN days_before < 0 THEN 'late'
+                    WHEN days_before = 0 THEN 'day_of'
+                    WHEN days_before <= 1 THEN 'last_minute'
+                    WHEN days_before <= 3 THEN 'comfortable'
+                    ELSE 'early'
+                END as timing,
+                count(*) as count,
+                collect(t.title)[0..3] as examples
+            ORDER BY
+                CASE timing
+                    WHEN 'very_late' THEN 1
+                    WHEN 'late' THEN 2
+                    WHEN 'day_of' THEN 3
+                    WHEN 'last_minute' THEN 4
+                    WHEN 'comfortable' THEN 5
+                    WHEN 'early' THEN 6
+                END
+            """
+            result = await self.session.run(query)
+            data = await result.data()
+
+            total = sum(row["count"] for row in data)
+            for row in data:
+                patterns["timing_distribution"][row["timing"]] = {
+                    "count": row["count"],
+                    "percentage": round(row["count"] / total * 100, 1) if total > 0 else 0,
+                    "examples": row["examples"],
+                }
+
+            # By project patterns
+            project_query = """
+            MATCH (t:Task)-[:BELONGS_TO|PART_OF]->(p:Project)
+            WHERE t.completed_at IS NOT NULL AND t.due IS NOT NULL
+            WITH p, t,
+                 duration.between(datetime(t.completed_at), datetime(t.due)).days as days_before
+            WITH p,
+                 count(*) as total,
+                 count(CASE WHEN days_before >= 0 THEN 1 END) as on_time,
+                 avg(days_before) as avg_days_before
+            WHERE total >= 3
+            RETURN
+                p.id as project_id,
+                p.title as project_title,
+                total,
+                on_time,
+                round(on_time * 100.0 / total) as on_time_rate,
+                round(avg_days_before * 10) / 10 as avg_days_margin
+            ORDER BY on_time_rate ASC
+            LIMIT 10
+            """
+            result = await self.session.run(project_query)
+            project_data = await result.data()
+
+            for row in project_data:
+                patterns["by_project"][row["project_id"]] = {
+                    "title": row["project_title"],
+                    "total": row["total"],
+                    "on_time": row["on_time"],
+                    "on_time_rate": row["on_time_rate"],
+                    "avg_days_margin": row["avg_days_margin"],
+                }
+
+            # Summary stats
+            late_count = sum(
+                patterns["timing_distribution"].get(t, {}).get("count", 0)
+                for t in ["very_late", "late"]
+            )
+            on_time_count = sum(
+                patterns["timing_distribution"].get(t, {}).get("count", 0)
+                for t in ["day_of", "last_minute", "comfortable", "early"]
+            )
+
+            patterns["summary"] = {
+                "total_with_deadlines": total,
+                "late_count": late_count,
+                "on_time_count": on_time_count,
+                "on_time_rate": round(on_time_count / total * 100, 1) if total > 0 else 0,
+                "last_minute_rate": round(
+                    patterns["timing_distribution"].get("last_minute", {}).get("count", 0)
+                    / total * 100, 1
+                ) if total > 0 else 0,
+            }
+
+            logger.debug("Computed deadline patterns", summary=patterns["summary"])
+
+        except Exception as e:
+            logger.warning("Failed to compute deadline patterns", error=str(e))
+
+        return patterns
+
+    async def get_deferral_patterns(self) -> dict:
+        """
+        Analyze task deferral patterns to identify procrastination signals.
+
+        Returns:
+            Dict with deferral statistics by project, priority, and friction level
+        """
+        patterns = {
+            "overall": {},
+            "by_project": {},
+            "high_deferral_tasks": [],
+        }
+
+        try:
+            # Overall deferral stats (using tasks table directly via PostgreSQL)
+            from cognitex.db.postgres import get_session
+            from sqlalchemy import text
+
+            async for session in get_session():
+                # Overall stats
+                result = await session.execute(text("""
+                    SELECT
+                        COUNT(*) as total,
+                        COUNT(*) FILTER (WHERE deferral_count > 0) as deferred_any,
+                        COUNT(*) FILTER (WHERE deferral_count >= 2) as deferred_multiple,
+                        COUNT(*) FILTER (WHERE deferral_count >= 3) as chronic_deferrals,
+                        AVG(deferral_count) FILTER (WHERE deferral_count > 0) as avg_deferrals
+                    FROM tasks
+                    WHERE status IN ('pending', 'in_progress', 'completed')
+                """))
+                row = result.fetchone()
+                if row:
+                    patterns["overall"] = {
+                        "total_tasks": row.total or 0,
+                        "deferred_any": row.deferred_any or 0,
+                        "deferred_multiple": row.deferred_multiple or 0,
+                        "chronic_deferrals": row.chronic_deferrals or 0,
+                        "deferral_rate": round(
+                            (row.deferred_any or 0) / row.total * 100, 1
+                        ) if row.total > 0 else 0,
+                        "avg_deferrals_when_deferred": round(row.avg_deferrals or 0, 1),
+                    }
+
+                # High deferral tasks (still pending)
+                result = await session.execute(text("""
+                    SELECT id, title, deferral_count, project_id, priority, estimated_minutes
+                    FROM tasks
+                    WHERE status = 'pending'
+                      AND deferral_count >= 2
+                    ORDER BY deferral_count DESC
+                    LIMIT 10
+                """))
+                patterns["high_deferral_tasks"] = [
+                    {
+                        "id": row.id,
+                        "title": row.title,
+                        "deferral_count": row.deferral_count,
+                        "project_id": row.project_id,
+                        "priority": row.priority,
+                        "estimated_minutes": row.estimated_minutes,
+                    }
+                    for row in result.fetchall()
+                ]
+                break
+
+            logger.debug("Computed deferral patterns", overall=patterns["overall"])
+
+        except Exception as e:
+            logger.warning("Failed to compute deferral patterns", error=str(e))
+
+        return patterns
+
+    async def get_learning_summary(self) -> dict:
+        """
+        Get a comprehensive summary of all learned patterns for briefings.
+
+        Combines:
+        - Deadline patterns
+        - Deferral patterns
+        - Proposal acceptance patterns
+
+        Returns:
+            Dict with key insights for the daily briefing
+        """
+        from cognitex.agent.action_log import get_proposal_patterns
+
+        summary = {
+            "deadline_patterns": await self.get_deadline_patterns(),
+            "deferral_patterns": await self.get_deferral_patterns(),
+            "proposal_patterns": await get_proposal_patterns(),
+            "insights": [],
+        }
+
+        # Generate actionable insights
+        insights = []
+
+        # Deadline insight
+        deadline_summary = summary["deadline_patterns"].get("summary", {})
+        on_time_rate = deadline_summary.get("on_time_rate", 100)
+        last_minute_rate = deadline_summary.get("last_minute_rate", 0)
+
+        if on_time_rate < 80:
+            insights.append(
+                f"Only {on_time_rate:.0f}% of tasks with deadlines are completed on time. "
+                f"Consider earlier reminders or smaller task chunks."
+            )
+        if last_minute_rate > 50:
+            insights.append(
+                f"{last_minute_rate:.0f}% of tasks are completed last-minute. "
+                f"This suggests deadlines might need more buffer."
+            )
+
+        # Deferral insight
+        deferral_summary = summary["deferral_patterns"].get("overall", {})
+        deferral_rate = deferral_summary.get("deferral_rate", 0)
+        chronic_count = deferral_summary.get("chronic_deferrals", 0)
+
+        if deferral_rate > 30:
+            insights.append(
+                f"{deferral_rate:.0f}% of tasks get deferred at least once. "
+                f"Consider adding MVS (minimum viable start) to new tasks."
+            )
+        if chronic_count > 0:
+            insights.append(
+                f"{chronic_count} tasks have been deferred 3+ times. "
+                f"These may need decomposition or re-evaluation."
+            )
+
+        # Proposal insight
+        proposal_overall = summary["proposal_patterns"].get("overall", {})
+        approval_rate = proposal_overall.get("approval_rate", 50)
+
+        if approval_rate < 50 and proposal_overall.get("decided", 0) >= 5:
+            insights.append(
+                f"Proposal approval rate is {approval_rate:.0f}%. "
+                f"Consider more specific task proposals or different priorities."
+            )
+
+        summary["insights"] = insights
+
+        return summary

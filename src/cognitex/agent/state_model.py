@@ -435,3 +435,243 @@ def get_state_estimator() -> StateEstimator:
     if _state_estimator is None:
         _state_estimator = StateEstimator()
     return _state_estimator
+
+
+# =============================================================================
+# Phase 4: Deferral Prediction (1.3)
+# =============================================================================
+
+@dataclass
+class DeferralRisk:
+    """Predicted risk of task deferral."""
+
+    score: float  # 0-1 probability of deferral
+    factors: list[str]  # Contributing factors
+    recommended_intervention: str | None = None  # Suggested action
+
+    @classmethod
+    async def calculate(cls, task: dict) -> "DeferralRisk":
+        """
+        Calculate deferral risk for a task based on multiple factors.
+
+        Args:
+            task: Task dict with id, title, deferral_count, project_id, etc.
+
+        Returns:
+            DeferralRisk with score, factors, and recommended intervention
+        """
+        factors = []
+        score = 0.0
+
+        # Factor 1: Task has been deferred before (strongest signal)
+        deferral_count = task.get("deferral_count", 0)
+        if deferral_count > 0:
+            score += 0.3 * min(deferral_count, 3) / 3
+            factors.append(f"deferred {deferral_count}x before")
+
+        # Factor 2: Project deferral rate
+        project_id = task.get("project_id")
+        if project_id:
+            project_rate = await get_project_deferral_rate(project_id)
+            if project_rate > 0.5:
+                score += 0.2
+                factors.append(f"project has {project_rate:.0%} deferral rate")
+            elif project_rate > 0.3:
+                score += 0.1
+                factors.append(f"project has moderate deferral rate ({project_rate:.0%})")
+
+        # Factor 3: High start friction
+        start_friction = task.get("start_friction", 3)
+        if start_friction >= 4:
+            score += 0.2
+            factors.append("high start friction")
+        elif start_friction >= 3:
+            score += 0.1
+            factors.append("moderate start friction")
+
+        # Factor 4: No clear next step (no MVS)
+        if not task.get("minimum_viable_start"):
+            score += 0.15
+            factors.append("no MVS defined")
+
+        # Factor 5: Large estimated time
+        estimated_minutes = task.get("estimated_minutes", 0)
+        if estimated_minutes > 120:
+            score += 0.15
+            factors.append("large time estimate (>2hr)")
+        elif estimated_minutes > 60:
+            score += 0.1
+            factors.append("substantial time estimate (>1hr)")
+
+        # Factor 6: No deadline (lower urgency)
+        if not task.get("due") and not task.get("due_date"):
+            score += 0.1
+            factors.append("no deadline set")
+
+        # Factor 7: Low priority
+        priority = task.get("priority", "medium")
+        if priority == "low":
+            score += 0.1
+            factors.append("low priority")
+
+        # Determine recommended intervention
+        intervention = None
+        if score >= 0.7:
+            if not task.get("minimum_viable_start"):
+                intervention = "generate_mvs"
+            elif estimated_minutes > 90:
+                intervention = "decompose"
+            else:
+                intervention = "schedule_now"
+        elif score >= 0.5:
+            if not task.get("minimum_viable_start"):
+                intervention = "generate_mvs"
+            else:
+                intervention = "add_deadline"
+
+        return cls(
+            score=min(score, 1.0),
+            factors=factors,
+            recommended_intervention=intervention,
+        )
+
+
+async def get_project_deferral_rate(project_id: str) -> float:
+    """
+    Get the historical deferral rate for a project.
+
+    Returns:
+        Float 0-1 representing proportion of tasks deferred at least once
+    """
+    from cognitex.db.postgres import get_session
+    from sqlalchemy import text
+
+    async for session in get_session():
+        result = await session.execute(text("""
+            SELECT
+                COUNT(*) as total,
+                COUNT(*) FILTER (WHERE deferral_count > 0) as deferred
+            FROM tasks
+            WHERE project_id = :project_id
+              AND status IN ('pending', 'in_progress', 'completed')
+        """), {"project_id": project_id})
+        row = result.fetchone()
+        if row and row.total > 0:
+            return row.deferred / row.total
+        break
+
+    return 0.0
+
+
+async def get_high_risk_tasks(min_risk: float = 0.5, limit: int = 10) -> list[dict]:
+    """
+    Get tasks with high deferral risk.
+
+    Args:
+        min_risk: Minimum risk score to include
+        limit: Maximum tasks to return
+
+    Returns:
+        List of tasks with their deferral risk assessment
+    """
+    from cognitex.db.postgres import get_session
+    from sqlalchemy import text
+
+    high_risk_tasks = []
+
+    async for session in get_session():
+        # Get pending tasks with potential risk factors
+        result = await session.execute(text("""
+            SELECT
+                id, title, deferral_count, project_id, priority,
+                estimated_minutes, due_date
+            FROM tasks
+            WHERE status = 'pending'
+            ORDER BY deferral_count DESC, created_at ASC
+            LIMIT 50
+        """))
+
+        for row in result.fetchall():
+            task = {
+                "id": row.id,
+                "title": row.title,
+                "deferral_count": row.deferral_count or 0,
+                "project_id": row.project_id,
+                "priority": row.priority,
+                "estimated_minutes": row.estimated_minutes,
+                "due": row.due_date,
+            }
+
+            risk = await DeferralRisk.calculate(task)
+            if risk.score >= min_risk:
+                high_risk_tasks.append({
+                    **task,
+                    "risk_score": round(risk.score, 2),
+                    "risk_factors": risk.factors,
+                    "recommended_intervention": risk.recommended_intervention,
+                })
+
+        break
+
+    # Sort by risk and limit
+    high_risk_tasks.sort(key=lambda x: x["risk_score"], reverse=True)
+    return high_risk_tasks[:limit]
+
+
+async def record_deferral(
+    task_id: str,
+    inferred_reason: str | None = None,
+    friction_at_deferral: float | None = None,
+) -> str:
+    """
+    Record a task deferral for analysis.
+
+    Args:
+        task_id: The task being deferred
+        inferred_reason: Why we think it was deferred
+        friction_at_deferral: Current friction level
+
+    Returns:
+        Deferral analysis record ID
+    """
+    from cognitex.db.postgres import get_session
+    from sqlalchemy import text
+
+    deferral_id = f"def_{uuid.uuid4().hex[:12]}"
+
+    async for session in get_session():
+        # Get current deferral count
+        result = await session.execute(text("""
+            SELECT deferral_count FROM tasks WHERE id = :task_id
+        """), {"task_id": task_id})
+        row = result.fetchone()
+        current_count = (row.deferral_count or 0) if row else 0
+
+        # Record the deferral analysis
+        await session.execute(text("""
+            INSERT INTO deferral_analysis (
+                id, task_id, inferred_reason, friction_at_deferral, deferral_count_at_time
+            ) VALUES (
+                :id, :task_id, :reason, :friction, :count
+            )
+        """), {
+            "id": deferral_id,
+            "task_id": task_id,
+            "reason": inferred_reason,
+            "friction": friction_at_deferral,
+            "count": current_count + 1,
+        })
+
+        # Update task deferral count
+        await session.execute(text("""
+            UPDATE tasks
+            SET deferral_count = COALESCE(deferral_count, 0) + 1,
+                last_deferred_at = NOW()
+            WHERE id = :task_id
+        """), {"task_id": task_id})
+
+        await session.commit()
+        break
+
+    logger.debug("Recorded deferral", task_id=task_id, reason=inferred_reason)
+    return deferral_id

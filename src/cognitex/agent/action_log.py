@@ -384,3 +384,211 @@ async def get_proposal_stats() -> dict:
         }
 
     return {}
+
+
+# ============================================================================
+# Proposal Learning (Phase 4 - 1.1)
+# ============================================================================
+
+async def get_proposal_patterns(min_samples: int = 3) -> dict:
+    """
+    Analyze proposal acceptance patterns by project and priority.
+
+    Returns patterns that can be used to improve future proposals:
+    - High approval rate categories can be auto-approved
+    - Low approval rate categories should be more specific or skipped
+
+    Args:
+        min_samples: Minimum number of decided proposals to include pattern
+
+    Returns:
+        Dict with 'by_project' and 'by_priority' patterns
+    """
+    from cognitex.db.postgres import get_session
+
+    patterns = {
+        "by_project": {},
+        "by_priority": {},
+        "overall": {},
+    }
+
+    async for session in get_session():
+        # Patterns by project
+        result = await session.execute(text("""
+            SELECT
+                project_id,
+                COUNT(*) FILTER (WHERE status = 'approved') as approved,
+                COUNT(*) FILTER (WHERE status = 'rejected') as rejected,
+                COUNT(*) as total,
+                ROUND(
+                    COUNT(*) FILTER (WHERE status = 'approved')::numeric /
+                    NULLIF(COUNT(*), 0) * 100, 1
+                ) as approval_rate
+            FROM task_proposals
+            WHERE decision_at IS NOT NULL
+              AND project_id IS NOT NULL
+            GROUP BY project_id
+            HAVING COUNT(*) >= :min_samples
+            ORDER BY approval_rate DESC
+        """), {"min_samples": min_samples})
+
+        for row in result.fetchall():
+            patterns["by_project"][row.project_id] = {
+                "approved": row.approved,
+                "rejected": row.rejected,
+                "total": row.total,
+                "approval_rate": float(row.approval_rate) if row.approval_rate else 0,
+            }
+
+        # Patterns by priority
+        result = await session.execute(text("""
+            SELECT
+                priority,
+                COUNT(*) FILTER (WHERE status = 'approved') as approved,
+                COUNT(*) FILTER (WHERE status = 'rejected') as rejected,
+                COUNT(*) as total,
+                ROUND(
+                    COUNT(*) FILTER (WHERE status = 'approved')::numeric /
+                    NULLIF(COUNT(*), 0) * 100, 1
+                ) as approval_rate
+            FROM task_proposals
+            WHERE decision_at IS NOT NULL
+            GROUP BY priority
+            HAVING COUNT(*) >= :min_samples
+            ORDER BY approval_rate DESC
+        """), {"min_samples": min_samples})
+
+        for row in result.fetchall():
+            patterns["by_priority"][row.priority] = {
+                "approved": row.approved,
+                "rejected": row.rejected,
+                "total": row.total,
+                "approval_rate": float(row.approval_rate) if row.approval_rate else 0,
+            }
+
+        # Overall stats
+        result = await session.execute(text("""
+            SELECT
+                COUNT(*) FILTER (WHERE status = 'approved') as approved,
+                COUNT(*) FILTER (WHERE status = 'rejected') as rejected,
+                COUNT(*) FILTER (WHERE decision_at IS NOT NULL) as decided,
+                COUNT(*) as total
+            FROM task_proposals
+        """))
+        row = result.fetchone()
+        patterns["overall"] = {
+            "approved": row.approved or 0,
+            "rejected": row.rejected or 0,
+            "decided": row.decided or 0,
+            "total": row.total or 0,
+            "approval_rate": (
+                (row.approved / row.decided * 100) if row.decided > 0 else 0
+            ),
+        }
+        break
+
+    return patterns
+
+
+async def get_proposal_recommendation(
+    project_id: str | None = None,
+    priority: str = "medium",
+) -> dict:
+    """
+    Get recommendation for whether to propose a task based on learned patterns.
+
+    Returns:
+        Dict with 'should_propose', 'confidence', 'reason', and 'auto_approve' flag
+    """
+    patterns = await get_proposal_patterns(min_samples=2)
+
+    # Default recommendation
+    recommendation = {
+        "should_propose": True,
+        "confidence": 0.5,
+        "reason": "Insufficient data for recommendation",
+        "auto_approve": False,
+        "historical_rate": None,
+    }
+
+    # Check project-specific pattern
+    if project_id and project_id in patterns["by_project"]:
+        project_pattern = patterns["by_project"][project_id]
+        rate = project_pattern["approval_rate"]
+        recommendation["historical_rate"] = rate
+
+        if rate >= 80 and project_pattern["total"] >= 5:
+            recommendation.update({
+                "should_propose": True,
+                "confidence": 0.9,
+                "reason": f"High approval rate for this project ({rate:.0f}%)",
+                "auto_approve": True,
+            })
+        elif rate <= 30 and project_pattern["total"] >= 5:
+            recommendation.update({
+                "should_propose": False,
+                "confidence": 0.8,
+                "reason": f"Low approval rate for this project ({rate:.0f}%) - consider being more specific",
+            })
+        elif rate >= 60:
+            recommendation.update({
+                "should_propose": True,
+                "confidence": 0.7,
+                "reason": f"Good approval rate for this project ({rate:.0f}%)",
+            })
+
+    # Check priority pattern if no project-specific data
+    elif priority in patterns["by_priority"]:
+        priority_pattern = patterns["by_priority"][priority]
+        rate = priority_pattern["approval_rate"]
+        recommendation["historical_rate"] = rate
+
+        if rate >= 70:
+            recommendation.update({
+                "should_propose": True,
+                "confidence": 0.7,
+                "reason": f"Good approval rate for {priority} priority ({rate:.0f}%)",
+            })
+        elif rate <= 40:
+            recommendation.update({
+                "should_propose": True,
+                "confidence": 0.5,
+                "reason": f"Lower approval rate for {priority} priority ({rate:.0f}%) - be specific",
+            })
+
+    return recommendation
+
+
+async def get_recent_rejections(limit: int = 10) -> list[dict]:
+    """
+    Get recent rejected proposals to learn from patterns.
+
+    Returns list of rejected proposals with reasons.
+    """
+    from cognitex.db.postgres import get_session
+
+    async for session in get_session():
+        result = await session.execute(text("""
+            SELECT
+                id, title, description, project_id, priority,
+                reason as proposal_reason,
+                decision_reason as rejection_reason,
+                decision_at
+            FROM task_proposals
+            WHERE status = 'rejected'
+            ORDER BY decision_at DESC
+            LIMIT :limit
+        """), {"limit": limit})
+
+        return [{
+            "id": row.id,
+            "title": row.title,
+            "description": row.description,
+            "project_id": row.project_id,
+            "priority": row.priority,
+            "proposal_reason": row.proposal_reason,
+            "rejection_reason": row.rejection_reason,
+            "rejected_at": row.decision_at.isoformat() if row.decision_at else None,
+        } for row in result.fetchall()]
+
+    return []

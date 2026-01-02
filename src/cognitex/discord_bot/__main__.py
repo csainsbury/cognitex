@@ -54,6 +54,10 @@ class CognitexBot(commands.Bot):
         self.tree.add_command(status_command)
         self.tree.add_command(triggers_command)
         self.tree.add_command(goal_parse_command)
+        # Phase 4: Learning commands
+        self.tree.add_command(learning_command)
+        self.tree.add_command(patterns_command)
+        self.tree.add_command(risk_command)
 
         # Sync commands with Discord
         try:
@@ -1295,6 +1299,201 @@ async def triggers_command(interaction: discord.Interaction) -> None:
 
     except Exception as e:
         logger.error("Triggers command failed", error=str(e))
+        await interaction.followup.send(f"Error: {str(e)[:100]}")
+
+
+# =============================================================================
+# Phase 4: Learning System Commands
+# =============================================================================
+
+@app_commands.command(name="learning", description="Show learning system summary")
+async def learning_command(interaction: discord.Interaction) -> None:
+    """Show learning stats and insights."""
+    await interaction.response.defer()
+
+    try:
+        from cognitex.agent.learning import init_learning_system, get_learning_system
+
+        await init_learning_system()
+        ls = get_learning_system()
+        summary = await ls.get_learning_summary()
+
+        embed = discord.Embed(
+            title="Learning System",
+            color=discord.Color.blue(),
+            timestamp=datetime.now(),
+        )
+
+        # Proposal stats
+        proposal_stats = summary.get("proposals", {}).get("stats", {})
+        if proposal_stats.get("total", 0) > 0:
+            embed.add_field(
+                name="Proposals",
+                value=(
+                    f"Approval rate: **{proposal_stats.get('approval_rate', 0):.0f}%**\n"
+                    f"Total: {proposal_stats.get('total', 0)} "
+                    f"({proposal_stats.get('approved', 0)} approved, "
+                    f"{proposal_stats.get('rejected', 0)} rejected)"
+                ),
+                inline=False,
+            )
+
+        # Duration calibration
+        duration = summary.get("duration", {}).get("overall", {})
+        if duration.get("total_records", 0) > 0:
+            pace = duration.get("overall_pace_factor", 1.0)
+            pace_desc = "accurate" if 0.9 <= pace <= 1.1 else f"{pace:.1f}x"
+            embed.add_field(
+                name="Duration Calibration",
+                value=(
+                    f"Pace factor: **{pace_desc}**\n"
+                    f"Hours tracked: {duration.get('total_hours_tracked', 0):.0f}h"
+                ),
+                inline=True,
+            )
+
+        # Deferral risk
+        deferrals = summary.get("deferrals", {})
+        high_risk_count = deferrals.get("high_risk_count", 0)
+        if high_risk_count > 0:
+            embed.add_field(
+                name="Deferral Risk",
+                value=f"**{high_risk_count}** high-risk tasks",
+                inline=True,
+            )
+
+        # Rules
+        rules = summary.get("rules", {}).get("stats", {})
+        if rules.get("total", 0) > 0:
+            embed.add_field(
+                name="Preference Rules",
+                value=(
+                    f"Validated: {rules.get('validated', 0)}\n"
+                    f"Active: {rules.get('active', 0)}"
+                ),
+                inline=True,
+            )
+
+        # Insights
+        insights = summary.get("insights", [])
+        if insights:
+            embed.add_field(
+                name="Insights",
+                value="\n".join(f"• {i[:100]}" for i in insights[:3]),
+                inline=False,
+            )
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        logger.error("Learning command failed", error=str(e))
+        await interaction.followup.send(f"Error: {str(e)[:100]}")
+
+
+@app_commands.command(name="patterns", description="Show learned behavioral patterns")
+async def patterns_command(interaction: discord.Interaction) -> None:
+    """Show key behavioral patterns."""
+    await interaction.response.defer()
+
+    try:
+        from cognitex.agent.action_log import get_proposal_patterns
+        from cognitex.services.tasks import get_calibration_summary
+
+        embed = discord.Embed(
+            title="Behavioral Patterns",
+            color=discord.Color.green(),
+            timestamp=datetime.now(),
+        )
+
+        # Proposal patterns by project
+        patterns = await get_proposal_patterns(min_samples=2)
+        by_project = patterns.get("by_project", {})
+        if by_project:
+            project_lines = []
+            for pid, data in list(by_project.items())[:5]:
+                rate = data.get("approval_rate", 0)
+                emoji = "" if rate >= 70 else "" if rate <= 30 else ""
+                project_lines.append(f"{emoji} {pid[:20]}: {rate:.0f}%")
+
+            if project_lines:
+                embed.add_field(
+                    name="Proposal Acceptance by Project",
+                    value="\n".join(project_lines),
+                    inline=False,
+                )
+
+        # Duration patterns
+        duration = await get_calibration_summary()
+        by_proj = duration.get("by_project", {})
+        if by_proj:
+            pace_lines = []
+            for pid, data in list(by_proj.items())[:5]:
+                pace = data.get("pace_factor", 1.0)
+                if pace > 1.2:
+                    emoji = ""
+                    desc = f"+{int((pace-1)*100)}% longer"
+                elif pace < 0.8:
+                    emoji = ""
+                    desc = f"{int((1-pace)*100)}% faster"
+                else:
+                    emoji = ""
+                    desc = "accurate"
+                pace_lines.append(f"{emoji} {pid[:20]}: {desc}")
+
+            if pace_lines:
+                embed.add_field(
+                    name="Duration Accuracy by Project",
+                    value="\n".join(pace_lines),
+                    inline=False,
+                )
+
+        if not embed.fields:
+            embed.description = "No patterns learned yet. Keep using the system!"
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        logger.error("Patterns command failed", error=str(e))
+        await interaction.followup.send(f"Error: {str(e)[:100]}")
+
+
+@app_commands.command(name="risk", description="Show tasks with high deferral risk")
+async def risk_command(interaction: discord.Interaction) -> None:
+    """Show high deferral risk tasks."""
+    await interaction.response.defer()
+
+    try:
+        from cognitex.agent.state_model import get_high_risk_tasks
+
+        tasks = await get_high_risk_tasks(min_risk=0.5, limit=5)
+
+        if not tasks:
+            await interaction.followup.send("No high-risk tasks found.")
+            return
+
+        embed = discord.Embed(
+            title="Deferral Risk",
+            description="Tasks likely to be deferred",
+            color=discord.Color.orange(),
+            timestamp=datetime.now(),
+        )
+
+        for task in tasks:
+            score = task["risk_score"]
+            emoji = "" if score >= 0.7 else ""
+            factors = ", ".join(task.get("risk_factors", [])[:2])
+            intervention = task.get("recommended_intervention", "")
+
+            embed.add_field(
+                name=f"{emoji} {task['title'][:40]}",
+                value=f"Risk: **{score:.0%}**\n{factors}\n_{intervention}_" if intervention else f"Risk: **{score:.0%}**\n{factors}",
+                inline=False,
+            )
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        logger.error("Risk command failed", error=str(e))
         await interaction.followup.send(f"Error: {str(e)[:100]}")
 
 

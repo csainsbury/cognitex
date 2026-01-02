@@ -5800,5 +5800,266 @@ def semantic_errors_cmd(
     asyncio.run(run())
 
 
+# =============================================================================
+# Phase 4: Learning System Commands
+# =============================================================================
+
+@app.command("learning-stats")
+def learning_stats_cmd() -> None:
+    """Show learning system statistics and insights."""
+    async def run():
+        from cognitex.db.postgres import init_postgres, close_postgres
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.agent.learning import init_learning_system, get_learning_system
+
+        await init_postgres()
+        await init_neo4j()
+
+        try:
+            await init_learning_system()
+            ls = get_learning_system()
+            summary = await ls.get_learning_summary()
+
+            console.print("\n[bold]Learning System Summary[/bold]\n")
+
+            # Proposal stats
+            proposal_stats = summary.get("proposals", {}).get("stats", {})
+            if proposal_stats:
+                table = Table(title="Proposal Learning", show_header=False)
+                table.add_column("Metric", style="cyan")
+                table.add_column("Value", justify="right")
+
+                table.add_row("Total proposals", str(proposal_stats.get("total", 0)))
+                table.add_row("Approved", str(proposal_stats.get("approved", 0)))
+                table.add_row("Rejected", str(proposal_stats.get("rejected", 0)))
+                table.add_row("Pending", str(proposal_stats.get("pending", 0)))
+                table.add_row("Approval rate", f"{proposal_stats.get('approval_rate', 0):.1f}%")
+
+                console.print(table)
+                console.print()
+
+            # Duration calibration
+            duration = summary.get("duration", {}).get("overall", {})
+            if duration:
+                table = Table(title="Duration Calibration", show_header=False)
+                table.add_column("Metric", style="cyan")
+                table.add_column("Value", justify="right")
+
+                table.add_row("Total timing records", str(duration.get("total_records", 0)))
+                table.add_row("Hours tracked", str(duration.get("total_hours_tracked", 0)))
+                table.add_row("Overall pace factor", f"{duration.get('overall_pace_factor', 1.0):.2f}x")
+                table.add_row("Projects tracked", str(duration.get("projects_tracked", 0)))
+
+                console.print(table)
+                console.print()
+
+            # Deferral risk
+            deferrals = summary.get("deferrals", {})
+            if deferrals.get("high_risk_tasks"):
+                console.print("[bold]High Deferral Risk Tasks[/bold]")
+                for task in deferrals["high_risk_tasks"][:5]:
+                    console.print(
+                        f"  [yellow]{task['risk_score']:.0%}[/yellow] "
+                        f"{task['title'][:50]} "
+                        f"[dim]({', '.join(task.get('risk_factors', [])[:2])})[/dim]"
+                    )
+                console.print()
+
+            # Rule stats
+            rules = summary.get("rules", {}).get("stats", {})
+            if rules:
+                table = Table(title="Preference Rules", show_header=False)
+                table.add_column("Metric", style="cyan")
+                table.add_column("Value", justify="right")
+
+                table.add_row("Total rules", str(rules.get("total", 0)))
+                table.add_row("Validated", str(rules.get("validated", 0)))
+                table.add_row("Active", str(rules.get("active", 0)))
+                table.add_row("Candidate", str(rules.get("candidate", 0)))
+                table.add_row("Deprecated", str(rules.get("deprecated", 0)))
+                if rules.get("avg_success_rate"):
+                    table.add_row("Avg success rate", f"{rules['avg_success_rate']:.1f}%")
+
+                console.print(table)
+                console.print()
+
+            # Insights
+            insights = summary.get("insights", [])
+            if insights:
+                console.print("[bold]Insights[/bold]")
+                for insight in insights:
+                    console.print(f"  [green]•[/green] {insight}")
+
+        finally:
+            await close_postgres()
+            await close_neo4j()
+
+    asyncio.run(run())
+
+
+@app.command("learning-update")
+def learning_update_cmd() -> None:
+    """Run a policy update cycle (validate rules, extract patterns)."""
+    async def run():
+        from cognitex.db.postgres import init_postgres, close_postgres
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.agent.learning import init_learning_system, get_learning_system
+
+        await init_postgres()
+        await init_neo4j()
+
+        try:
+            await init_learning_system()
+            ls = get_learning_system()
+
+            console.print("[bold]Running policy update...[/bold]")
+            results = await ls.run_policy_update()
+
+            console.print("\n[bold]Update Results[/bold]")
+
+            validation = results.get("rules_validated", {})
+            console.print(f"  Rules validated: {validation.get('validated', 0)}")
+            console.print(f"  Rules promoted to active: {validation.get('promoted_to_active', 0)}")
+            console.print(f"  Rules deprecated: {validation.get('deprecated', 0)}")
+            console.print(f"  Rules extracted: {results.get('rules_extracted', 0)}")
+
+            if results.get("error"):
+                console.print(f"\n[red]Error: {results['error']}[/red]")
+            else:
+                console.print("\n[green]Policy update complete[/green]")
+
+        finally:
+            await close_postgres()
+            await close_neo4j()
+
+    asyncio.run(run())
+
+
+@app.command("calibration")
+def calibration_cmd() -> None:
+    """Show duration calibration (personal pace factors)."""
+    async def run():
+        from cognitex.db.postgres import init_postgres, close_postgres
+        from cognitex.services.tasks import get_calibration_summary
+
+        await init_postgres()
+
+        try:
+            summary = await get_calibration_summary()
+
+            console.print("\n[bold]Duration Calibration[/bold]\n")
+
+            overall = summary.get("overall", {})
+            if overall:
+                console.print(f"Total timing records: {overall.get('total_records', 0)}")
+                console.print(f"Hours tracked: {overall.get('total_hours_tracked', 0)}")
+                console.print(f"Overall pace factor: {overall.get('overall_pace_factor', 1.0):.2f}x")
+                console.print()
+
+            by_project = summary.get("by_project", {})
+            if by_project:
+                table = Table(title="By Project", show_header=True)
+                table.add_column("Project", style="cyan")
+                table.add_column("Pace Factor", justify="right")
+                table.add_column("Samples", justify="right")
+                table.add_column("Interpretation")
+
+                for project_id, cal in by_project.items():
+                    pace = cal["pace_factor"]
+                    if pace > 1.3:
+                        interp = f"[red]{int((pace-1)*100)}% longer than estimated[/red]"
+                    elif pace < 0.8:
+                        interp = f"[green]{int((1-pace)*100)}% faster than estimated[/green]"
+                    else:
+                        interp = "[dim]accurate estimates[/dim]"
+
+                    table.add_row(
+                        project_id[:30],
+                        f"{pace:.2f}x",
+                        str(cal["sample_size"]),
+                        interp,
+                    )
+
+                console.print(table)
+
+            insights = summary.get("insights", [])
+            if insights:
+                console.print("\n[bold]Insights[/bold]")
+                for insight in insights:
+                    console.print(f"  [green]•[/green] {insight}")
+
+        finally:
+            await close_postgres()
+
+    asyncio.run(run())
+
+
+@app.command("deferral-risk")
+def deferral_risk_cmd(
+    min_risk: float = typer.Option(0.5, "--min", "-m", help="Minimum risk score"),
+    limit: int = typer.Option(10, "--limit", "-l", help="Max tasks to show"),
+) -> None:
+    """Show tasks with high deferral risk."""
+    async def run():
+        from cognitex.db.postgres import init_postgres, close_postgres
+        from cognitex.agent.state_model import get_high_risk_tasks
+
+        await init_postgres()
+
+        try:
+            tasks = await get_high_risk_tasks(min_risk=min_risk, limit=limit)
+
+            if not tasks:
+                console.print(f"[green]No tasks with deferral risk >= {min_risk:.0%}[/green]")
+                return
+
+            console.print(f"\n[bold]High Deferral Risk Tasks[/bold] (>= {min_risk:.0%})\n")
+
+            table = Table(show_header=True)
+            table.add_column("Risk", style="yellow", justify="right")
+            table.add_column("Title", style="cyan", max_width=40)
+            table.add_column("Factors", style="dim", max_width=40)
+            table.add_column("Intervention")
+
+            for task in tasks:
+                risk_color = "red" if task["risk_score"] >= 0.7 else "yellow"
+                table.add_row(
+                    f"[{risk_color}]{task['risk_score']:.0%}[/{risk_color}]",
+                    task["title"][:40],
+                    ", ".join(task.get("risk_factors", [])[:3]),
+                    task.get("recommended_intervention") or "-",
+                )
+
+            console.print(table)
+
+        finally:
+            await close_postgres()
+
+    asyncio.run(run())
+
+
+@app.command("init-phase4")
+def init_phase4_cmd() -> None:
+    """Initialize Phase 4 learning system schema."""
+    async def run():
+        from cognitex.db.postgres import init_postgres, close_postgres
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.db.phase4_schema import init_phase4_schema
+
+        await init_postgres()
+        await init_neo4j()
+
+        try:
+            console.print("[bold]Initializing Phase 4 schema...[/bold]")
+            await init_phase4_schema()
+            console.print("[green]Phase 4 schema initialized successfully[/green]")
+
+        finally:
+            await close_postgres()
+            await close_neo4j()
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     app()
