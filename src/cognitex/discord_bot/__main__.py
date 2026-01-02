@@ -75,13 +75,17 @@ class CognitexBot(commands.Bot):
             from cognitex.db.neo4j import init_neo4j
             from cognitex.db.postgres import init_postgres
             from cognitex.db.redis import init_redis
+            from cognitex.db.phase4_schema import init_phase4_schema
 
             await init_neo4j()
             await init_postgres()
             await init_redis()
 
+            # Initialize Phase 4 learning schema
+            await init_phase4_schema()
+
             self._db_initialized = True
-            logger.info("Databases initialized for Discord bot")
+            logger.info("Databases initialized for Discord bot (including Phase 4 learning)")
         except Exception as e:
             logger.error("Failed to initialize databases", error=str(e))
 

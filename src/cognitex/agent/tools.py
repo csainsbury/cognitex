@@ -459,12 +459,19 @@ class UpdateTaskTool(BaseTool):
         energy_cost: str | None = None,
     ) -> ToolResult:
         from cognitex.services.tasks import get_task_service
+        from datetime import datetime
 
         try:
             if not any([title, status, priority, due_date, effort_estimate, energy_cost]):
                 return ToolResult(success=False, error="No updates provided")
 
             task_service = get_task_service()
+
+            # Get original task for learning system comparisons
+            original_task = await task_service.get(task_id)
+            original_status = original_task.get("status") if original_task else None
+            original_due = original_task.get("due") or original_task.get("due_date") if original_task else None
+
             task = await task_service.update(
                 task_id=task_id,
                 title=title,
@@ -476,12 +483,95 @@ class UpdateTaskTool(BaseTool):
             )
 
             if task:
+                # Phase 4 Learning: Record timing and deferrals
+                await self._record_learning_events(
+                    task_id=task_id,
+                    original_task=original_task,
+                    original_status=original_status,
+                    original_due=original_due,
+                    new_status=status,
+                    new_due=due_date,
+                )
+
                 logger.info("Updated task", task_id=task_id)
                 return ToolResult(success=True, data=task)
             return ToolResult(success=False, error=f"Task not found: {task_id}")
         except Exception as e:
             logger.warning("Task update failed", task_id=task_id, error=str(e))
             return ToolResult(success=False, error=str(e))
+
+    async def _record_learning_events(
+        self,
+        task_id: str,
+        original_task: dict | None,
+        original_status: str | None,
+        original_due: str | None,
+        new_status: str | None,
+        new_due: str | None,
+    ) -> None:
+        """Record timing and deferral events for the learning system."""
+        from datetime import datetime
+        from cognitex.db.postgres import get_session
+        from sqlalchemy import text
+
+        try:
+            # 1. Record start time when status changes to in_progress
+            if new_status == "in_progress" and original_status != "in_progress":
+                async for session in get_session():
+                    await session.execute(text("""
+                        UPDATE tasks
+                        SET started_at = NOW()
+                        WHERE id = :task_id AND started_at IS NULL
+                    """), {"task_id": task_id})
+                    await session.commit()
+                    break
+                logger.debug("Recorded task start time", task_id=task_id)
+
+            # 2. Record timing when status changes to done
+            if new_status == "done" and original_status != "done" and original_task:
+                started_at_str = original_task.get("started_at")
+                estimated_minutes = original_task.get("estimated_minutes")
+
+                if started_at_str:
+                    try:
+                        from cognitex.services.tasks import record_task_timing
+
+                        # Parse started_at
+                        if isinstance(started_at_str, str):
+                            started_at = datetime.fromisoformat(started_at_str.replace("Z", "+00:00"))
+                        else:
+                            started_at = started_at_str
+
+                        await record_task_timing(
+                            task_id=task_id,
+                            started_at=started_at,
+                            completed_at=datetime.now(),
+                            estimated_minutes=int(estimated_minutes) if estimated_minutes else None,
+                        )
+                        logger.debug("Recorded task timing", task_id=task_id)
+                    except Exception as e:
+                        logger.warning("Failed to record task timing", error=str(e))
+
+            # 3. Record deferral when due date is pushed back
+            if new_due and original_due:
+                try:
+                    from dateutil.parser import parse as parse_date
+                    from cognitex.agent.state_model import record_deferral
+
+                    original_dt = parse_date(original_due) if isinstance(original_due, str) else original_due
+                    new_dt = parse_date(new_due) if isinstance(new_due, str) else new_due
+
+                    if new_dt > original_dt:
+                        await record_deferral(
+                            task_id=task_id,
+                            inferred_reason="due_date_extended",
+                        )
+                        logger.debug("Recorded task deferral", task_id=task_id)
+                except Exception as e:
+                    logger.warning("Failed to record deferral", error=str(e))
+
+        except Exception as e:
+            logger.warning("Failed to record learning events", error=str(e))
 
 
 class SendNotificationTool(BaseTool):

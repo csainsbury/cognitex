@@ -1,10 +1,13 @@
 # Phase 4b: Learning System Integration
 
 **Created:** 2026-01-02
-**Status:** Blueprint
+**Status:** Implemented
+**Implemented:** 2026-01-02
 **Prerequisite:** Phase 4 Memory Blueprint (implemented)
 
 This document defines the integration work needed to close the learning feedback loop. The Phase 4 learning functions exist but are not wired into the actual workflows.
+
+> **Implementation Complete:** All 7 integration points have been implemented, plus additional web UI enhancements for viewing and interacting with learning data.
 
 ---
 
@@ -344,3 +347,66 @@ After implementation:
 3. Approve/reject several proposals → verify patterns affect future recommendations
 4. Wait for 2am trigger → verify rules validated (or run `cognitex learning-update`)
 5. Run `/briefing` → verify learning insights section appears
+
+---
+
+## Additional Implementations
+
+### 8. Learning Dashboard (Web UI)
+**File:** `web/app.py`, `web/templates/learning.html`
+**Status:** Implemented
+
+Added `/learning` route with comprehensive dashboard showing:
+
+- **Summary Stats**: Timing records, deferrals tracked, proposals, approval rate
+- **Proposal Patterns**: Approval/rejection rates by priority and project
+- **Duration Calibration**: Estimated vs actual time analysis with insights
+- **Deferral Risk**: High-risk tasks with factors and interventions
+- **Learned Patterns**: Behavioral patterns extracted from activity
+- **Policy Updates**: Last run status with manual trigger button
+- **Preference Rules**: Rules by lifecycle stage
+
+**API Endpoints:**
+- `GET /learning` - Dashboard page
+- `GET /api/learning/refresh` - Refresh data
+- `POST /api/learning/run-update` - Manual policy update
+
+---
+
+### 9. Task Deduplication Fix
+**Files:** `services/tasks.py`, `db/graph_schema.py`, `web/templates/partials/task_row.html`
+**Status:** Implemented
+
+Fixed issue where tasks with multiple project links appeared as duplicate rows.
+
+**Changes:**
+1. Modified `TaskService.list()` to use `COLLECT(DISTINCT ...)` - prevents duplicate rows
+2. Updated task row template to show all projects as removable tags
+3. Added `DELETE /tasks/{task_id}/project/{project_id}` endpoint
+
+**Learning Integration:**
+When a user removes a project link that was created by the autonomous agent, this is recorded as negative feedback in `learned_patterns` table, teaching the system not to make similar incorrect associations.
+
+**Template Changes:**
+- Projects shown as tags with × button for removal
+- Remove button shown if: multiple projects exist OR link created by `autonomous_agent`
+- Confirmation dialog before removing link
+- HTMX updates row in place after removal
+
+---
+
+## Files Modified (Implementation Summary)
+
+| File | Changes |
+|------|---------|
+| `agent/autonomous.py` | Proposal recommendation check before task creation |
+| `agent/tools.py` | Task timing, deferral recording, start time tracking |
+| `agent/core.py` | Learning insights in morning briefing |
+| `agent/triggers.py` | Daily policy update at 2am |
+| `discord_bot/__main__.py` | Phase 4 schema init on startup |
+| `web/app.py` | Schema init, `/learning` dashboard, project unlink endpoint |
+| `web/templates/base.html` | Added "Learning" nav link |
+| `web/templates/learning.html` | New learning dashboard template |
+| `web/templates/partials/task_row.html` | Multiple projects with remove buttons |
+| `services/tasks.py` | COLLECT query for deduplication |
+| `db/graph_schema.py` | Updated get_task to include created_by on project links |

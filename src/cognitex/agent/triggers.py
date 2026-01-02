@@ -169,6 +169,15 @@ class TriggerSystem:
             replace_existing=True,
         )
 
+        # Daily learning policy update (2am - low activity time)
+        self.scheduler.add_job(
+            self._run_policy_update,
+            CronTrigger(hour=2, minute=0),
+            id="policy_update",
+            name="Learning Policy Update",
+            replace_existing=True,
+        )
+
         logger.info("Scheduled triggers configured")
 
     async def _start_event_listeners(self) -> None:
@@ -477,6 +486,61 @@ class TriggerSystem:
         except Exception as e:
             logger.error("GitHub sync failed", error=str(e))
             await log_action("github_sync", "trigger", status="failed", error=str(e))
+
+    async def _run_policy_update(self) -> None:
+        """Run daily learning policy update cycle.
+
+        Validates preference rules, extracts patterns from feedback,
+        and updates learned patterns for proposal filtering.
+        """
+        logger.info("Running learning policy update")
+        from cognitex.agent.action_log import log_action
+
+        try:
+            from cognitex.agent.learning import init_learning_system, get_learning_system
+
+            # Initialize learning system if needed
+            await init_learning_system()
+            ls = get_learning_system()
+
+            # Run the policy update cycle
+            results = await ls.run_policy_update()
+
+            logger.info(
+                "Policy update completed",
+                rules_validated=results.get("rules_validated", 0),
+                patterns_extracted=results.get("patterns_extracted", 0),
+                rules_deprecated=results.get("rules_deprecated", 0),
+            )
+
+            await log_action(
+                "policy_update",
+                "trigger",
+                summary=f"Policy update: {results.get('rules_validated', 0)} rules validated, "
+                        f"{results.get('patterns_extracted', 0)} patterns extracted",
+                details=results
+            )
+
+            # Optionally notify if significant changes occurred
+            deprecated = results.get("rules_deprecated", 0)
+            if deprecated > 0:
+                await self._send_notification(
+                    f"**Learning Update**\n\n"
+                    f"Policy update completed:\n"
+                    f"- {results.get('rules_validated', 0)} rules validated\n"
+                    f"- {deprecated} rules deprecated (low performance)\n"
+                    f"- {results.get('patterns_extracted', 0)} new patterns learned",
+                    urgency="low"
+                )
+
+        except Exception as e:
+            logger.error("Policy update failed", error=str(e))
+            await log_action(
+                "policy_update",
+                "trigger",
+                status="failed",
+                error=str(e)
+            )
 
     async def _drive_poll(self) -> None:
         """

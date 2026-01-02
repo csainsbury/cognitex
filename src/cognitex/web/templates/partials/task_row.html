@@ -8,8 +8,41 @@
     <td><span class="priority-{{ task.priority }}">{{ task.priority }}</span></td>
     <td><span class="badge badge-{{ task.status }}">{{ task.status }}</span></td>
     <td>{{ task.due[:10] if task.due else '-' }}</td>
-    <td>{{ task.project or '-' }}</td>
-    <td>{{ task.goal or '-' }}</td>
+    <td>
+        {% if task.projects and task.projects | length > 0 %}
+        <div class="project-links">
+            {% for proj in task.projects %}
+            <span class="project-tag" style="display: inline-flex; align-items: center; background: #e0e7ff; color: #3730a3; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.8rem; margin-right: 0.25rem; margin-bottom: 0.25rem;">
+                {{ proj.title }}
+                {% if task.projects | length > 1 or proj.created_by == 'autonomous_agent' %}
+                <span class="project-unlink"
+                      hx-delete="/tasks/{{ task.id }}/project/{{ proj.id }}"
+                      hx-target="#task-{{ task.id }}"
+                      hx-swap="outerHTML"
+                      hx-confirm="Remove link to '{{ proj.title }}'?"
+                      style="margin-left: 0.3rem; cursor: pointer; opacity: 0.7; font-weight: bold;"
+                      title="Remove project link">&times;</span>
+                {% endif %}
+            </span>
+            {% endfor %}
+        </div>
+        {% else %}
+        -
+        {% endif %}
+    </td>
+    <td>
+        {% if task.goals and task.goals | length > 0 %}
+        <div class="goal-links">
+            {% for g in task.goals %}
+            <span style="display: inline-block; font-size: 0.85rem;">{{ g.title }}</span>
+            {% endfor %}
+        </div>
+        {% elif task.goal %}
+        {{ task.goal }}
+        {% else %}
+        -
+        {% endif %}
+    </td>
     <td>
         {% if task.people %}
         <span class="people-list">{{ task.people | join(', ') }}</span>

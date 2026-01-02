@@ -813,7 +813,7 @@ async def get_task(
     WHERE t.source_type = 'event'
     WITH t, e, sender, COALESCE(ev_rel, ev_prop) as ev
     // Other relationships
-    OPTIONAL MATCH (t)-[:PART_OF]->(p:Project)
+    OPTIONAL MATCH (t)-[pr:PART_OF|BELONGS_TO]->(p:Project)
     OPTIONAL MATCH (t)-[:CONTRIBUTES_TO]->(g:Goal)
     OPTIONAL MATCH (t)-[assigned:ASSIGNED_TO|INVOLVES]->(assignee:Person)
     OPTIONAL MATCH (t)-[:REFERENCES]->(d:Document)
@@ -827,7 +827,7 @@ async def get_task(
                sender_name: sender.name
            } as source_email,
            ev {.gcal_id, .title, .start, .end} as source_event,
-           collect(DISTINCT p {.id, .title, .status}) as projects,
+           collect(DISTINCT {id: p.id, title: p.title, status: p.status, created_by: pr.created_by}) as projects,
            collect(DISTINCT g {.id, .title, .timeframe}) as goals,
            collect(DISTINCT {
                email: assignee.email,

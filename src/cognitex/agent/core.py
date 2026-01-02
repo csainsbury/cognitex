@@ -969,7 +969,7 @@ Your response:"""
     # =========================================================================
 
     async def morning_briefing(self) -> str:
-        """Generate a morning briefing using ReAct, including context packs for today's events."""
+        """Generate a morning briefing using ReAct, including context packs and learning insights."""
         # Get the base briefing from ReAct
         briefing = await self.chat(
             "Give me a morning briefing: what's on my calendar today, what are my top priority tasks, "
@@ -981,7 +981,88 @@ Your response:"""
         if context_section:
             briefing += f"\n\n{context_section}"
 
+        # Add learning insights (Phase 4 integration)
+        learning_section = await self._get_learning_insights()
+        if learning_section:
+            briefing += f"\n\n{learning_section}"
+
         return briefing
+
+    async def _get_learning_insights(self) -> str | None:
+        """Get learning system insights for the morning briefing.
+
+        Includes:
+        - Recent patterns learned from task proposals
+        - Tasks at risk of deferral
+        - Duration calibration insights
+        """
+        try:
+            from cognitex.agent.learning import get_learning_system
+
+            ls = get_learning_system()
+            if ls is None:
+                return None
+
+            summary = await ls.get_learning_summary()
+
+            sections = []
+
+            # Learning insights
+            insights = summary.get("insights", [])
+            if insights:
+                insight_lines = [f"• {insight}" for insight in insights[:3]]
+                sections.append("**📊 Learning Insights**\n" + "\n".join(insight_lines))
+
+            # High-risk tasks (deferral prediction)
+            deferrals = summary.get("deferrals", {})
+            high_risk = deferrals.get("high_risk_tasks", [])
+            if high_risk:
+                risk_lines = []
+                for task in high_risk[:3]:
+                    name = task.get("title", task.get("task_id", "Unknown"))
+                    score = task.get("risk_score", 0)
+                    factors = task.get("factors", [])
+                    factor_text = f" ({', '.join(factors[:2])})" if factors else ""
+                    risk_lines.append(f"• {name} - {score:.0%} risk{factor_text}")
+
+                sections.append(
+                    f"**⚠️ Deferral Risk** ({len(high_risk)} tasks at risk)\n"
+                    + "\n".join(risk_lines)
+                )
+
+            # Duration calibration (if patterns exist)
+            duration = summary.get("duration_calibration", {})
+            avg_error = duration.get("average_estimation_error")
+            if avg_error is not None and abs(avg_error) > 0.2:
+                direction = "underestimating" if avg_error > 0 else "overestimating"
+                sections.append(
+                    f"**⏱️ Time Estimation**: You tend to {direction} task durations by "
+                    f"{abs(avg_error):.0%} on average. Consider adjusting estimates accordingly."
+                )
+
+            # Proposal approval rate trends
+            proposals = summary.get("proposal_patterns", {})
+            overall_rate = proposals.get("overall_approval_rate")
+            if overall_rate is not None:
+                if overall_rate < 0.3:
+                    sections.append(
+                        f"**📋 Proposal Quality**: Low approval rate ({overall_rate:.0%}). "
+                        "I'm learning from your feedback to improve suggestions."
+                    )
+                elif overall_rate > 0.8:
+                    sections.append(
+                        f"**📋 Proposal Quality**: High alignment ({overall_rate:.0%} approved). "
+                        "My suggestions are matching your preferences well."
+                    )
+
+            if sections:
+                return "---\n" + "\n\n".join(sections)
+
+            return None
+
+        except Exception as e:
+            logger.warning("Failed to get learning insights for briefing", error=str(e))
+            return None
 
     async def _get_todays_context_packs(self) -> str | None:
         """Get context packs for today's events to include in briefing."""

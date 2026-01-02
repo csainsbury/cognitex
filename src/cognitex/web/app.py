@@ -105,6 +105,7 @@ async def lifespan(app: FastAPI):
     from cognitex.db.graph_schema import init_graph_schema
     from cognitex.db.postgres import init_postgres, close_postgres
     from cognitex.db.redis import init_redis, close_redis
+    from cognitex.db.phase4_schema import init_phase4_schema
     from cognitex.agent.triggers import start_triggers, stop_triggers
     from cognitex.services.push_notifications import get_watch_manager
     from cognitex.config import get_settings
@@ -116,6 +117,9 @@ async def lifespan(app: FastAPI):
     await init_graph_schema()
     await init_postgres()
     await init_redis()
+
+    # Initialize Phase 4 learning schema
+    await init_phase4_schema()
 
     # Start the full trigger system (includes autonomous agent + event listeners)
     try:
@@ -422,6 +426,97 @@ async def task_delete(task_id: str):
     """Delete a task."""
     task_service = get_task_service()
     await task_service.delete(task_id)
+    return HTMLResponse("")
+
+
+@app.delete("/tasks/{task_id}/project/{project_id}", response_class=HTMLResponse)
+async def task_unlink_project(request: Request, task_id: str, project_id: str):
+    """Remove a project link from a task.
+
+    Records as learning feedback if the link was created by the autonomous agent.
+    """
+    from cognitex.db.neo4j import get_neo4j_session
+    from cognitex.agent.action_log import log_action
+
+    task_service = get_task_service()
+
+    # Get info about the link before removing
+    link_info = None
+    async for session in get_neo4j_session():
+        result = await session.run("""
+            MATCH (t:Task {id: $task_id})-[r:BELONGS_TO|PART_OF]->(p:Project {id: $project_id})
+            RETURN t.title as task_title, p.title as project_title, r.created_by as created_by
+        """, {"task_id": task_id, "project_id": project_id})
+        link_info = await result.single()
+
+        if link_info:
+            # Remove the relationship
+            await session.run("""
+                MATCH (t:Task {id: $task_id})-[r:BELONGS_TO|PART_OF]->(p:Project {id: $project_id})
+                DELETE r
+            """, {"task_id": task_id, "project_id": project_id})
+
+        break
+
+    if link_info:
+        # Log the action
+        await log_action(
+            "unlink_task_project",
+            "web_ui",
+            summary=f"Removed link: '{link_info['task_title']}' from '{link_info['project_title']}'",
+            details={
+                "task_id": task_id,
+                "project_id": project_id,
+                "task_title": link_info["task_title"],
+                "project_title": link_info["project_title"],
+                "original_created_by": link_info["created_by"],
+            }
+        )
+
+        # Record as negative learning signal if autonomous agent created this link
+        if link_info["created_by"] == "autonomous_agent":
+            try:
+                from cognitex.db.postgres import get_postgres_session
+                from sqlalchemy import text
+                import uuid
+
+                async for session in get_postgres_session():
+                    # Record as a learned pattern (negative feedback on link suggestion)
+                    await session.execute(text("""
+                        INSERT INTO learned_patterns (id, pattern_type, pattern_data, confidence, sample_count)
+                        VALUES (:id, 'rejected_link', :pattern_data, 0.0, 1)
+                        ON CONFLICT (pattern_type, (pattern_data->>'task_keywords'), (pattern_data->>'project_id'))
+                        DO UPDATE SET
+                            sample_count = learned_patterns.sample_count + 1,
+                            confidence = LEAST(learned_patterns.confidence - 0.1, 0),
+                            updated_at = NOW()
+                    """), {
+                        "id": f"pattern_{uuid.uuid4().hex[:12]}",
+                        "pattern_data": {
+                            "task_keywords": link_info["task_title"].lower().split()[:3],
+                            "project_id": project_id,
+                            "project_title": link_info["project_title"],
+                            "feedback": "user_removed_link",
+                        },
+                    })
+                    await session.commit()
+                    break
+
+                logger.info(
+                    "Recorded negative learning signal for autonomous link",
+                    task_id=task_id,
+                    project_id=project_id,
+                )
+            except Exception as e:
+                logger.warning("Failed to record learning signal", error=str(e))
+
+    # Return updated task row
+    task = await task_service.get(task_id)
+    if task:
+        return templates.TemplateResponse(
+            "partials/task_row.html",
+            {"request": request, "task": task},
+        )
     return HTMLResponse("")
 
 
@@ -2524,6 +2619,194 @@ async def api_state_signal(
     await estimator.update_state(fatigue_delta=fatigue_delta)
 
     return HTMLResponse("")
+
+
+# -------------------------------------------------------------------
+# Learning System
+# -------------------------------------------------------------------
+
+
+@app.get("/learning", response_class=HTMLResponse)
+async def learning_page(request: Request):
+    """Learning system dashboard showing accumulated patterns and insights."""
+    from cognitex.agent.learning import get_learning_system, init_learning_system
+    from cognitex.agent.action_log import get_proposal_patterns, get_recent_rejections
+    from cognitex.services.tasks import get_calibration_summary
+    from cognitex.agent.state_model import get_high_risk_tasks
+
+    # Initialize learning system if needed
+    try:
+        await init_learning_system()
+    except Exception:
+        pass
+
+    # Get learning system summary
+    ls = get_learning_system()
+    summary = {}
+    if ls:
+        try:
+            summary = await ls.get_learning_summary()
+        except Exception as e:
+            logger.warning("Failed to get learning summary", error=str(e))
+
+    # Get proposal patterns
+    proposals = {}
+    try:
+        proposals = await get_proposal_patterns(min_samples=1)
+    except Exception as e:
+        logger.warning("Failed to get proposal patterns", error=str(e))
+
+    # Get recent rejections
+    recent_rejections = []
+    try:
+        recent_rejections = await get_recent_rejections(limit=10)
+    except Exception as e:
+        logger.warning("Failed to get recent rejections", error=str(e))
+
+    # Get duration calibration
+    calibration = {"samples": 0, "avg_error": 0, "avg_actual_minutes": 0}
+    try:
+        calibration = await get_calibration_summary()
+    except Exception as e:
+        logger.warning("Failed to get calibration summary", error=str(e))
+
+    # Get high-risk tasks
+    high_risk_tasks = []
+    try:
+        high_risk_tasks = await get_high_risk_tasks(min_risk=0.3, limit=10)
+    except Exception as e:
+        logger.warning("Failed to get high risk tasks", error=str(e))
+
+    # Get deferral stats
+    deferral_stats = summary.get("deferrals", {"total": 0, "avg_per_task": 0})
+
+    # Get learned patterns from database
+    learned_patterns = []
+    try:
+        from cognitex.db.postgres import get_postgres_session
+        from sqlalchemy import text
+
+        async for session in get_postgres_session():
+            result = await session.execute(text("""
+                SELECT pattern_type, pattern_data, confidence, sample_count, created_at
+                FROM learned_patterns
+                WHERE confidence >= 0.3
+                ORDER BY confidence DESC, sample_count DESC
+                LIMIT 10
+            """))
+            rows = result.fetchall()
+            for row in rows:
+                pattern_data = row[1] if isinstance(row[1], dict) else {}
+                learned_patterns.append({
+                    "pattern_type": row[0],
+                    "description": pattern_data.get("description", str(pattern_data)[:100]),
+                    "confidence": row[2],
+                    "sample_count": row[3],
+                    "created_at": row[4],
+                })
+            break
+    except Exception as e:
+        logger.warning("Failed to get learned patterns", error=str(e))
+
+    # Get rules by lifecycle
+    rules_by_lifecycle = {}
+    try:
+        from cognitex.agent.decision_memory import get_decision_memory
+
+        dm = get_decision_memory()
+        if dm and dm.rules:
+            rules_by_lifecycle = await dm.rules.get_rules_by_lifecycle()
+    except Exception as e:
+        logger.warning("Failed to get rules by lifecycle", error=str(e))
+
+    # Get last policy update from action log
+    last_update = None
+    try:
+        from cognitex.db.postgres import get_postgres_session
+        from sqlalchemy import text
+
+        async for session in get_postgres_session():
+            result = await session.execute(text("""
+                SELECT timestamp, details
+                FROM agent_actions
+                WHERE action_type = 'policy_update' AND status IS DISTINCT FROM 'failed'
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """))
+            row = result.fetchone()
+            if row:
+                details = row[1] if isinstance(row[1], dict) else {}
+                last_update = {
+                    "timestamp": row[0].strftime("%Y-%m-%d %H:%M") if row[0] else "Unknown",
+                    "rules_validated": details.get("rules_validated", 0),
+                    "patterns_extracted": details.get("patterns_extracted", 0),
+                    "rules_deprecated": details.get("rules_deprecated", 0),
+                }
+            break
+    except Exception as e:
+        logger.warning("Failed to get last policy update", error=str(e))
+
+    # Calculate stats
+    total_proposals = proposals.get("total_proposals", 0)
+    approval_rate = proposals.get("overall_approval_rate", 0)
+
+    stats = {
+        "total_timing_records": calibration.get("samples", 0),
+        "total_deferrals": deferral_stats.get("total", 0),
+        "total_proposals": total_proposals,
+        "approval_rate": approval_rate,
+    }
+
+    return templates.TemplateResponse(
+        "learning.html",
+        {
+            "request": request,
+            "stats": stats,
+            "proposals": proposals,
+            "recent_rejections": recent_rejections,
+            "calibration": calibration,
+            "high_risk_tasks": high_risk_tasks,
+            "deferral_stats": deferral_stats,
+            "learned_patterns": learned_patterns,
+            "rules_by_lifecycle": rules_by_lifecycle,
+            "last_update": last_update,
+        },
+    )
+
+
+@app.get("/api/learning/refresh")
+async def api_learning_refresh():
+    """Refresh learning data (triggers re-analysis)."""
+    return {"status": "ok"}
+
+
+@app.post("/api/learning/run-update")
+async def api_learning_run_update():
+    """Manually trigger a policy update cycle."""
+    from cognitex.agent.learning import init_learning_system, get_learning_system
+    from cognitex.agent.action_log import log_action
+
+    try:
+        await init_learning_system()
+        ls = get_learning_system()
+
+        if ls:
+            results = await ls.run_policy_update()
+
+            await log_action(
+                "policy_update",
+                "web_ui",
+                summary=f"Manual policy update: {results.get('rules_validated', 0)} rules validated",
+                details=results,
+            )
+
+            return {"status": "ok", "results": results}
+
+        return {"status": "error", "message": "Learning system not initialized"}
+
+    except Exception as e:
+        logger.error("Manual policy update failed", error=str(e))
+        return {"status": "error", "message": str(e)}
 
 
 @app.post("/api/briefing/generate", response_class=HTMLResponse)

@@ -204,20 +204,39 @@ class TaskService:
 
             where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
 
+            # Use COLLECT to gather multiple projects/goals into arrays
+            # This prevents duplicate rows when a task has multiple project links
             query = f"""
             {match_clause}
             {where_clause}
-            OPTIONAL MATCH (t)-[:PART_OF|BELONGS_TO]->(proj:Project)
+            OPTIONAL MATCH (t)-[pr:PART_OF|BELONGS_TO]->(proj:Project)
             OPTIONAL MATCH (t)-[:ACHIEVES]->(goal:Goal)
-            RETURN t {{
-                .*,
+            OPTIONAL MATCH (t)-[:ASSIGNED_TO]->(person:Person)
+            WITH t,
+                 COLLECT(DISTINCT {{id: proj.id, title: proj.title, created_by: pr.created_by}}) as projects,
+                 COLLECT(DISTINCT {{id: goal.id, title: goal.title}}) as goals,
+                 COLLECT(DISTINCT person.email) as people
+            RETURN {{
+                id: t.id,
+                title: t.title,
+                description: t.description,
+                status: t.status,
+                priority: t.priority,
                 due: toString(t.due),
+                effort_estimate: t.effort_estimate,
+                energy_cost: t.energy_cost,
+                source_type: t.source_type,
+                source_id: t.source_id,
                 created_at: toString(t.created_at),
                 updated_at: toString(t.updated_at),
-                project: proj.title,
-                project_id: proj.id,
-                goal: goal.title,
-                goal_id: goal.id
+                started_at: toString(t.started_at),
+                projects: [p IN projects WHERE p.id IS NOT NULL],
+                goals: [g IN goals WHERE g.id IS NOT NULL],
+                people: [e IN people WHERE e IS NOT NULL],
+                project: HEAD([p IN projects WHERE p.id IS NOT NULL]).title,
+                project_id: HEAD([p IN projects WHERE p.id IS NOT NULL]).id,
+                goal: HEAD([g IN goals WHERE g.id IS NOT NULL]).title,
+                goal_id: HEAD([g IN goals WHERE g.id IS NOT NULL]).id
             }} as task
             ORDER BY
                 CASE t.priority

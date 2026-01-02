@@ -645,10 +645,11 @@ class AutonomousAgent:
         """Create a new task to progress a goal or project.
 
         In 'propose' mode, sends task for approval instead of creating directly.
+        Uses learned patterns to skip proposals likely to be rejected.
         """
         import uuid
         from cognitex.config import get_settings
-        from cognitex.agent.action_log import propose_task
+        from cognitex.agent.action_log import propose_task, get_proposal_recommendation
 
         settings = get_settings()
 
@@ -661,6 +662,46 @@ class AutonomousAgent:
 
         if not title:
             return None
+
+        # Check learned patterns before proposing (Phase 4 learning integration)
+        if settings.task_creation_mode == "propose":
+            try:
+                recommendation = await get_proposal_recommendation(
+                    project_id=project_id,
+                    priority=priority,
+                )
+
+                if not recommendation.get("should_propose", True):
+                    # Skip proposal based on learned patterns
+                    skip_reason = recommendation.get("reason", "low approval rate")
+                    logger.info(
+                        "Skipping proposal based on learned patterns",
+                        title=title,
+                        reason=skip_reason,
+                        historical_rate=recommendation.get("historical_rate"),
+                    )
+                    await log_action(
+                        "task_proposal_skipped",
+                        "agent",
+                        summary=f"Skipped proposing '{title}': {skip_reason}",
+                        details={
+                            "title": title,
+                            "project_id": project_id,
+                            "priority": priority,
+                            "skip_reason": skip_reason,
+                            "historical_rate": recommendation.get("historical_rate"),
+                        }
+                    )
+                    return {"skipped": True, "reason": skip_reason}
+
+                # Include historical rate in reason for context
+                historical_rate = recommendation.get("historical_rate")
+                if historical_rate is not None:
+                    reason = f"{reason} (historical approval: {historical_rate:.0f}%)"
+
+            except Exception as e:
+                # Don't block proposal if learning check fails
+                logger.warning("Failed to check proposal recommendation", error=str(e))
 
         # In propose mode, send for approval instead of creating
         if settings.task_creation_mode == "propose":

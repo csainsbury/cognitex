@@ -1,0 +1,318 @@
+{% extends "base.html" %}
+
+{% block title %}Learning - Cognitex{% endblock %}
+
+{% block content %}
+<h1>Learning System</h1>
+
+<div class="stats">
+    <div class="stat">
+        <div class="stat-value">{{ stats.total_timing_records }}</div>
+        <div class="stat-label">Timing Records</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value">{{ stats.total_deferrals }}</div>
+        <div class="stat-label">Deferrals Tracked</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value">{{ stats.total_proposals }}</div>
+        <div class="stat-label">Task Proposals</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value">{{ "%.0f"|format(stats.approval_rate * 100) }}%</div>
+        <div class="stat-label">Approval Rate</div>
+    </div>
+</div>
+
+<div class="two-col">
+    <div>
+        <!-- Proposal Patterns -->
+        <div class="card">
+            <div class="card-header">
+                <h2>Proposal Patterns</h2>
+                <button class="btn btn-secondary btn-sm" hx-get="/api/learning/refresh" hx-swap="none" onclick="location.reload()">
+                    Refresh
+                </button>
+            </div>
+            <p style="color: #666; font-size: 0.85rem; margin-bottom: 1rem;">
+                How the system learns from your task proposal approvals/rejections
+            </p>
+
+            {% if proposals.by_priority %}
+            <h3 style="font-size: 0.9rem; margin-bottom: 0.5rem;">By Priority</h3>
+            <table>
+                <tr><th>Priority</th><th>Approved</th><th>Rejected</th><th>Rate</th></tr>
+                {% for priority, data in proposals.by_priority.items() %}
+                <tr>
+                    <td><span class="priority-{{ priority }}">{{ priority | title }}</span></td>
+                    <td>{{ data.approved }}</td>
+                    <td>{{ data.rejected }}</td>
+                    <td>
+                        {% set rate = data.approved / (data.approved + data.rejected) if (data.approved + data.rejected) > 0 else 0 %}
+                        <div class="signal-bar" style="width: 80px; height: 8px; display: inline-block; vertical-align: middle;">
+                            <div class="signal-fill {% if rate >= 0.7 %}low{% elif rate >= 0.4 %}medium{% else %}high{% endif %}"
+                                 style="width: {{ (rate * 100)|int }}%"></div>
+                        </div>
+                        {{ "%.0f"|format(rate * 100) }}%
+                    </td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% else %}
+            <p class="empty">No proposal patterns recorded yet</p>
+            {% endif %}
+
+            {% if proposals.by_project %}
+            <h3 style="font-size: 0.9rem; margin-top: 1rem; margin-bottom: 0.5rem;">By Project</h3>
+            <table>
+                <tr><th>Project</th><th>Approved</th><th>Rejected</th><th>Rate</th></tr>
+                {% for project, data in proposals.by_project.items() %}
+                <tr>
+                    <td>{{ project or '(No project)' }}</td>
+                    <td>{{ data.approved }}</td>
+                    <td>{{ data.rejected }}</td>
+                    <td>
+                        {% set rate = data.approved / (data.approved + data.rejected) if (data.approved + data.rejected) > 0 else 0 %}
+                        {{ "%.0f"|format(rate * 100) }}%
+                    </td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% endif %}
+
+            {% if recent_rejections %}
+            <h3 style="font-size: 0.9rem; margin-top: 1rem; margin-bottom: 0.5rem;">Recent Rejections</h3>
+            <ul style="list-style: none; padding: 0; font-size: 0.85rem;">
+                {% for rej in recent_rejections[:5] %}
+                <li style="padding: 0.5rem 0; border-bottom: 1px solid #eee;">
+                    <strong>{{ rej.title }}</strong>
+                    {% if rej.reason %}<br><span style="color: #666;">Reason: {{ rej.reason }}</span>{% endif %}
+                    <br><span style="color: #999; font-size: 0.8rem;">{{ rej.rejected_at }}</span>
+                </li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+        </div>
+
+        <!-- Duration Calibration -->
+        <div class="card">
+            <h2>Duration Calibration</h2>
+            <p style="color: #666; font-size: 0.85rem; margin-bottom: 1rem;">
+                Comparing estimated vs actual task completion times
+            </p>
+
+            {% if calibration.samples > 0 %}
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-bottom: 1rem;">
+                <div>
+                    <div style="font-size: 1.5rem; font-weight: bold;">{{ calibration.samples }}</div>
+                    <div style="font-size: 0.8rem; color: #666;">Samples</div>
+                </div>
+                <div>
+                    <div style="font-size: 1.5rem; font-weight: bold;">
+                        {% if calibration.avg_error > 0 %}+{% endif %}{{ "%.0f"|format(calibration.avg_error * 100) }}%
+                    </div>
+                    <div style="font-size: 0.8rem; color: #666;">Avg Error</div>
+                </div>
+                <div>
+                    <div style="font-size: 1.5rem; font-weight: bold;">{{ "%.1f"|format(calibration.avg_actual_minutes) }}m</div>
+                    <div style="font-size: 0.8rem; color: #666;">Avg Actual</div>
+                </div>
+            </div>
+
+            {% if calibration.avg_error > 0.2 %}
+            <div style="background: #fef3c7; padding: 0.75rem; border-radius: 5px; font-size: 0.9rem;">
+                <strong>Insight:</strong> You tend to underestimate task durations by {{ "%.0f"|format(calibration.avg_error * 100) }}%.
+                Consider adding buffer time to your estimates.
+            </div>
+            {% elif calibration.avg_error < -0.2 %}
+            <div style="background: #d1fae5; padding: 0.75rem; border-radius: 5px; font-size: 0.9rem;">
+                <strong>Insight:</strong> You tend to overestimate by {{ "%.0f"|format(-calibration.avg_error * 100) }}%.
+                You're faster than you think!
+            </div>
+            {% else %}
+            <div style="background: #dbeafe; padding: 0.75rem; border-radius: 5px; font-size: 0.9rem;">
+                <strong>Insight:</strong> Your time estimates are well calibrated (within 20% accuracy).
+            </div>
+            {% endif %}
+
+            {% if calibration.by_project %}
+            <h3 style="font-size: 0.9rem; margin-top: 1rem; margin-bottom: 0.5rem;">By Project</h3>
+            <table>
+                <tr><th>Project</th><th>Samples</th><th>Avg Error</th><th>Adjustment</th></tr>
+                {% for project, data in calibration.by_project.items() %}
+                <tr>
+                    <td>{{ project or '(No project)' }}</td>
+                    <td>{{ data.samples }}</td>
+                    <td>{% if data.avg_error > 0 %}+{% endif %}{{ "%.0f"|format(data.avg_error * 100) }}%</td>
+                    <td>
+                        {% if data.avg_error > 0.1 %}
+                        <span style="color: #ea580c;">Add {{ "%.0f"|format(data.avg_error * 100) }}% buffer</span>
+                        {% elif data.avg_error < -0.1 %}
+                        <span style="color: #16a34a;">Can reduce by {{ "%.0f"|format(-data.avg_error * 100) }}%</span>
+                        {% else %}
+                        <span style="color: #666;">Well calibrated</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% endif %}
+
+            {% else %}
+            <p class="empty">No timing data recorded yet. Complete tasks with estimates to build calibration data.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <div>
+        <!-- Deferral Risk -->
+        <div class="card">
+            <h2>Deferral Risk</h2>
+            <p style="color: #666; font-size: 0.85rem; margin-bottom: 1rem;">
+                Tasks at risk of being procrastinated
+            </p>
+
+            {% if high_risk_tasks %}
+            <ul style="list-style: none; padding: 0;">
+                {% for task in high_risk_tasks %}
+                <li style="padding: 0.75rem 0; border-bottom: 1px solid #eee;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span style="font-weight: 500;">{{ task.title }}</span>
+                        <span class="badge {% if task.risk_score >= 0.7 %}badge-paused{% elif task.risk_score >= 0.5 %}badge-planning{% else %}badge-pending{% endif %}">
+                            {{ "%.0f"|format(task.risk_score * 100) }}% risk
+                        </span>
+                    </div>
+                    {% if task.factors %}
+                    <div style="font-size: 0.8rem; color: #666; margin-top: 0.25rem;">
+                        {{ task.factors | join(', ') }}
+                    </div>
+                    {% endif %}
+                    {% if task.recommended_intervention %}
+                    <div style="font-size: 0.8rem; color: #2563eb; margin-top: 0.25rem;">
+                        Suggestion: {{ task.recommended_intervention }}
+                    </div>
+                    {% endif %}
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="empty">No high-risk tasks detected</p>
+            {% endif %}
+
+            {% if deferral_stats.total > 0 %}
+            <h3 style="font-size: 0.9rem; margin-top: 1rem; margin-bottom: 0.5rem;">Deferral History</h3>
+            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem;">
+                <div>
+                    <div style="font-size: 1.2rem; font-weight: bold;">{{ deferral_stats.total }}</div>
+                    <div style="font-size: 0.8rem; color: #666;">Total Deferrals</div>
+                </div>
+                <div>
+                    <div style="font-size: 1.2rem; font-weight: bold;">{{ "%.1f"|format(deferral_stats.avg_per_task) }}</div>
+                    <div style="font-size: 0.8rem; color: #666;">Avg per Task</div>
+                </div>
+            </div>
+
+            {% if deferral_stats.by_reason %}
+            <h4 style="font-size: 0.85rem; margin-top: 0.75rem; margin-bottom: 0.25rem;">By Reason</h4>
+            <ul style="list-style: none; padding: 0; font-size: 0.85rem;">
+                {% for reason, count in deferral_stats.by_reason.items() %}
+                <li style="display: flex; justify-content: space-between; padding: 0.25rem 0;">
+                    <span>{{ reason | replace('_', ' ') | title }}</span>
+                    <span style="color: #666;">{{ count }}</span>
+                </li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+            {% endif %}
+        </div>
+
+        <!-- Learned Patterns -->
+        <div class="card">
+            <h2>Learned Patterns</h2>
+            <p style="color: #666; font-size: 0.85rem; margin-bottom: 1rem;">
+                Behavioral patterns extracted from your activity
+            </p>
+
+            {% if learned_patterns %}
+            <ul style="list-style: none; padding: 0;">
+                {% for pattern in learned_patterns %}
+                <li style="padding: 0.5rem 0; border-bottom: 1px solid #eee;">
+                    <div style="display: flex; justify-content: space-between;">
+                        <span class="badge">{{ pattern.pattern_type | replace('_', ' ') | title }}</span>
+                        <span style="font-size: 0.8rem; color: #666;">
+                            {{ "%.0f"|format(pattern.confidence * 100) }}% confidence
+                        </span>
+                    </div>
+                    <div style="margin-top: 0.25rem; font-size: 0.9rem;">
+                        {{ pattern.description }}
+                    </div>
+                    <div style="font-size: 0.75rem; color: #999; margin-top: 0.25rem;">
+                        From {{ pattern.sample_count }} samples
+                    </div>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="empty">No patterns learned yet. Keep using the system to build behavioral insights.</p>
+            {% endif %}
+        </div>
+
+        <!-- Policy Update Status -->
+        <div class="card">
+            <div class="card-header">
+                <h2>Policy Updates</h2>
+                <button class="btn btn-primary btn-sm" hx-post="/api/learning/run-update" hx-swap="none" onclick="setTimeout(() => location.reload(), 2000)">
+                    Run Now
+                </button>
+            </div>
+            <p style="color: #666; font-size: 0.85rem; margin-bottom: 1rem;">
+                Daily at 2am: validates rules, extracts patterns
+            </p>
+
+            {% if last_update %}
+            <div style="font-size: 0.9rem;">
+                <div><strong>Last Run:</strong> {{ last_update.timestamp }}</div>
+                <div><strong>Rules Validated:</strong> {{ last_update.rules_validated }}</div>
+                <div><strong>Patterns Extracted:</strong> {{ last_update.patterns_extracted }}</div>
+                {% if last_update.rules_deprecated > 0 %}
+                <div style="color: #ea580c;"><strong>Rules Deprecated:</strong> {{ last_update.rules_deprecated }}</div>
+                {% endif %}
+            </div>
+            {% else %}
+            <p class="empty">No policy updates run yet</p>
+            {% endif %}
+        </div>
+
+        <!-- Rule Lifecycle -->
+        <div class="card">
+            <h2>Preference Rules</h2>
+            <p style="color: #666; font-size: 0.85rem; margin-bottom: 1rem;">
+                Rules learned from your behavior
+            </p>
+
+            {% if rules_by_lifecycle %}
+            {% for lifecycle, rules in rules_by_lifecycle.items() %}
+            {% if rules %}
+            <h3 style="font-size: 0.85rem; margin-top: 0.75rem; margin-bottom: 0.25rem;">
+                <span class="badge badge-{{ lifecycle }}">{{ lifecycle | title }}</span>
+                ({{ rules | length }})
+            </h3>
+            <ul style="list-style: none; padding: 0; font-size: 0.85rem;">
+                {% for rule in rules[:3] %}
+                <li style="padding: 0.25rem 0;">
+                    {{ rule.rule_name }} - {{ "%.0f"|format(rule.confidence * 100) }}% conf
+                </li>
+                {% endfor %}
+                {% if rules | length > 3 %}
+                <li style="color: #666; font-style: italic;">+ {{ rules | length - 3 }} more</li>
+                {% endif %}
+            </ul>
+            {% endif %}
+            {% endfor %}
+            {% else %}
+            <p class="empty">No preference rules created yet</p>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}
