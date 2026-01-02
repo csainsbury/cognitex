@@ -187,6 +187,22 @@ class AutonomousAgent:
         # Build a concise summary for the LLM
         summary = context["summary"]
 
+        # Format inbox items (captured interruptions waiting for triage)
+        inbox_items = context.get("inbox_items", [])
+        if inbox_items:
+            inbox_lines = []
+            for item in inbox_items:
+                urgency = item.get("urgency", "normal").upper()
+                inbox_lines.append(
+                    f"  - [{urgency}] [{item.get('source', 'unknown')}] {item.get('subject', 'No subject')}\n"
+                    f"    Preview: {item.get('preview', '')[:100]}...\n"
+                    f"    Suggestion: {item.get('suggested', 'Review')}\n"
+                    f"    ID: {item.get('id')}"
+                )
+            inbox_text = "\n".join(inbox_lines)
+        else:
+            inbox_text = "  (Inbox empty)"
+
         # Format writing samples for style learning
         writing_samples = context.get('writing_samples', [])[:3]
         if writing_samples:
@@ -373,6 +389,7 @@ class AutonomousAgent:
         prompt = format_prompt(
             "autonomous_agent",
             # Summary stats
+            inbox_count=summary.get('inbox_count', 0),
             emails_needing_response=summary.get('emails_needing_response', 0),
             meetings_needing_prep=summary.get('meetings_needing_prep', 0),
             connection_opportunities=summary['connection_opportunities'],
@@ -380,6 +397,7 @@ class AutonomousAgent:
             goals_needing_attention=summary['goals_needing_attention'],
             projects_needing_attention=summary['projects_needing_attention'],
             # Formatted content sections
+            inbox_text=inbox_text,
             writing_samples_text=samples_text,
             learned_guidelines=learned_guidelines,  # Learning feedback loop
             pending_emails_text=pending_emails_text,
@@ -482,6 +500,10 @@ class AutonomousAgent:
 
         logger.info("Executing decision", action=action, reason=reason[:100])
 
+        # Inbox processing (Priority 0)
+        if action == "PROCESS_INBOX_ITEM":
+            return await self._process_inbox_item(session, params, reason)
+
         # Digital Twin priority actions
         if action == "DRAFT_EMAIL":
             return await self._draft_email(session, params, reason)
@@ -506,6 +528,53 @@ class AutonomousAgent:
             return await self._flag_for_review(params, reason, flagged_this_cycle)
         else:
             logger.warning("Unknown action type", action=action)
+            return None
+
+    async def _process_inbox_item(self, session, params: dict, reason: str) -> dict | None:
+        """
+        Process and clear an item from the interruption firewall inbox.
+
+        The agent takes action on the captured item (e.g., creates a task,
+        drafts a reply, or dismisses it) and then clears it from the queue.
+        """
+        item_id = params.get("item_id")
+        resolution = params.get("resolution", "dismissed")
+        follow_up_action = params.get("follow_up_action")
+
+        if not item_id:
+            logger.warning("PROCESS_INBOX_ITEM missing item_id")
+            return None
+
+        try:
+            from cognitex.agent.interruption_firewall import get_interruption_firewall
+
+            firewall = get_interruption_firewall()
+
+            # Clear the item from the queue
+            await firewall.clear_processed_items([item_id])
+
+            await log_action(
+                "process_inbox",
+                "agent",
+                summary=f"Processed inbox item: {resolution}",
+                details={
+                    "item_id": item_id,
+                    "resolution": resolution,
+                    "reason": reason,
+                    "follow_up_action": follow_up_action,
+                }
+            )
+
+            logger.info(
+                "Inbox item processed",
+                item_id=item_id,
+                resolution=resolution,
+            )
+
+            return {"processed": True, "item_id": item_id, "resolution": resolution}
+
+        except Exception as e:
+            logger.warning("Failed to process inbox item", error=str(e), item_id=item_id)
             return None
 
     async def _link_document(self, session, params: dict, reason: str) -> dict | None:

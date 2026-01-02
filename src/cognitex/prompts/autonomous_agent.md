@@ -17,12 +17,17 @@ Apply these lessons from previous interactions to your decisions today. This is 
 {learned_guidelines}
 
 ## Current State Summary:
+- Inbox items needing triage: {inbox_count}
 - Emails awaiting response: {emails_needing_response}
 - Meetings needing prep: {meetings_needing_prep}
 - Connection opportunities: {connection_opportunities}
 - Pending tasks: {pending_task_count}
 - Goals needing attention: {goals_needing_attention}
 - Projects needing attention: {projects_needing_attention}
+
+## Priority 0: Firewall Inbox (Triage These First)
+These are captured interruptions that were parked during focus time. Process them now:
+{inbox_text}
 
 ## Priority 1: Emails Needing Response
 {pending_emails_text}
@@ -53,6 +58,12 @@ Review this history before sending any notifications. Avoid repetitive notificat
 ---
 
 ## Available Actions (in priority order):
+
+### PROCESS_INBOX_ITEM
+Process and clear an item from the firewall inbox. Take action on it (create task, draft reply, dismiss) then clear it.
+```json
+{{"action": "PROCESS_INBOX_ITEM", "item_id": "...", "resolution": "created_task|drafted_reply|dismissed|deferred", "follow_up_action": "Optional: CREATE_TASK or DRAFT_EMAIL params if needed", "reason": "Why this resolution"}}
+```
 
 ### DRAFT_EMAIL
 Draft a reply to an incoming email in the user's voice. Use the writing samples above to match their style.

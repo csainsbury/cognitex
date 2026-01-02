@@ -34,6 +34,7 @@ class BuildStage(str, Enum):
     T_24H = "T-24h"   # Day before
     T_2H = "T-2h"     # 2 hours before
     T_15M = "T-15m"   # 15 minutes before
+    T_5M = "T-5m"     # 5 minutes before (whisper mode)
     LIVE = "live"     # During the event/task
     POST = "post"     # After completion
 
@@ -1102,12 +1103,17 @@ class ContextPackTriggerSystem:
 
                 # Determine which stage to build
                 stage = None
+                is_whisper = False
                 if timedelta(hours=23) < time_until <= timedelta(hours=25):
                     stage = BuildStage.T_24H
                 elif timedelta(hours=1, minutes=45) < time_until <= timedelta(hours=2, minutes=15):
                     stage = BuildStage.T_2H
                 elif timedelta(minutes=10) < time_until <= timedelta(minutes=20):
                     stage = BuildStage.T_15M
+                elif timedelta(minutes=3) < time_until <= timedelta(minutes=7):
+                    # T-5m WHISPER MODE - Send quick cheat sheet
+                    stage = BuildStage.T_5M
+                    is_whisper = True
 
                 if stage:
                     # Check if pack already exists for this stage
@@ -1117,9 +1123,15 @@ class ContextPackTriggerSystem:
                             "Building context pack",
                             event=event.get("summary", "Unknown")[:30],
                             stage=stage.value,
+                            whisper=is_whisper,
                         )
                         pack = await self.compiler.compile_for_event(event, stage)
-                        await self._notify_pack_ready(pack, event)
+
+                        if is_whisper:
+                            # Send high-priority whisper notification
+                            await self._send_meeting_whisper(pack, event)
+                        else:
+                            await self._notify_pack_ready(pack, event)
 
         except Exception as e:
             logger.warning("Failed to check upcoming events", error=str(e))
@@ -1277,24 +1289,100 @@ class ContextPackTriggerSystem:
         """Notify user when a context pack is ready (via Discord)."""
         try:
             from cognitex.db.redis import get_redis
+            import json
 
             summary = event.get("summary", "Event")
 
-            # Publish notification for Discord bot
-            message = {
-                "type": "context_pack_ready",
+            # Format missing prerequisites as bullet points
+            missing_points = "\n".join([f"- {p}" for p in pack.missing_prerequisites[:3]])
+
+            # Create notification in the format the Discord bot expects
+            # Bot listens to cognitex:notifications and expects "message" and "urgency"
+            notification_payload = {
+                "message": (
+                    f"**🧠 Context Pack Ready: {summary}**\n"
+                    f"Readiness: {pack.readiness_score:.0%}\n"
+                    f"Stage: {pack.build_stage.value}\n\n"
+                    f"**Missing / Needs Attention:**\n{missing_points or 'None'}\n\n"
+                    f"_Check dashboard for full briefing_"
+                ),
+                "urgency": "normal",
+                "type": "context_pack",
                 "pack_id": pack.pack_id,
-                "event": summary,
-                "stage": pack.build_stage.value,
-                "readiness": pack.readiness_score,
-                "missing": pack.missing_prerequisites[:3],
             }
 
             redis = get_redis()
-            await redis.publish("cognitex:events:notification", str(message))
+            # FIX: Publish to the correct channel that the bot actually listens to
+            await redis.publish("cognitex:notifications", json.dumps(notification_payload))
 
         except Exception as e:
             logger.warning("Failed to notify pack ready", error=str(e))
+
+    async def _send_meeting_whisper(
+        self,
+        pack: ContextPackContent,
+        event: dict,
+    ) -> None:
+        """Send a T-5m 'whisper' - a high-priority quick cheat sheet.
+
+        Just the 3 key points you need to know before walking in.
+        """
+        try:
+            from cognitex.db.redis import get_redis
+            import json
+
+            summary = event.get("summary", "Meeting")
+            attendees = event.get("attendees", [])
+
+            # Build concise cheat sheet
+            cheat_lines = []
+
+            # Key objective
+            if pack.objective:
+                cheat_lines.append(f"**Goal:** {pack.objective}")
+
+            # Top 3 don't forget items or decision points
+            reminders = pack.dont_forget[:2] + pack.decision_list[:1]
+            if reminders:
+                cheat_lines.append("**Remember:**")
+                for r in reminders[:3]:
+                    cheat_lines.append(f"  • {r[:60]}")
+
+            # Who you're meeting
+            if attendees:
+                names = [a.get("displayName") or a.get("email", "").split("@")[0]
+                         for a in attendees[:3]]
+                cheat_lines.append(f"**With:** {', '.join(names)}")
+
+            # Last touch recap (brief)
+            if pack.last_touch_recap:
+                first_line = pack.last_touch_recap.split("\n")[0][:80]
+                cheat_lines.append(f"**Last contact:** {first_line}")
+
+            cheat_text = "\n".join(cheat_lines) if cheat_lines else "No prep notes"
+
+            notification_payload = {
+                "message": (
+                    f"**🎯 {summary} starting in ~5 mins**\n\n"
+                    f"{cheat_text}\n\n"
+                    f"_Good luck!_"
+                ),
+                "urgency": "high",  # High priority for whisper
+                "type": "meeting_whisper",
+                "pack_id": pack.pack_id,
+            }
+
+            redis = get_redis()
+            await redis.publish("cognitex:notifications", json.dumps(notification_payload))
+
+            logger.info(
+                "Sent meeting whisper",
+                event=summary[:30],
+                pack_id=pack.pack_id,
+            )
+
+        except Exception as e:
+            logger.warning("Failed to send meeting whisper", error=str(e))
 
     async def on_email_received(self, email_data: dict) -> None:
         """Handle new email arrival - refresh related event packs.

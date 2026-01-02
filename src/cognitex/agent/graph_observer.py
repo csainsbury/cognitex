@@ -26,6 +26,9 @@ class GraphObserver:
 
     async def get_full_context(self) -> dict:
         """Gather comprehensive context about the graph state."""
+        # Get firewall inbox items (captured interruptions waiting for triage)
+        inbox_items = await self._get_inbox_items()
+
         context = {
             "timestamp": datetime.now().isoformat(),
             "summary": {},
@@ -44,6 +47,8 @@ class GraphObserver:
             "upcoming_calendar": await self.get_pending_calendar_blocks(),
             # Already-actioned items (to prevent re-suggesting)
             "projects_with_recent_blocks": await self.get_projects_with_recent_blocks(),
+            # Firewall inbox - captured items needing triage
+            "inbox_items": inbox_items,
         }
 
         # Build summary
@@ -61,9 +66,34 @@ class GraphObserver:
             "emails_needing_response": len(context["pending_emails"]),
             "meetings_needing_prep": len([c for c in context["upcoming_calendar"] if c.get("needs_context")]),
             "has_writing_samples": len(context["writing_samples"]) > 0,
+            # Firewall inbox
+            "inbox_count": len(inbox_items),
         }
 
         return context
+
+    async def _get_inbox_items(self) -> list[dict]:
+        """Get items from the interruption firewall inbox."""
+        try:
+            from cognitex.agent.interruption_firewall import get_interruption_firewall
+
+            firewall = get_interruption_firewall()
+            items = await firewall.get_queued_items(limit=5)
+
+            return [
+                {
+                    "id": item.item_id,
+                    "source": item.source,
+                    "subject": item.subject,
+                    "preview": item.preview[:150] if item.preview else "",
+                    "suggested": item.suggested_action,
+                    "urgency": item.urgency.value if hasattr(item.urgency, 'value') else str(item.urgency),
+                }
+                for item in items
+            ]
+        except Exception as e:
+            logger.debug("Failed to get inbox items", error=str(e))
+            return []
 
     async def get_recent_changes(self, hours: int = 24) -> list[dict]:
         """Get nodes that were created or updated recently."""

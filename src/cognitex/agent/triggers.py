@@ -178,6 +178,26 @@ class TriggerSystem:
             replace_existing=True,
         )
 
+        # Stuck task detection (every 30 minutes during work hours)
+        # Checks for tasks where elapsed time > 150% of estimated time
+        self.scheduler.add_job(
+            self._check_stuck_tasks,
+            IntervalTrigger(minutes=30),
+            id="stuck_task_check",
+            name="Stuck Task Detection",
+            replace_existing=True,
+        )
+
+        # Transition nudge check (every 10 minutes)
+        # Checks if user just finished a heavy meeting and suggests recovery tasks
+        self.scheduler.add_job(
+            self._check_mode_transition,
+            IntervalTrigger(minutes=10),
+            id="transition_check",
+            name="Transition Nudge Check",
+            replace_existing=True,
+        )
+
         logger.info("Scheduled triggers configured")
 
     async def _start_event_listeners(self) -> None:
@@ -701,6 +721,274 @@ class TriggerSystem:
                 await log_action("drive_poll", "trigger", status="failed", error=str(e))
             except Exception:
                 pass
+
+    async def _check_stuck_tasks(self) -> None:
+        """Check for tasks where user has been working > 150% of estimated time.
+
+        Proactively asks if user wants to break down the task or is in flow.
+        """
+        logger.debug("Checking for stuck tasks")
+        from cognitex.agent.action_log import log_action
+
+        try:
+            from cognitex.db.neo4j import get_neo4j_session
+
+            async for session in get_neo4j_session():
+                # Find in-progress tasks where elapsed time > 150% of estimate
+                query = """
+                MATCH (t:Task)
+                WHERE t.status = 'in_progress'
+                  AND t.started_at IS NOT NULL
+                  AND t.estimated_minutes IS NOT NULL
+                  AND t.estimated_minutes > 0
+                WITH t,
+                     duration.inMinutes(t.started_at, datetime()).minutes as elapsed_mins,
+                     t.estimated_minutes * 1.5 as threshold_mins
+                WHERE elapsed_mins > threshold_mins
+                RETURN t.id as id, t.title as title,
+                       t.estimated_minutes as estimated,
+                       elapsed_mins as elapsed,
+                       t.project_id as project_id
+                LIMIT 3
+                """
+                result = await session.run(query)
+                stuck_tasks = await result.data()
+
+                if not stuck_tasks:
+                    logger.debug("No stuck tasks found")
+                    return
+
+                for task in stuck_tasks:
+                    title = task.get("title", "Unknown")
+                    estimated = task.get("estimated", 0)
+                    elapsed = task.get("elapsed", 0)
+                    overtime_pct = int((elapsed / estimated - 1) * 100) if estimated > 0 else 0
+
+                    logger.info(
+                        "Stuck task detected",
+                        task=title[:30],
+                        estimated=estimated,
+                        elapsed=elapsed,
+                        overtime_pct=overtime_pct,
+                    )
+
+                    # Send a gentle nudge
+                    message = (
+                        f"**⏱️ Taking longer than expected**\n\n"
+                        f"**Task:** {title}\n"
+                        f"**Elapsed:** {elapsed} mins (estimated: {estimated} mins, +{overtime_pct}%)\n\n"
+                        f"Options:\n"
+                        f"• Break this into smaller tasks?\n"
+                        f"• Adjust the estimate?\n"
+                        f"• Or are you in flow? (I'll stop asking)\n\n"
+                        f"_Reply with your preference_"
+                    )
+
+                    await self._send_notification(message, urgency="normal")
+
+                    await log_action(
+                        "stuck_task_detected",
+                        "trigger",
+                        summary=f"Task '{title[:30]}' at {overtime_pct}% over estimate",
+                        details={
+                            "task_id": task.get("id"),
+                            "estimated": estimated,
+                            "elapsed": elapsed,
+                        }
+                    )
+
+        except Exception as e:
+            logger.error("Stuck task check failed", error=str(e))
+
+    async def _check_mode_transition(self) -> None:
+        """Check for mode transitions after heavy meetings.
+
+        When a heavy meeting ends, suggest low-energy recovery tasks.
+        """
+        logger.debug("Checking for mode transitions")
+        from cognitex.agent.action_log import log_action
+        from cognitex.db.redis import get_redis
+
+        try:
+            from cognitex.agent.state_model import get_state_estimator
+            from cognitex.services.calendar import CalendarService
+            from datetime import datetime, timedelta
+
+            state_estimator = get_state_estimator()
+            state = await state_estimator.get_current_state()
+
+            # Check if we just finished a meeting (within last 15 minutes)
+            now = datetime.now()
+            cal = CalendarService()
+
+            # Get events from last hour
+            result = cal.list_events(
+                time_min=now - timedelta(hours=1),
+                time_max=now,
+            )
+            recent_events = result.get("items", [])
+
+            # Find events that ended in the last 15 minutes
+            for event in recent_events:
+                end_raw = event.get("end", {})
+                if isinstance(end_raw, dict):
+                    end_str = end_raw.get("dateTime") or end_raw.get("date")
+                else:
+                    end_str = end_raw
+
+                if not end_str:
+                    continue
+
+                try:
+                    end_str = str(end_str).replace("Z", "").replace("+00:00", "")
+                    event_end = datetime.fromisoformat(end_str)
+                except (ValueError, TypeError):
+                    continue
+
+                # Check if event ended in last 15 minutes
+                time_since_end = now - event_end
+                if timedelta(0) < time_since_end <= timedelta(minutes=15):
+                    summary = event.get("summary", "Meeting")
+
+                    # Check if it was a "heavy" meeting
+                    is_heavy = self._is_heavy_meeting(event)
+
+                    if is_heavy:
+                        # Check if we already sent a transition nudge for this event
+                        redis = get_redis()
+                        nudge_key = f"cognitex:transition_nudge:{event.get('id')}"
+                        already_nudged = await redis.get(nudge_key)
+
+                        if already_nudged:
+                            continue
+
+                        # Mark as nudged (expires in 1 hour)
+                        await redis.set(nudge_key, "1", ex=3600)
+
+                        logger.info(
+                            "Heavy meeting ended, sending transition nudge",
+                            event=summary[:30],
+                        )
+
+                        # Suggest low-energy tasks
+                        low_energy_tasks = await self._get_low_energy_tasks()
+
+                        if low_energy_tasks:
+                            task_list = "\n".join([f"• {t}" for t in low_energy_tasks[:3]])
+                            message = (
+                                f"**🧘 Recovery Time**\n\n"
+                                f"Heavy meeting finished: *{summary}*\n\n"
+                                f"I've queued some low-energy tasks for the next 30 mins:\n"
+                                f"{task_list}\n\n"
+                                f"_Take a moment to decompress before diving back in_"
+                            )
+                        else:
+                            message = (
+                                f"**🧘 Recovery Time**\n\n"
+                                f"Heavy meeting finished: *{summary}*\n\n"
+                                f"Consider taking 5-10 mins for:\n"
+                                f"• Quick walk or stretch\n"
+                                f"• Process notes from the meeting\n"
+                                f"• Light admin tasks\n\n"
+                                f"_Give yourself time to decompress_"
+                            )
+
+                        await self._send_notification(message, urgency="low")
+
+                        await log_action(
+                            "transition_nudge",
+                            "trigger",
+                            summary=f"Recovery suggestion after '{summary[:30]}'",
+                            details={
+                                "event_id": event.get("id"),
+                                "event_summary": summary,
+                            }
+                        )
+
+        except Exception as e:
+            logger.error("Mode transition check failed", error=str(e))
+
+    def _is_heavy_meeting(self, event: dict) -> bool:
+        """Determine if a meeting is 'heavy' (high cognitive load).
+
+        Heavy meetings:
+        - 60+ minutes duration
+        - Board/executive meetings
+        - Presentations
+        - Interviews
+        - All-hands / town halls
+        - Meetings with 5+ attendees
+        """
+        summary = event.get("summary", "").lower()
+
+        # Check for heavy meeting keywords
+        heavy_keywords = [
+            "board", "executive", "presentation", "interview",
+            "all-hands", "town hall", "strategy", "review",
+            "performance", "1-on-1", "1:1", "sync",
+        ]
+
+        if any(kw in summary for kw in heavy_keywords):
+            return True
+
+        # Check duration (60+ mins is heavy)
+        start_raw = event.get("start", {})
+        end_raw = event.get("end", {})
+
+        if isinstance(start_raw, dict):
+            start_str = start_raw.get("dateTime")
+        else:
+            start_str = start_raw
+
+        if isinstance(end_raw, dict):
+            end_str = end_raw.get("dateTime")
+        else:
+            end_str = end_raw
+
+        if start_str and end_str:
+            try:
+                start = datetime.fromisoformat(str(start_str).replace("Z", "").replace("+00:00", ""))
+                end = datetime.fromisoformat(str(end_str).replace("Z", "").replace("+00:00", ""))
+                duration_mins = (end - start).total_seconds() / 60
+                if duration_mins >= 60:
+                    return True
+            except (ValueError, TypeError):
+                pass
+
+        # Check attendee count (5+ is heavy)
+        attendees = event.get("attendees", [])
+        if len(attendees) >= 5:
+            return True
+
+        return False
+
+    async def _get_low_energy_tasks(self) -> list[str]:
+        """Get a list of low-energy tasks suitable for recovery time."""
+        try:
+            from cognitex.db.neo4j import get_neo4j_session
+
+            async for session in get_neo4j_session():
+                # Find simple/quick tasks marked as low energy or quick wins
+                query = """
+                MATCH (t:Task)
+                WHERE t.status = 'pending'
+                  AND (
+                    t.priority = 'low'
+                    OR t.estimated_minutes <= 15
+                    OR t.energy_level = 'low'
+                    OR t.title =~ '(?i).*(review|check|update|organize|clean).*'
+                  )
+                RETURN t.title as title
+                LIMIT 5
+                """
+                result = await session.run(query)
+                tasks = await result.data()
+
+                return [t.get("title") for t in tasks if t.get("title")]
+
+        except Exception as e:
+            logger.warning("Failed to get low energy tasks", error=str(e))
+            return []
 
     # =========================================================================
     # Event trigger handlers
