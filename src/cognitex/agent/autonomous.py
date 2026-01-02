@@ -286,7 +286,7 @@ class AutonomousAgent:
         skip_list_text = "\n".join(skip_lines) if skip_lines else "  (none)"
 
         # Get recent notification history so agent can avoid repetitive notifications
-        from cognitex.agent.action_log import get_recent_notifications
+        from cognitex.agent.action_log import get_recent_notifications, get_recent_rejections
         recent_notifications = await get_recent_notifications(hours=48)
 
         # Format notification history for context
@@ -297,6 +297,78 @@ class AutonomousAgent:
             notification_history_text = "\n".join(notif_lines)
         else:
             notification_history_text = "  (No recent notifications)"
+
+        # =====================================================================
+        # LEARNING CONTEXT - Feed the agent its "report card"
+        # This closes the feedback loop: the agent sees what it learned
+        # =====================================================================
+        learned_lines = []
+
+        # 1. High-level insights from learning system
+        try:
+            from cognitex.agent.learning import get_learning_system
+            ls = get_learning_system()
+            if ls:
+                learning_summary = await ls.get_learning_summary()
+                insights = learning_summary.get("insights", [])
+                if insights:
+                    learned_lines.append("### General Insights")
+                    learned_lines.extend([f"- {i}" for i in insights[:3]])
+
+                # Duration calibration insight
+                calibration = learning_summary.get("duration_calibration", {})
+                avg_error = calibration.get("average_estimation_error")
+                if avg_error is not None and abs(avg_error) > 0.2:
+                    direction = "underestimate" if avg_error > 0 else "overestimate"
+                    learned_lines.append(f"- Time estimates tend to {direction} by {abs(avg_error):.0%}")
+        except Exception as e:
+            logger.debug("Failed to get learning insights", error=str(e))
+
+        # 2. Active preference rules
+        try:
+            from cognitex.agent.decision_memory import get_decision_memory
+            dm = get_decision_memory()
+            if dm and dm.rules:
+                rules = await dm.rules.get_matching_rules(
+                    context={"trigger_type": "autonomous_cycle"},
+                    rule_type="action_preference"
+                )
+                if rules:
+                    learned_lines.append("\n### Learned Preferences")
+                    for rule in rules[:5]:
+                        conf = rule.get('confidence', 0)
+                        learned_lines.append(f"- {rule['rule_name']} (confidence: {conf:.0%})")
+        except Exception as e:
+            logger.debug("Failed to get preference rules", error=str(e))
+
+        # 3. Recent rejections - CRITICAL for stopping bad behaviors
+        try:
+            rejections = await get_recent_rejections(limit=5)
+            if rejections:
+                learned_lines.append("\n### Recently Rejected (DO NOT REPEAT)")
+                for r in rejections:
+                    title = r.get('title', 'Unknown')
+                    reason = r.get('rejection_reason') or r.get('reason') or 'No reason given'
+                    learned_lines.append(f"- Rejected: '{title}' - Reason: {reason}")
+        except Exception as e:
+            logger.debug("Failed to get recent rejections", error=str(e))
+
+        # 4. Proposal patterns - what gets approved vs rejected
+        try:
+            from cognitex.agent.action_log import get_proposal_patterns
+            patterns = await get_proposal_patterns(min_samples=3)
+            low_approval = []
+            for priority, data in patterns.get("by_priority", {}).items():
+                rate = data.get("approved", 0) / max(data.get("approved", 0) + data.get("rejected", 0), 1)
+                if rate < 0.3 and data.get("rejected", 0) >= 2:
+                    low_approval.append(f"{priority} priority tasks ({rate:.0%} approval)")
+            if low_approval:
+                learned_lines.append("\n### Low Approval Categories (avoid proposing)")
+                learned_lines.extend([f"- {cat}" for cat in low_approval])
+        except Exception as e:
+            logger.debug("Failed to get proposal patterns", error=str(e))
+
+        learned_guidelines = "\n".join(learned_lines) if learned_lines else "(No specific guidelines yet - keep learning from feedback)"
 
         prompt = format_prompt(
             "autonomous_agent",
@@ -309,6 +381,7 @@ class AutonomousAgent:
             projects_needing_attention=summary['projects_needing_attention'],
             # Formatted content sections
             writing_samples_text=samples_text,
+            learned_guidelines=learned_guidelines,  # Learning feedback loop
             pending_emails_text=pending_emails_text,
             upcoming_calendar_text=upcoming_calendar_text,
             opportunities_text=opp_text,
