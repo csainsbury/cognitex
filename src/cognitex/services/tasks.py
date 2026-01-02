@@ -186,7 +186,7 @@ class TaskService:
 
             if project_id:
                 match_clause = """
-                MATCH (t:Task)-[:PART_OF]->(p:Project {id: $project_id})
+                MATCH (t:Task)-[:PART_OF|BELONGS_TO]->(p:Project {id: $project_id})
                 """
                 params["project_id"] = project_id
 
@@ -207,7 +207,7 @@ class TaskService:
             query = f"""
             {match_clause}
             {where_clause}
-            OPTIONAL MATCH (t)-[:PART_OF]->(proj:Project)
+            OPTIONAL MATCH (t)-[:PART_OF|BELONGS_TO]->(proj:Project)
             OPTIONAL MATCH (t)-[:ACHIEVES]->(goal:Goal)
             RETURN t {{
                 .*,

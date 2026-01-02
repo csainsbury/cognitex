@@ -119,7 +119,7 @@ class Agent:
     def _llm_chat(self, messages: list[dict], max_tokens: int = 2048, temperature: float = 0.3) -> str:
         """Call the LLM with provider-specific API handling."""
         if self._provider == "google":
-            # Gemini API format
+            # Gemini API format with fallback to Together.ai
             model = self._client.GenerativeModel(self._model)
             # Convert OpenAI format to Gemini format
             gemini_messages = []
@@ -139,14 +139,54 @@ class Agent:
                 first_content = gemini_messages[0]["parts"][0]
                 gemini_messages[0]["parts"][0] = f"{system_prompt}\n\n{first_content}"
 
-            response = model.generate_content(
-                gemini_messages,
-                generation_config={
-                    "max_output_tokens": max_tokens,
-                    "temperature": temperature,
-                },
-            )
-            return response.text
+            use_fallback = False
+            fallback_reason = None
+
+            try:
+                safety_settings = [
+                    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+                ]
+                response = model.generate_content(
+                    gemini_messages,
+                    generation_config={
+                        "max_output_tokens": max_tokens,
+                        "temperature": temperature,
+                    },
+                    safety_settings=safety_settings,
+                )
+                # Try to get text - can fail even with response
+                try:
+                    return response.text
+                except Exception as text_err:
+                    use_fallback = True
+                    fallback_reason = f"response.text failed: {text_err}"
+            except Exception as e:
+                use_fallback = True
+                fallback_reason = str(e)
+
+            # Fallback to Together.ai if Gemini failed
+            if use_fallback:
+                logger.warning("Gemini failed, using Together.ai fallback", reason=fallback_reason)
+                from together import Together
+                settings = get_settings()
+                api_key = settings.together_api_key
+                # Handle SecretStr
+                if hasattr(api_key, 'get_secret_value'):
+                    api_key = api_key.get_secret_value()
+                if api_key:
+                    fallback_client = Together(api_key=api_key)
+                    fallback_response = fallback_client.chat.completions.create(
+                        model="meta-llama/Llama-3.3-70B-Instruct-Turbo",
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    )
+                    return fallback_response.choices[0].message.content
+                else:
+                    raise ValueError(f"Gemini failed and no fallback: {fallback_reason}")
 
         elif self._provider == "anthropic":
             # Anthropic API format

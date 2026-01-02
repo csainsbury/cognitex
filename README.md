@@ -17,6 +17,8 @@ An LLM-powered agent that acts on your behalf when you're not available:
 - **Suggests focus blocks** for projects needing attention
 - **Auto-links** documents, tasks, and projects in the knowledge graph
 - **Flags items** requiring human judgment
+- **Task proposals** with approval workflow (configurable auto vs propose mode)
+- **Decision memory** for learning from accepted/rejected proposals
 
 ### Executive Function Layer
 - **Operating Modes**: Deep Focus, Fragmented, Overloaded, etc.
@@ -126,6 +128,7 @@ DISCORD_CHANNEL_ID=your_channel_id
 # Autonomous Agent
 AUTONOMOUS_AGENT_ENABLED=true
 AUTONOMOUS_AGENT_INTERVAL_MINUTES=15
+TASK_CREATION_MODE=propose  # 'auto' or 'propose' (requires approval)
 ```
 
 ## Usage
@@ -187,13 +190,27 @@ Navigate to `http://localhost:8080`:
 The agent runs automatically every 15 minutes (configurable) and:
 1. Observes graph state (stale items, orphaned nodes, actionable emails)
 2. Reasons about what actions to take
-3. Executes actions (drafts, links, tasks)
-4. Logs all decisions for review
+3. Executes actions (drafts, links, tasks) or proposes them for approval
+4. Logs all decisions for review and learning
 
 Review agent outputs at `/twin`:
 - Approve/edit/discard email drafts
 - Archive context packs
 - Accept/dismiss focus block suggestions
+
+### Discord Bot
+
+The Discord bot provides notifications and commands:
+
+```
+/briefing          - Get daily briefing
+/state             - Show current operating state
+/proposals         - List pending task proposals
+/approve <id>      - Approve a task proposal
+/reject <id>       - Reject a task proposal
+/sync              - Trigger data sync
+/calendar          - Show upcoming events
+```
 
 ## Project Structure
 
@@ -204,7 +221,9 @@ cognitex/
 │   │   ├── autonomous.py    # Main agent loop
 │   │   ├── graph_observer.py # Graph state monitoring
 │   │   ├── tools.py         # Agent tools
-│   │   └── decision_memory.py # Learning from decisions
+│   │   ├── decision_memory.py # Learning from decisions
+│   │   ├── memory.py        # Working + episodic memory
+│   │   └── action_log.py    # Action logging + task proposals
 │   ├── api/             # REST API
 │   ├── cli/             # CLI commands
 │   ├── db/              # Database models
@@ -244,6 +263,13 @@ cognitex/
 | EmailDraft | Agent-drafted replies |
 | ContextPack | Meeting preparation briefings |
 | SuggestedBlock | Focus time suggestions |
+
+## Documentation
+
+Implementation blueprints and status tracking:
+- `docs/cognitex_phase_3_blueprint.md` - Phase 3: Executive Function Layer
+- `docs/PHASE3_STATUS.md` - Phase 3 implementation status
+- `docs/PHASE4_MEMORY_BLUEPRINT.md` - Phase 4: Adaptive Memory & Learning System
 
 ## Development
 

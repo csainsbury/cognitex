@@ -145,12 +145,30 @@ class GraphObserver:
             return []
 
     async def get_orphaned_nodes(self) -> list[dict]:
-        """Get nodes that should have connections but don't."""
-        query = """
-        // Documents not linked to any project
+        """Get nodes that should have connections but don't.
+
+        Excludes documents matching configured name patterns or MIME types.
+        """
+        from cognitex.config import get_settings
+
+        settings = get_settings()
+
+        # Parse exclusion patterns from config
+        name_patterns = [p.strip() for p in settings.orphan_exclude_name_patterns.split(",") if p.strip()]
+        mime_patterns = [p.strip() for p in settings.orphan_exclude_mime_types.split(",") if p.strip()]
+
+        # Build exclusion conditions for Cypher
+        name_exclusions = " AND ".join([f"NOT d.name STARTS WITH '{p}'" for p in name_patterns]) if name_patterns else "true"
+        mime_exclusions = " AND ".join([f"NOT d.mime_type STARTS WITH '{p}'" for p in mime_patterns]) if mime_patterns else "true"
+
+        query = f"""
+        // Documents not linked to any project (excluding configured patterns)
         MATCH (d:Document)
         WHERE NOT (d)-[:BELONGS_TO|REFERENCES|MENTIONED_IN]->(:Project)
           AND NOT (d)-[:BELONGS_TO|REFERENCES|MENTIONED_IN]->(:Goal)
+          AND NOT d.dismissed = true
+          AND {name_exclusions}
+          AND {mime_exclusions}
         OPTIONAL MATCH (d)-[:COVERS]->(t:Topic)
         WITH d, collect(t.name)[0..3] as topics
         RETURN
@@ -235,11 +253,13 @@ class GraphObserver:
         query = """
         MATCH (p:Project)
         WHERE p.status = 'active'
-        OPTIONAL MATCH (p)<-[:BELONGS_TO]-(t:Task)
-        OPTIONAL MATCH (p)-[:PART_OF]->(g:Goal)
-        WITH p, g,
-             collect(t) as tasks
-        WITH p, g,
+        OPTIONAL MATCH (p)<-[:BELONGS_TO|PART_OF]-(t:Task)
+        OPTIONAL MATCH (p)-[:PART_OF|ACHIEVES]->(g:Goal)
+        WITH p,
+             collect(DISTINCT t) as tasks,
+             collect(DISTINCT g.title) as goal_titles
+        WITH p,
+             goal_titles[0] as goal_title,
              size(tasks) as total_tasks,
              size([t IN tasks WHERE t.status = 'completed']) as completed_tasks,
              size([t IN tasks WHERE t.status = 'in_progress']) as in_progress_tasks,
@@ -248,7 +268,7 @@ class GraphObserver:
         RETURN
             p.id as id,
             p.title as title,
-            g.title as goal_title,
+            goal_title,
             total_tasks,
             completed_tasks,
             in_progress_tasks,

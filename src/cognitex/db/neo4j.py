@@ -31,11 +31,34 @@ async def init_neo4j() -> None:
     logger.info("Neo4j connection initialized")
 
 
+async def _ensure_connected() -> None:
+    """Ensure Neo4j driver is connected, reconnecting if necessary."""
+    global _driver
+
+    if _driver is None:
+        await init_neo4j()
+        return
+
+    # Check if driver is still alive
+    try:
+        await _driver.verify_connectivity()
+    except Exception as e:
+        logger.warning("Neo4j connection lost, reconnecting...", error=str(e))
+        try:
+            await _driver.close()
+        except Exception:
+            pass
+        _driver = None
+        await init_neo4j()
+        logger.info("Neo4j reconnected successfully")
+
+
 async def close_neo4j() -> None:
     """Close Neo4j connection."""
     global _driver
     if _driver:
         await _driver.close()
+        _driver = None
         logger.info("Neo4j connection closed")
 
 
@@ -46,14 +69,15 @@ async def get_neo4j_session(
     """
     Get a Neo4j session.
 
+    Automatically reconnects if the driver connection was lost.
+
     Args:
         database: Database name (default: neo4j)
         access_mode: "WRITE" or "READ" (default: WRITE for backwards compatibility)
     """
     from neo4j import WRITE_ACCESS, READ_ACCESS
 
-    if _driver is None:
-        raise RuntimeError("Neo4j not initialized. Call init_neo4j() first.")
+    await _ensure_connected()
 
     mode = WRITE_ACCESS if access_mode == "WRITE" else READ_ACCESS
     async with _driver.session(database=database, default_access_mode=mode) as session:

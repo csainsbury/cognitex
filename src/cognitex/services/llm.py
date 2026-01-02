@@ -135,7 +135,7 @@ class LLMService:
         self,
         prompt: str,
         model: str | None = None,
-        max_tokens: int = 1024,
+        max_tokens: int = 8192,  # Gemini 3 supports much larger outputs
         temperature: float = 0.3,
         response_format: dict | None = None,
     ) -> str:
@@ -155,16 +155,80 @@ class LLMService:
         model = model or self.primary_model
 
         if self.provider == "google":
-            # Gemini API
+            # Gemini API with minimal safety settings for work content analysis
+            import google.generativeai as genai
+            safety_settings = [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ]
             genai_model = self.client.GenerativeModel(model)
-            response = genai_model.generate_content(
-                prompt,
-                generation_config={
-                    "max_output_tokens": max_tokens,
-                    "temperature": temperature,
-                },
-            )
-            return response.text
+
+            use_fallback = False
+            fallback_reason = None
+
+            try:
+                response = genai_model.generate_content(
+                    prompt,
+                    generation_config={
+                        "max_output_tokens": max_tokens,
+                        "temperature": temperature,
+                    },
+                    safety_settings=safety_settings,
+                )
+
+                # Handle incomplete or blocked responses
+                if not response.parts:
+                    finish_reason = None
+                    finish_reason_value = None
+                    if response.candidates:
+                        finish_reason = response.candidates[0].finish_reason
+                        finish_reason_value = getattr(finish_reason, 'value', None) or finish_reason
+                        # FinishReason enum: 1=STOP, 2=MAX_TOKENS, 3=SAFETY, 4=RECITATION, 5=OTHER, 12=BLOCKLIST/PROHIBITED
+                        if finish_reason_value in (2, "MAX_TOKENS"):
+                            logger.warning("Gemini response hit max tokens limit")
+                            raise ValueError("Response truncated - max tokens reached")
+                        else:
+                            # Any other blocking reason - use fallback
+                            use_fallback = True
+                            fallback_reason = f"finish_reason={finish_reason_value}"
+                    else:
+                        use_fallback = True
+                        fallback_reason = "no candidates"
+                else:
+                    # Try to get text - this can also fail even with parts
+                    try:
+                        return response.text
+                    except Exception as text_err:
+                        use_fallback = True
+                        fallback_reason = f"response.text failed: {str(text_err)}"
+
+            except Exception as e:
+                logger.warning("Gemini API call failed, trying fallback", error=str(e))
+                use_fallback = True
+                fallback_reason = str(e)
+
+            # Fallback to Together.ai if Gemini failed
+            if use_fallback:
+                logger.info("Using Together.ai fallback", reason=fallback_reason)
+                settings = get_settings()
+                api_key = settings.together_api_key
+                # Handle SecretStr
+                if hasattr(api_key, 'get_secret_value'):
+                    api_key = api_key.get_secret_value()
+                if api_key:
+                    fallback_client = Together(api_key=api_key)
+                    fallback_model = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+                    response = fallback_client.chat.completions.create(
+                        model=fallback_model,
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    )
+                    return response.choices[0].message.content
+                else:
+                    raise ValueError(f"Gemini failed ({fallback_reason}) and no fallback API key configured")
 
         elif self.provider == "anthropic":
             # Anthropic API

@@ -359,7 +359,7 @@ async def fetch_upcoming_events(
         days_ahead: Number of days to look ahead
 
     Returns:
-        List of event metadata dicts
+        List of event metadata dicts (excludes cancelled events)
     """
     time_min = datetime.utcnow()
     time_max = time_min + timedelta(days=days_ahead)
@@ -377,6 +377,10 @@ async def fetch_upcoming_events(
 
         events = result.get("items", [])
         for event in events:
+            # Skip cancelled events (deleted instances of recurring events)
+            if event.get("status") == "cancelled":
+                logger.debug("Skipping cancelled event", event_id=event.get("id"))
+                continue
             all_events.append(extract_event_metadata(event))
 
         page_token = result.get("nextPageToken")
@@ -399,7 +403,7 @@ async def fetch_historical_events(
         months_back: Number of months to look back
 
     Returns:
-        List of event metadata dicts
+        List of event metadata dicts (excludes cancelled events)
     """
     time_max = datetime.utcnow()
     time_min = time_max - timedelta(days=months_back * 30)
@@ -417,6 +421,10 @@ async def fetch_historical_events(
 
         events = result.get("items", [])
         for event in events:
+            # Skip cancelled events (deleted instances of recurring events)
+            if event.get("status") == "cancelled":
+                logger.debug("Skipping cancelled event", event_id=event.get("id"))
+                continue
             all_events.append(extract_event_metadata(event))
 
         page_token = result.get("nextPageToken")

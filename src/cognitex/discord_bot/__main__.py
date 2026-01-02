@@ -48,6 +48,9 @@ class CognitexBot(commands.Bot):
         self.tree.add_command(today_command)
         self.tree.add_command(briefing_command)
         self.tree.add_command(approvals_command)
+        self.tree.add_command(proposals_command)
+        self.tree.add_command(approve_command)
+        self.tree.add_command(reject_command)
         self.tree.add_command(status_command)
         self.tree.add_command(triggers_command)
         self.tree.add_command(goal_parse_command)
@@ -1094,6 +1097,102 @@ async def approvals_command(interaction: discord.Interaction) -> None:
 
     except Exception as e:
         logger.error("Approvals command failed", error=str(e))
+        await interaction.followup.send(f"Error: {str(e)[:100]}")
+
+
+@app_commands.command(name="proposals", description="Show pending task proposals")
+async def proposals_command(interaction: discord.Interaction) -> None:
+    """Show pending task proposals."""
+    await interaction.response.defer()
+
+    try:
+        from cognitex.agent.action_log import get_pending_proposals, get_proposal_stats
+
+        proposals = await get_pending_proposals(limit=10)
+        stats = await get_proposal_stats()
+
+        if not proposals:
+            await interaction.followup.send(
+                f"No pending task proposals.\n"
+                f"Stats: {stats['approved']} approved, {stats['rejected']} rejected "
+                f"({stats['approval_rate']:.0f}% approval rate)"
+            )
+            return
+
+        embed = discord.Embed(
+            title=f"📝 Pending Task Proposals ({len(proposals)})",
+            description=f"Approval rate: {stats['approval_rate']:.0f}%",
+            color=discord.Color.blue(),
+        )
+
+        for prop in proposals:
+            embed.add_field(
+                name=f"{prop['title'][:50]}",
+                value=(
+                    f"Reason: {prop['reason'][:80] if prop['reason'] else 'N/A'}...\n"
+                    f"`/approve {prop['id']}` or `/reject {prop['id']}`"
+                ),
+                inline=False,
+            )
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        logger.error("Proposals command failed", error=str(e))
+        await interaction.followup.send(f"Error: {str(e)[:100]}")
+
+
+@app_commands.command(name="approve", description="Approve a task proposal")
+@app_commands.describe(proposal_id="The proposal ID to approve")
+async def approve_command(interaction: discord.Interaction, proposal_id: str) -> None:
+    """Approve a task proposal."""
+    await interaction.response.defer()
+
+    try:
+        from cognitex.agent.action_log import approve_proposal
+
+        task = await approve_proposal(proposal_id)
+
+        if task:
+            await interaction.followup.send(
+                f"✅ **Approved!** Created task: {task.get('title', 'Unknown')}\n"
+                f"Task ID: `{task.get('id', 'Unknown')}`"
+            )
+        else:
+            await interaction.followup.send(
+                f"❌ Proposal `{proposal_id}` not found or already processed."
+            )
+
+    except Exception as e:
+        logger.error("Approve command failed", error=str(e))
+        await interaction.followup.send(f"Error: {str(e)[:100]}")
+
+
+@app_commands.command(name="reject", description="Reject a task proposal")
+@app_commands.describe(proposal_id="The proposal ID to reject", reason="Reason for rejection")
+async def reject_command(
+    interaction: discord.Interaction, proposal_id: str, reason: str = None
+) -> None:
+    """Reject a task proposal."""
+    await interaction.response.defer()
+
+    try:
+        from cognitex.agent.action_log import reject_proposal
+
+        success = await reject_proposal(proposal_id, reason)
+
+        if success:
+            await interaction.followup.send(
+                f"❌ **Rejected** proposal `{proposal_id}`"
+                + (f"\nReason: {reason}" if reason else "")
+            )
+        else:
+            await interaction.followup.send(
+                f"❌ Proposal `{proposal_id}` not found or already processed."
+            )
+
+    except Exception as e:
+        logger.error("Reject command failed", error=str(e))
         await interaction.followup.send(f"Error: {str(e)[:100]}")
 
 

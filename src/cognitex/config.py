@@ -62,12 +62,12 @@ class Settings(BaseSettings):
     # Anthropic (Claude)
     anthropic_api_key: SecretStr = Field(default=SecretStr(""))
     anthropic_model_planner: str = Field(
-        default="claude-sonnet-4-20250514",
+        default="claude-opus-4-5-20251101",
         description="Claude model for planning",
     )
     anthropic_model_executor: str = Field(
         default="claude-sonnet-4-20250514",
-        description="Claude model for execution",
+        description="Claude model for execution (faster for structured tasks)",
     )
 
     # OpenAI
@@ -154,6 +154,23 @@ class Settings(BaseSettings):
         ge=5,
         le=60,
         description="How often the autonomous agent runs (minutes)",
+    )
+
+    # Document exclusions for orphan detection
+    # Documents matching these patterns won't be flagged as orphaned
+    orphan_exclude_name_patterns: str = Field(
+        default="mdt_,clinic_,IMG_",
+        description="Comma-separated prefixes to exclude from orphan detection (e.g., 'mdt_,clinic_')",
+    )
+    orphan_exclude_mime_types: str = Field(
+        default="application/vnd.google-makersuite",
+        description="Comma-separated MIME type prefixes to exclude (e.g., AI Studio files)",
+    )
+
+    # Task creation mode
+    task_creation_mode: Literal["auto", "propose"] = Field(
+        default="propose",
+        description="auto=create tasks immediately, propose=send for approval first",
     )
 
     @property

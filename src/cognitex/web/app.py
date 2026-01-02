@@ -1806,7 +1806,6 @@ Return ONLY valid JSON, no other text."""
 
             analysis_response = await llm.complete(
                 analysis_prompt,
-                max_tokens=1024,
                 temperature=0.2,
             )
 
@@ -1868,7 +1867,7 @@ Return ONLY valid JSON, no other text."""
             return str(text).replace("<", "&lt;").replace(">", "&gt;")
 
         html_parts = [
-            '<div class="context-panel" style="background: #f0f9ff; padding: 1rem; margin: 1rem 0; border-radius: 5px; max-height: 600px; overflow-y: auto;">',
+            '<div class="context-panel" style="background: #f0f9ff; padding: 1rem; margin: 1rem 0; border-radius: 5px; max-height: 80vh; overflow-y: auto;">',
             f'<h4 style="margin-top: 0; border-bottom: 1px solid #bfdbfe; padding-bottom: 0.5rem;">Context Pack: {escape_html(data.get("subject", "Email")[:50])}</h4>',
         ]
 
@@ -1960,12 +1959,373 @@ Return ONLY valid JSON, no other text."""
             html_parts.append(f' - {sc.get("email_count", 0)} prior emails, {sc.get("shared_task_count", 0)} shared tasks')
             html_parts.append('</div>')
 
-        html_parts.append('<button class="btn btn-secondary btn-sm" onclick="this.parentElement.remove()" style="margin-top: 0.5rem;">Close</button>')
+        # Action buttons - Research and Close
+        html_parts.append('<div style="margin-top: 1rem; display: flex; gap: 0.5rem; align-items: center;">')
+        html_parts.append(f'''<button class="btn btn-primary btn-sm" id="research-btn-{draft_id}"
+            onclick="startResearch('{draft_id}')"
+            title="Search internal docs and web for information to address requirements">
+            🔍 Research (Internal + Web)
+        </button>''')
+        html_parts.append('<button class="btn btn-secondary btn-sm" onclick="this.parentElement.parentElement.remove()">Close</button>')
+        html_parts.append('</div>')
+        html_parts.append(f'<div id="research-status-{draft_id}" style="margin-top: 0.5rem;"></div>')
+        html_parts.append(f'<div id="research-results-{draft_id}" style="margin-top: 1rem;"></div>')
+
+        # Add the SSE JavaScript for this draft
+        html_parts.append(f'''
+        <script>
+        function startResearch(draftId) {{
+            const btn = document.getElementById('research-btn-' + draftId);
+            const statusDiv = document.getElementById('research-status-' + draftId);
+            const resultsDiv = document.getElementById('research-results-' + draftId);
+
+            // Disable button and show initial status
+            btn.disabled = true;
+            btn.innerHTML = '🔄 Researching...';
+            statusDiv.innerHTML = '<div style="padding: 0.5rem; background: #f0f9ff; border-radius: 4px;"><span style="margin-right: 0.5rem;">🚀</span>Connecting...</div>';
+            resultsDiv.innerHTML = '';
+
+            // Start SSE connection
+            const eventSource = new EventSource('/api/twin/drafts/' + draftId + '/research/stream');
+
+            eventSource.addEventListener('status', function(e) {{
+                // Unescape newlines from SSE data
+                statusDiv.innerHTML = e.data.replace(/\\\\n/g, '\\n');
+            }});
+
+            eventSource.addEventListener('result', function(e) {{
+                statusDiv.innerHTML = '';  // Clear status
+                // Unescape newlines and render HTML
+                resultsDiv.innerHTML = e.data.replace(/\\\\n/g, '\\n');
+            }});
+
+            eventSource.addEventListener('error', function(e) {{
+                if (e.data) {{
+                    statusDiv.innerHTML = '';
+                    resultsDiv.innerHTML = e.data.replace(/\\\\n/g, '\\n');
+                }}
+            }});
+
+            eventSource.addEventListener('done', function(e) {{
+                eventSource.close();
+                btn.disabled = false;
+                btn.innerHTML = '🔍 Research (Internal + Web)';
+                if (e.data === 'error') {{
+                    statusDiv.innerHTML = '';
+                }}
+            }});
+
+            eventSource.onerror = function(e) {{
+                eventSource.close();
+                btn.disabled = false;
+                btn.innerHTML = '🔍 Research (Internal + Web)';
+                if (!resultsDiv.innerHTML) {{
+                    statusDiv.innerHTML = '<div class="alert alert-error">Connection error. Please try again.</div>';
+                }}
+            }};
+        }}
+        </script>
+        ''')
         html_parts.append('</div>')
 
         return HTMLResponse("".join(html_parts))
 
     raise HTTPException(status_code=500, detail="Failed to build context pack")
+
+
+@app.get("/api/twin/drafts/{draft_id}/research/stream")
+async def research_for_draft_stream(draft_id: str):
+    """
+    Deep research for email response with SSE streaming progress.
+
+    Streams progress updates to prevent timeout and provide real-time feedback.
+    """
+    import json
+    import asyncio
+    import re
+    from fastapi.responses import StreamingResponse
+    from cognitex.db.neo4j import get_neo4j_session
+    from cognitex.agent.graph_observer import GraphObserver
+    from cognitex.services.llm import get_llm_service
+    from cognitex.db.postgres import get_session
+    from cognitex.services.ingestion import search_chunks_semantic
+
+    # Helper functions for SSE
+    def sse_event(event_type: str, data: str) -> str:
+        """Format as SSE event."""
+        # SSE data lines can't have newlines - replace with escaped version
+        safe_data = data.replace('\n', '\\n').replace('\r', '')
+        return f"event: {event_type}\ndata: {safe_data}\n\n"
+
+    def status_html(message: str, progress: int = 0, icon: str = "🔄") -> str:
+        """Generate status update HTML."""
+        return f'<div class="research-status" style="padding: 0.5rem; background: #f0f9ff; border-radius: 4px; margin-bottom: 0.5rem;"><span style="margin-right: 0.5rem;">{icon}</span>{message}<span style="float:right; color: #6b7280;">{progress}%</span></div>'
+
+    # First, gather all the initial data we need OUTSIDE the generator
+    # This prevents holding async context managers open during streaming
+    email_data = None
+    email_body = None
+    subject = None
+
+    try:
+        async for session in get_neo4j_session():
+            query = """
+            MATCH (d:EmailDraft {id: $draft_id})-[:REPLY_TO]->(e:Email)
+            RETURN e.gmail_id as gmail_id, e.subject as subject
+            """
+            result = await session.run(query, {"draft_id": draft_id})
+            email_data = await result.single()
+
+            if email_data:
+                gmail_id = email_data.get("gmail_id")
+                subject = email_data.get("subject", "Email")
+                observer = GraphObserver(session)
+                context = await observer.get_email_deep_context(gmail_id)
+                email_body = context.get("full_body", "")
+            break
+    except Exception as e:
+        logger.error("Failed to get email data", error=str(e))
+
+    async def generate_research_stream():
+        """Generator that yields SSE events as research progresses."""
+        nonlocal email_data, email_body, subject
+
+        try:
+            yield sse_event("status", status_html("Starting research...", 5, "🚀"))
+
+            if not email_data:
+                yield sse_event("error", '<div class="alert alert-error">Draft not found</div>')
+                yield sse_event("done", "error")
+                return
+
+            if not email_body:
+                yield sse_event("error", '<div class="alert alert-warning">No email content to research</div>')
+                yield sse_event("done", "error")
+                return
+
+            yield sse_event("status", status_html(f"Analyzing: {subject[:40]}...", 10, "📧"))
+
+            llm = get_llm_service()
+
+            yield sse_event("status", status_html("Extracting research queries...", 15, "🧠"))
+
+            # Step 1: Extract research queries from the email
+            extraction_prompt = f"""Analyze this email and extract specific research queries.
+
+EMAIL SUBJECT: {subject}
+EMAIL BODY:
+{email_body[:6000]}
+
+Generate research queries for both internal documents and web search.
+Return JSON:
+{{
+    "internal_queries": [
+        {{"query": "semantic search query for internal docs", "purpose": "what we're looking for"}}
+    ],
+    "web_queries": [
+        {{"query": "web search query", "purpose": "what external info we need"}}
+    ],
+    "key_questions": ["specific questions that need answering"],
+    "context_needed": "brief description of what background is needed to respond"
+}}
+
+Focus on:
+- Technical details or specifications mentioned
+- Industry/domain context needed
+- Standards, regulations, or best practices
+- Competitor or market information
+- Historical context or prior work
+
+Return ONLY valid JSON."""
+
+            try:
+                extraction_response = await llm.complete(extraction_prompt, temperature=0.2)
+                extraction_text = extraction_response.strip()
+                if extraction_text.startswith("```"):
+                    extraction_text = extraction_text.split("\n", 1)[1].rsplit("```", 1)[0]
+                research_plan = json.loads(extraction_text)
+                yield sse_event("status", status_html("Research plan ready", 25, "✅"))
+            except Exception as e:
+                logger.warning("Failed to extract research plan", error=str(e))
+                research_plan = {
+                    "internal_queries": [{"query": subject, "purpose": "General search"}],
+                    "web_queries": [{"query": subject, "purpose": "Background info"}],
+                    "key_questions": [],
+                    "context_needed": "General background"
+                }
+                yield sse_event("status", status_html("Using fallback plan", 25, "⚠️"))
+
+            internal_queries = research_plan.get("internal_queries", [])[:3]  # Reduced to 3 for speed
+            web_queries = research_plan.get("web_queries", [])[:3]
+
+            yield sse_event("status", status_html(f"{len(internal_queries)} internal + {len(web_queries)} web queries", 30, "📋"))
+
+            # Define search functions that don't hold connections
+            async def search_internal_docs(query_item: dict) -> list[dict]:
+                """Search internal documents for a single query."""
+                results = []
+                query_text = query_item.get("query", "")
+                if not query_text:
+                    return results
+                try:
+                    async for pg_session in get_session():
+                        chunks = await search_chunks_semantic(pg_session, query_text, limit=3)
+                        for chunk in chunks:
+                            results.append({
+                                "query": query_text,
+                                "purpose": query_item.get("purpose", ""),
+                                "content": chunk.get("content", "")[:500],
+                                "drive_id": chunk.get("drive_id"),
+                                "similarity": chunk.get("similarity", 0),
+                            })
+                        break
+                except Exception as e:
+                    logger.warning("Internal search failed", query=query_text, error=str(e))
+                return results
+
+            async def research_web(query_item: dict) -> dict | None:
+                """Research a single web query using LLM knowledge."""
+                query_text = query_item.get("query", "")
+                if not query_text:
+                    return None
+                try:
+                    # Shorter prompt for faster response
+                    web_prompt = f"""Brief info about: {query_text}
+Purpose: {query_item.get("purpose", "Background")}
+Give 3-5 bullet points of key facts. Be concise."""
+
+                    web_response = await llm.complete(web_prompt, temperature=0.3, max_tokens=1024)
+                    return {
+                        "query": query_text,
+                        "purpose": query_item.get("purpose", ""),
+                        "findings": web_response.strip()
+                    }
+                except Exception as e:
+                    logger.warning("Web research failed", query=query_text, error=str(e))
+                    return None
+
+            yield sse_event("status", status_html("Searching internal docs...", 35, "📁"))
+
+            # Run internal searches (usually fast)
+            internal_results = []
+            for i, q in enumerate(internal_queries):
+                try:
+                    results = await asyncio.wait_for(search_internal_docs(q), timeout=10.0)
+                    internal_results.extend(results)
+                    yield sse_event("status", status_html(f"Internal {i+1}/{len(internal_queries)}", 35 + (i+1)*5, "📁"))
+                except asyncio.TimeoutError:
+                    logger.warning("Internal search timeout", query=q.get("query"))
+
+            yield sse_event("status", status_html("External research...", 50, "🌐"))
+
+            # Run web research with heartbeats
+            web_results = []
+            for i, q in enumerate(web_queries):
+                query_text = q.get("query", "")[:30]
+                yield sse_event("status", status_html(f"Researching: {query_text}...", 50 + i*10, "🌐"))
+
+                # Run with heartbeat
+                web_task = asyncio.create_task(research_web(q))
+                hb = 0
+                while not web_task.done():
+                    try:
+                        await asyncio.wait_for(asyncio.shield(web_task), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        hb += 1
+                        yield f": hb\n\n"
+                        if hb > 4:  # 20 second timeout per query
+                            web_task.cancel()
+                            break
+
+                try:
+                    result = web_task.result() if web_task.done() and not web_task.cancelled() else None
+                    if result:
+                        web_results.append(result)
+                except Exception:
+                    pass
+
+                yield sse_event("status", status_html(f"Web {i+1}/{len(web_queries)} done", 55 + (i+1)*10, "🌐"))
+
+            yield sse_event("status", status_html(f"Found {len(internal_results)} docs, {len(web_results)} web results", 85, "✅"))
+
+            logger.info("Research complete",
+                       internal_results=len(internal_results),
+                       web_results=len(web_results))
+
+            # Step 4: Compile research into a summary with heartbeat to keep connection alive
+            yield sse_event("status", status_html("Compiling briefing...", 90, "📝"))
+
+            # Simplified compile prompt for faster response
+            compile_prompt = f"""Summarize this research for an email response.
+
+EMAIL: {subject}
+
+INTERNAL DOCS: {len(internal_results)} found
+{json.dumps([r.get('content', '')[:200] for r in internal_results[:5]], indent=1) if internal_results else "None"}
+
+EXTERNAL INFO: {len(web_results)} queries
+{json.dumps([{'q': r.get('query', ''), 'findings': r.get('findings', '')[:300]} for r in web_results[:3]], indent=1) if web_results else "None"}
+
+Provide a brief summary (2-3 paragraphs) with:
+- Key findings relevant to the email
+- Recommended response approach
+- Any information gaps
+
+Be concise."""
+
+            # Run compile with heartbeat task to keep SSE alive
+            compiled_brief = None
+            compile_task = asyncio.create_task(
+                llm.complete(compile_prompt, temperature=0.3, max_tokens=2048)
+            )
+
+            heartbeat_count = 0
+            while not compile_task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(compile_task), timeout=5.0)
+                except asyncio.TimeoutError:
+                    # Send heartbeat to keep connection alive
+                    heartbeat_count += 1
+                    yield f": heartbeat {heartbeat_count}\n\n"
+                    yield sse_event("status", status_html(f"Compiling briefing... ({heartbeat_count * 5}s)", 90, "📝"))
+
+            try:
+                compiled_brief = compile_task.result().strip()
+            except Exception as e:
+                logger.warning("Failed to compile research", error=str(e))
+                compiled_brief = f"Research completed but summary failed: {str(e)}\n\nRaw findings: {len(internal_results)} internal docs, {len(web_results)} web results."
+
+            yield sse_event("status", status_html("Formatting...", 95, "✨"))
+
+            # Convert markdown to basic HTML
+            brief_html = compiled_brief
+            brief_html = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', brief_html)
+            brief_html = re.sub(r'^# (.+)$', r'<h3>\1</h3>', brief_html, flags=re.MULTILINE)
+            brief_html = re.sub(r'^## (.+)$', r'<h4>\1</h4>', brief_html, flags=re.MULTILINE)
+            brief_html = re.sub(r'^- (.+)$', r'<li>\1</li>', brief_html, flags=re.MULTILINE)
+            brief_html = re.sub(r'^(\d+)\. (.+)$', r'<li>\2</li>', brief_html, flags=re.MULTILINE)
+            brief_html = brief_html.replace('\n\n', '</p><p>').replace('\n', '<br>')
+            brief_html = f'<p>{brief_html}</p>'
+
+            final_html = f'''<div class="research-results" style="background: #f0fdf4; padding: 1rem; border-radius: 5px; border: 1px solid #86efac;"><h4 style="margin-top: 0; color: #166534; border-bottom: 1px solid #86efac; padding-bottom: 0.5rem;">📚 Research Complete</h4><div style="margin-bottom: 1rem;"><strong>Queries Executed:</strong> <span style="color: #6b7280;">{len(internal_results)} internal, {len(web_results)} web</span></div><div class="research-brief" style="background: white; padding: 1rem; border-radius: 4px; font-size: 0.9rem; line-height: 1.6;">{brief_html}</div><div style="margin-top: 1rem; display: flex; gap: 0.5rem;"><button class="btn btn-success btn-sm" onclick="navigator.clipboard.writeText(this.parentElement.previousElementSibling.innerText); this.innerText=\\'Copied!\\';">📋 Copy</button><button class="btn btn-secondary btn-sm" onclick="this.parentElement.parentElement.remove();">Dismiss</button></div></div>'''
+
+            yield sse_event("result", final_html)
+            yield sse_event("done", "success")
+
+        except Exception as e:
+            logger.error("Research stream error", error=str(e), exc_info=True)
+            yield sse_event("error", f'<div class="alert alert-error">Research failed: {str(e)}</div>')
+            yield sse_event("done", "error")
+
+    return StreamingResponse(
+        generate_research_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
 
 
 @app.delete("/api/twin/packs/{pack_id}")

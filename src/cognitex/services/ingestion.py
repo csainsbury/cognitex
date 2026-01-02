@@ -826,9 +826,12 @@ async def ingest_document_batch(files: list[dict]) -> dict:
     return stats
 
 
-async def run_drive_metadata_sync() -> dict:
+async def run_drive_metadata_sync(cleanup_deleted: bool = True) -> dict:
     """
     Sync all Drive files (metadata only) into the graph.
+
+    Args:
+        cleanup_deleted: If True, remove documents from Neo4j that no longer exist in Drive
 
     Returns:
         Sync result stats
@@ -841,10 +844,39 @@ async def run_drive_metadata_sync() -> dict:
 
     # Collect all files
     files = list(drive.list_all_files())
+    drive_ids = {f["id"] for f in files}
     logger.info("Fetched Drive files", count=len(files))
 
     # Ingest into graph
     stats = await ingest_document_batch(files)
+
+    # Clean up deleted files from Neo4j
+    if cleanup_deleted:
+        deleted_count = 0
+        async for session in get_neo4j_session():
+            # Find documents in Neo4j that aren't in Drive
+            result = await session.run("""
+                MATCH (d:Document)
+                WHERE d.drive_id IS NOT NULL
+                RETURN d.drive_id as drive_id
+            """)
+            existing = await result.data()
+            existing_ids = {e["drive_id"] for e in existing}
+
+            # Find IDs to delete (in Neo4j but not in Drive)
+            to_delete = existing_ids - drive_ids
+
+            if to_delete:
+                # Delete orphaned documents
+                await session.run("""
+                    MATCH (d:Document)
+                    WHERE d.drive_id IN $ids
+                    DETACH DELETE d
+                """, {"ids": list(to_delete)})
+                deleted_count = len(to_delete)
+                logger.info("Deleted orphaned documents", count=deleted_count)
+
+        stats["deleted"] = deleted_count
 
     logger.info("Drive metadata sync complete", **stats)
 

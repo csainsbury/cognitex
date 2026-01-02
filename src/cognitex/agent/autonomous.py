@@ -127,9 +127,12 @@ class AutonomousAgent:
             decisions = await self._reason_about_context(context)
 
             # 3. ACT - Execute decisions
+            # Track entities flagged in this cycle to prevent duplicates
+            flagged_this_cycle: set[str] = set()
+
             for decision in decisions:
                 try:
-                    result = await self._execute_decision(session, decision)
+                    result = await self._execute_decision(session, decision, flagged_this_cycle)
                     if result:
                         actions_taken.append({
                             "decision": decision,
@@ -382,7 +385,9 @@ class AutonomousAgent:
             logger.error("LLM reasoning failed", error=str(e), exc_info=True)
             return []
 
-    async def _execute_decision(self, session, decision: dict) -> dict | None:
+    async def _execute_decision(
+        self, session, decision: dict, flagged_this_cycle: set[str] | None = None
+    ) -> dict | None:
         """Execute a single decision."""
         action = decision.get("action")
         params = decision.get("params", {})
@@ -411,7 +416,7 @@ class AutonomousAgent:
         elif action == "CREATE_TASK":
             return await self._create_task(session, params, reason)
         elif action == "FLAG_FOR_REVIEW":
-            return await self._flag_for_review(params, reason)
+            return await self._flag_for_review(params, reason, flagged_this_cycle)
         else:
             logger.warning("Unknown action type", action=action)
             return None
@@ -533,7 +538,10 @@ class AutonomousAgent:
         return None
 
     async def _link_project_to_goal(self, session, params: dict, reason: str) -> dict | None:
-        """Link a project to a goal."""
+        """Link a project to a goal.
+
+        Each project can only have one primary goal. If already linked, skip.
+        """
         project_id = params.get("project_id")
         goal_id = params.get("goal_id")
         project_name = params.get("project_name", "")
@@ -542,16 +550,35 @@ class AutonomousAgent:
         if not project_id or not goal_id:
             return None
 
-        query = """
-        MATCH (p:Project {id: $project_id})
-        MATCH (g:Goal {id: $goal_id})
-        MERGE (p)-[rel:PART_OF]->(g)
-        SET rel.created_at = datetime(),
-            rel.created_by = 'autonomous_agent',
-            rel.reason = $reason
-        RETURN p.title as project_title, g.title as goal_title
+        # Check if project already has a goal link
+        check_query = """
+        MATCH (p:Project {id: $project_id})-[r:PART_OF]->(g:Goal)
+        RETURN g.id as existing_goal_id, g.title as existing_goal_title
         """
         try:
+            check_result = await session.run(check_query, {"project_id": project_id})
+            existing = await check_result.single()
+
+            if existing:
+                # Already has a goal - skip to prevent duplicates
+                logger.debug(
+                    "Project already linked to goal, skipping",
+                    project_id=project_id,
+                    existing_goal=existing["existing_goal_title"],
+                )
+                return {"skipped": True, "reason": f"Already linked to '{existing['existing_goal_title']}'"}
+
+            # No existing goal - create the link
+            query = """
+            MATCH (p:Project {id: $project_id})
+            MATCH (g:Goal {id: $goal_id})
+            CREATE (p)-[rel:PART_OF {
+                created_at: datetime(),
+                created_by: 'autonomous_agent',
+                reason: $reason
+            }]->(g)
+            RETURN p.title as project_title, g.title as goal_title
+            """
             result = await session.run(query, {
                 "project_id": project_id,
                 "goal_id": goal_id,
@@ -615,20 +642,56 @@ class AutonomousAgent:
         return None
 
     async def _create_task(self, session, params: dict, reason: str) -> dict | None:
-        """Create a new task to progress a goal or project."""
+        """Create a new task to progress a goal or project.
+
+        In 'propose' mode, sends task for approval instead of creating directly.
+        """
         import uuid
+        from cognitex.config import get_settings
+        from cognitex.agent.action_log import propose_task
+
+        settings = get_settings()
 
         # Handle both "title" and "task_title" since LLM may use either
         title = params.get("title") or params.get("task_title")
         project_id = params.get("project_id")
+        goal_id = params.get("goal_id")
         description = params.get("description") or params.get("task_description", "")
+        priority = params.get("priority", "medium")
 
         if not title:
             return None
 
+        # In propose mode, send for approval instead of creating
+        if settings.task_creation_mode == "propose":
+            proposal_id = await propose_task(
+                title=title,
+                description=description,
+                project_id=project_id,
+                goal_id=goal_id,
+                priority=priority,
+                reason=reason,
+            )
+
+            # Send Discord notification about the proposal
+            await self._send_proposal_notification(title, reason, proposal_id)
+
+            await log_action(
+                "task_proposed",
+                "agent",
+                summary=f"Proposed task '{title}' for approval",
+                details={
+                    "proposal_id": proposal_id,
+                    "title": title,
+                    "project_id": project_id,
+                    "reason": reason
+                }
+            )
+            return {"proposed": True, "proposal_id": proposal_id, "title": title}
+
+        # Auto mode - create directly
         task_id = f"task_{uuid.uuid4().hex[:12]}"
 
-        # Create task
         query = """
         CREATE (t:Task {
             id: $task_id,
@@ -681,12 +744,91 @@ class AutonomousAgent:
             logger.warning("Failed to create task", error=str(e))
         return None
 
-    async def _flag_for_review(self, params: dict, reason: str) -> dict | None:
-        """Flag an entity for human review and notify via Discord."""
+    async def _send_proposal_notification(
+        self, title: str, reason: str, proposal_id: str
+    ) -> None:
+        """Send a Discord notification for a task proposal."""
+        from cognitex.agent.tools import SendNotificationTool
+
+        message = (
+            f"**Task Proposal**\n\n"
+            f"**Title:** {title}\n"
+            f"**Reason:** {reason}\n\n"
+            f"_Reply with `/approve {proposal_id}` or `/reject {proposal_id}`_"
+        )
+
+        tool = SendNotificationTool()
+        await tool.execute(message=message, urgency="low")
+
+    async def _flag_for_review(
+        self, params: dict, reason: str, flagged_this_cycle: set[str] | None = None
+    ) -> dict | None:
+        """Flag an entity for human review and notify via Discord.
+
+        Includes deduplication to avoid sending the same notification repeatedly.
+        Uses fuzzy matching on entity names to catch variations.
+        Also prevents duplicate flags within the same autonomous cycle.
+        """
+        from cognitex.agent.action_log import get_recent_notifications
+
         entity_type = params.get("entity_type")
         entity_name = params.get("entity_name", params.get("entity_id", "Unknown"))
         entity_id = params.get("entity_id")
         issue = params.get("issue", reason)
+
+        # Create a normalized key for this entity
+        entity_key = f"{entity_type}:{entity_name}".lower()
+
+        # Check if already flagged in this cycle
+        if flagged_this_cycle is not None:
+            if entity_key in flagged_this_cycle:
+                logger.debug("Skipping duplicate (same cycle)", entity_key=entity_key)
+                return {"flagged": False, "reason": "duplicate_in_cycle"}
+
+            # Also check for word overlap with items flagged this cycle
+            current_words = set(w.lower() for w in entity_name.replace("/", " ").replace(",", " ").split() if len(w) > 3)
+            for flagged_key in flagged_this_cycle:
+                flagged_name = flagged_key.split(":", 1)[1] if ":" in flagged_key else flagged_key
+                flagged_words = set(w.lower() for w in flagged_name.replace("/", " ").replace(",", " ").split() if len(w) > 3)
+                if current_words and flagged_words:
+                    overlap = len(current_words & flagged_words)
+                    if overlap >= min(len(current_words), len(flagged_words)) * 0.5:
+                        logger.debug("Skipping duplicate (cycle word overlap)", entity_name=entity_name)
+                        return {"flagged": False, "reason": "duplicate_in_cycle"}
+
+        # Check for recent duplicate notifications (same entity flagged in last 24 hours)
+        recent = await get_recent_notifications(hours=24)
+        for notif in recent:
+            if notif.get("action_type") == "flag_for_review":
+                details = notif.get("details", {})
+                prev_name = details.get("entity_name", "")
+                prev_type = details.get("entity_type")
+
+                # Skip if same entity_id
+                if entity_id and details.get("entity_id") == entity_id:
+                    logger.debug("Skipping duplicate (same entity_id)", entity_id=entity_id)
+                    return {"flagged": False, "reason": "duplicate_notification"}
+
+                # Skip if same type and names share significant overlap
+                if prev_type == entity_type and prev_name and entity_name:
+                    # Check if any key words from current name appear in previous
+                    current_words = set(w.lower() for w in entity_name.replace("/", " ").replace(",", " ").split() if len(w) > 3)
+                    prev_words = set(w.lower() for w in prev_name.replace("/", " ").replace(",", " ").split() if len(w) > 3)
+                    # If more than half the words overlap, consider it a duplicate
+                    if current_words and prev_words:
+                        overlap = len(current_words & prev_words)
+                        if overlap >= min(len(current_words), len(prev_words)) * 0.5:
+                            logger.debug(
+                                "Skipping duplicate (name overlap)",
+                                entity_name=entity_name,
+                                prev_name=prev_name,
+                                overlap=overlap,
+                            )
+                            return {"flagged": False, "reason": "duplicate_notification"}
+
+        # Track that we're flagging this entity in this cycle
+        if flagged_this_cycle is not None:
+            flagged_this_cycle.add(entity_key)
 
         await log_action(
             "flag_for_review",
