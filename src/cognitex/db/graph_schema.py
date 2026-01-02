@@ -618,11 +618,16 @@ async def link_task_to_project(
     task_id: str,
     project_id: str,
 ) -> bool:
-    """Create PART_OF relationship between Task and Project."""
+    """Create PART_OF relationship between Task and Project.
+
+    Also updates the project's updated_at timestamp to prevent the autonomous
+    agent from seeing the project as "stale" immediately after adding a task.
+    """
     query = """
     MATCH (t:Task {id: $task_id})
     MATCH (p:Project {id: $project_id})
     MERGE (t)-[:PART_OF]->(p)
+    SET p.updated_at = datetime()
     RETURN t.id as id
     """
     result = await session.run(query, task_id=task_id, project_id=project_id)

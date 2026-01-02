@@ -126,18 +126,32 @@ class AutonomousAgent:
             # 2. ORIENT & DECIDE - Use LLM to reason about what to do
             decisions = await self._reason_about_context(context)
 
-            # 3. ACT - Execute decisions
+            # 3. ACT - Execute decisions with safety limits
+            # Hard limit to prevent runaway cycles
+            MAX_ACTIONS_PER_CYCLE = 5
+            action_count = 0
+
             # Track entities flagged in this cycle to prevent duplicates
             flagged_this_cycle: set[str] = set()
 
             for decision in decisions:
+                # Enforce hard limit on actions per cycle
+                if action_count >= MAX_ACTIONS_PER_CYCLE:
+                    logger.warning(
+                        "Hit max actions per cycle limit",
+                        limit=MAX_ACTIONS_PER_CYCLE,
+                        remaining_decisions=len(decisions) - decisions.index(decision),
+                    )
+                    break
+
                 try:
                     result = await self._execute_decision(session, decision, flagged_this_cycle)
-                    if result:
+                    if result and not result.get("skipped"):
                         actions_taken.append({
                             "decision": decision,
                             "result": result
                         })
+                        action_count += 1
                 except Exception as e:
                     logger.warning(
                         "Decision execution failed",
@@ -646,10 +660,19 @@ class AutonomousAgent:
 
         In 'propose' mode, sends task for approval instead of creating directly.
         Uses learned patterns to skip proposals likely to be rejected.
+
+        Safety checks:
+        1. Deduplication - skip if similar task already exists
+        2. Throttling - skip if too many pending proposals for this project
+        3. Learning - skip if historical approval rate is too low
         """
         import uuid
         from cognitex.config import get_settings
-        from cognitex.agent.action_log import propose_task, get_proposal_recommendation
+        from cognitex.agent.action_log import (
+            propose_task,
+            get_proposal_recommendation,
+            get_pending_proposal_count,
+        )
 
         settings = get_settings()
 
@@ -663,7 +686,38 @@ class AutonomousAgent:
         if not title:
             return None
 
-        # Check learned patterns before proposing (Phase 4 learning integration)
+        # 1. DEDUPLICATION CHECK
+        # Skip if a task with the same title already exists (case-insensitive)
+        try:
+            check_query = """
+            MATCH (t:Task)
+            WHERE t.status IN ['pending', 'in_progress']
+              AND toLower(t.title) = toLower($title)
+            RETURN t.id as id
+            """
+            existing = await session.run(check_query, {"title": title})
+            if await existing.single():
+                logger.info("Skipping duplicate task creation", title=title)
+                return {"skipped": True, "reason": "duplicate_task_exists"}
+        except Exception as e:
+            logger.warning("Deduplication check failed", error=str(e))
+
+        # 2. THROTTLING CHECK
+        # Don't flood the user with proposals for the same project
+        if settings.task_creation_mode == "propose" and project_id:
+            try:
+                pending_count = await get_pending_proposal_count(project_id=project_id)
+                if pending_count >= 3:
+                    logger.info(
+                        "Skipping proposal - too many pending for project",
+                        project_id=project_id,
+                        pending_count=pending_count,
+                    )
+                    return {"skipped": True, "reason": f"{pending_count} pending proposals exist for project"}
+            except Exception as e:
+                logger.warning("Throttling check failed", error=str(e))
+
+        # 3. LEARNING CHECK - Check learned patterns before proposing (Phase 4)
         if settings.task_creation_mode == "propose":
             try:
                 recommendation = await get_proposal_recommendation(

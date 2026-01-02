@@ -490,6 +490,40 @@ async def get_proposal_patterns(min_samples: int = 3) -> dict:
     return patterns
 
 
+async def get_pending_proposal_count(
+    project_id: str | None = None,
+    goal_id: str | None = None,
+) -> int:
+    """Get count of pending proposals for a specific project or goal.
+
+    Used to throttle proposal creation - prevents flooding the user with
+    proposals if they haven't reviewed existing ones yet.
+    """
+    from cognitex.db.postgres import get_session
+    from sqlalchemy import text
+
+    if not project_id and not goal_id:
+        return 0
+
+    filters = ["status = 'pending'"]
+    params: dict = {}
+
+    if project_id:
+        filters.append("project_id = :project_id")
+        params["project_id"] = project_id
+    if goal_id:
+        filters.append("goal_id = :goal_id")
+        params["goal_id"] = goal_id
+
+    query = f"SELECT COUNT(*) FROM task_proposals WHERE {' AND '.join(filters)}"
+
+    async for session in get_session():
+        result = await session.execute(text(query), params)
+        return result.scalar() or 0
+
+    return 0
+
+
 async def get_proposal_recommendation(
     project_id: str | None = None,
     priority: str = "medium",
