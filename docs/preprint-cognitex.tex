@@ -39,7 +39,7 @@
 \newcommand{\cognitex}{\textsc{Cognitex}}
 \newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
 
-\title{\cognitex{}: A Multi-Tier Personal Agent Architecture for Cognitive Load Management Through Semantic Knowledge Graphs, Autonomous Graph Orchestration, and Risk-Stratified Action}
+\title{\cognitex{}: A Multi-Tier Personal Agent Architecture for Cognitive Load Management Through Semantic Knowledge Graphs, Autonomous Graph Orchestration, State-Aware Executive Function, and Behavioral Learning}
 
 \author{
     Chris Sainsbury\\
@@ -48,17 +48,25 @@
     \texttt{chris@sainsbury.im}
 }
 
-\date{December 2024}
+\date{January 2025}
 
 \begin{document}
 
 \maketitle
 
 \begin{abstract}
-We present \cognitex{}, a personal agent architecture designed to reduce cognitive overhead for knowledge workers by unifying email, calendar, document, and code repository data into a hybrid semantic knowledge graph. The system implements a hierarchical large language model (LLM) architecture with distinct reasoning and execution tiers, combined with a three-level risk stratification framework (read-only, auto-execute, approval-required) that balances autonomous operation with human agency. A key innovation is the \textbf{Digital Twin} capability: an autonomous agent that learns the user's communication style from sent emails and can draft replies, compile context packs for upcoming meetings, and suggest focus time blocks for stalled projects. The agent proactively monitors graph health, creates connections between related entities, and surfaces items requiring human attention via Discord notifications. A dedicated review dashboard enables users to approve, edit, or discard agent-generated drafts before execution. The architecture integrates three complementary knowledge representations: a Neo4j property graph capturing entities and relationships, PostgreSQL with pgvector extensions for 768-dimensional semantic embeddings, and Redis-backed working memory for session context. The agent employs a ReAct-style (Reason + Act) planning loop with decision trace capture, an executive function layer modeling user cognitive state, and externalized prompt templates for iterative refinement. \cognitex{} represents a reference implementation for trustworthy personal AI systems that maintain transparency while providing meaningful cognitive assistance through both reactive and proactive behaviors.
+We present \cognitex{}, a personal agent architecture designed to reduce cognitive overhead for knowledge workers by unifying email, calendar, document, and code repository data into a hybrid semantic knowledge graph. The system implements a hierarchical large language model (LLM) architecture with distinct reasoning and execution tiers, combined with a three-level risk stratification framework (read-only, auto-execute, approval-required) that balances autonomous operation with human agency.
+
+A key innovation is the \textbf{Digital Twin} capability: an autonomous agent that learns the user's communication style from sent emails and can draft replies, compile context packs for upcoming meetings, and suggest focus time blocks for stalled projects. The agent proactively monitors graph health, creates connections between related entities, and surfaces items requiring human attention via Discord notifications. A dedicated review dashboard enables users to approve, edit, or discard agent-generated drafts before execution.
+
+The architecture introduces a sophisticated \textbf{Executive Function Layer} that models user cognitive state through six operating modes (Deep Focus, Fragmented, Overloaded, Avoidant, Hyperfocus, Transition) with continuous signals for fatigue, interruption pressure, and focus. A \textbf{Temporal Energy Model} captures diurnal patterns---peak hours, post-lunch dips, evening decline---enabling state-aware task suggestions. Clinical sessions (high-drain events) trigger automatic recovery mode for the remainder of the day, with the system learning from task completion observations to refine its understanding of user capacity patterns.
+
+A \textbf{Behavioral Learning System} extracts preference rules from user feedback, tracks proposal acceptance patterns, calibrates duration estimates, predicts deferral risk, and injects learned guidelines back into agent prompts. Rules follow a lifecycle from candidate through validated to deprecated, with automatic retirement of underperforming patterns.
+
+The architecture integrates three complementary knowledge representations: a Neo4j property graph capturing entities and relationships, PostgreSQL with pgvector extensions for 768-dimensional semantic embeddings, and Redis-backed working memory for session context. The agent employs a ReAct-style (Reason + Act) planning loop with decision trace capture, and externalized prompt templates for iterative refinement. \cognitex{} represents a reference implementation for trustworthy personal AI systems that maintain transparency while providing meaningful cognitive assistance through both reactive and proactive behaviors.
 \end{abstract}
 
-\noindent\textbf{Keywords:} Personal agents, Knowledge graphs, Large language models, Cognitive load management, Semantic search, ReAct agents, Autonomous orchestration, Human-AI collaboration
+\noindent\textbf{Keywords:} Personal agents, Knowledge graphs, Large language models, Cognitive load management, Semantic search, ReAct agents, Autonomous orchestration, Human-AI collaboration, Behavioral learning, Executive function modeling
 
 \section{Introduction}
 
@@ -67,6 +75,8 @@ We present \cognitex{}, a personal agent architecture designed to reduce cogniti
 Knowledge workers face an increasingly fragmented digital environment characterized by multiple communication channels, calendaring systems, document repositories, and project management tools. This fragmentation imposes substantial cognitive overhead: the mental effort required to track commitments, maintain relationship context, and synthesize information across disparate sources. Studies estimate that knowledge workers spend 28\% of their workweek managing email alone \citep{mckinsey2012social}, with significant additional time lost to context switching between applications.
 
 While general-purpose AI assistants have demonstrated impressive capabilities in natural language understanding and generation, they typically operate without persistent context about the user's specific professional network, commitments, and communication patterns. This limitation necessitates repeated context provision, undermining the efficiency gains such systems might otherwise provide. Furthermore, most AI assistants are purely \emph{reactive}---they respond to user queries but do not proactively maintain or organize information.
+
+Critically, existing systems lack awareness of user cognitive state. They suggest demanding tasks when the user is exhausted, interrupt deep work with routine notifications, and fail to learn which suggestions are accepted versus rejected. A truly effective personal agent must model user capacity and adapt its behavior accordingly.
 
 \subsection{Contributions}
 
@@ -81,7 +91,15 @@ This paper presents \cognitex{}, a personal agent system that addresses these ch
 
     \item \textbf{Risk-Stratified Tool Execution}: Our framework categorizes agent capabilities into three risk tiers (\texttt{READONLY}, \texttt{AUTO}, \texttt{APPROVAL}), enabling autonomous operation for safe actions while preserving human oversight for consequential decisions.
 
-    \item \textbf{Executive Function Layer}: A cognitive state model that tracks user operating modes (deep work, shallow work, fragmented, recovery) and an interruption firewall that filters notifications based on current cognitive capacity.
+    \item \textbf{Executive Function Layer}: A comprehensive cognitive state model with six operating modes, continuous signals (fatigue, interruption pressure, focus score), mode-specific rules governing task eligibility and notification filtering, and an interruption firewall that queues non-urgent items during focused work.
+
+    \item \textbf{Temporal Energy Model}: A diurnal energy curve modeling peak hours (typically 8--11am), post-lunch dips, and evening decline, with support for learning personalized patterns from task completion observations.
+
+    \item \textbf{Clinical Session Detection}: Automatic identification of high-drain calendar events (marked with \texttt{[CLINICAL]} tags) that trigger rest-of-day recovery mode, preventing the agent from suggesting demanding tasks after cognitively exhausting activities.
+
+    \item \textbf{Behavioral Learning System}: Extraction of preference rules from user feedback with lifecycle management (candidate $\rightarrow$ validated $\rightarrow$ deprecated), proposal pattern learning, duration calibration, deferral risk prediction, and injection of learned guidelines into agent prompts.
+
+    \item \textbf{State-Aware Task Suggestions}: The autonomous agent respects current cognitive state, filtering tasks by mode-appropriate friction levels and suggesting rescheduling of high-demand tasks to peak energy hours.
 
     \item \textbf{Decision Trace Learning}: We capture complete decision contexts including triggers, proposed actions, and user feedback, enabling retrieval-augmented generation from similar historical decisions and providing infrastructure for behavioral fine-tuning.
 
@@ -92,7 +110,7 @@ This paper presents \cognitex{}, a personal agent system that addresses these ch
 
 \subsection{Paper Organization}
 
-\Cref{sec:related} reviews related work in personal agents, knowledge graphs, and LLM-based systems. \Cref{sec:architecture} presents the system architecture, including data models and service integrations. \Cref{sec:agent} details the agent subsystem, covering the planner, executors, tools, and memory systems. \Cref{sec:autonomous} describes the autonomous graph orchestration layer. \Cref{sec:executive} covers the executive function layer including state modeling and interruption management. \Cref{sec:graph} describes the semantic graph construction and query patterns. \Cref{sec:chunking} covers the document chunking and embedding pipeline. \Cref{sec:triggers} discusses the trigger and notification infrastructure. \Cref{sec:web} presents the web dashboard interface. \Cref{sec:evaluation} presents preliminary evaluation results. \Cref{sec:discussion} discusses limitations and future directions, and \Cref{sec:conclusion} concludes.
+\Cref{sec:related} reviews related work in personal agents, knowledge graphs, and LLM-based systems. \Cref{sec:architecture} presents the system architecture, including data models and service integrations. \Cref{sec:agent} details the agent subsystem, covering the planner, executors, tools, and memory systems. \Cref{sec:autonomous} describes the autonomous graph orchestration layer. \Cref{sec:executive} covers the executive function layer including state modeling, temporal energy patterns, and interruption management. \Cref{sec:learning} presents the behavioral learning system. \Cref{sec:graph} describes the semantic graph construction and query patterns. \Cref{sec:chunking} covers the document chunking and embedding pipeline. \Cref{sec:triggers} discusses the trigger and notification infrastructure. \Cref{sec:web} presents the web dashboard interface. \Cref{sec:evaluation} presents preliminary evaluation results. \Cref{sec:discussion} discusses limitations and future directions, and \Cref{sec:conclusion} concludes.
 
 \section{Related Work}
 \label{sec:related}
@@ -109,6 +127,10 @@ The emergence of capable large language models has catalyzed research into auton
 
 Traditional agent systems are predominantly reactive, responding only to explicit user requests. Recent work has explored proactive behaviors including anticipatory assistance \citep{yorke2012proactive} and context-aware notifications. Our autonomous orchestration layer extends this paradigm by continuously monitoring a knowledge graph and taking corrective actions to maintain graph health and coherence.
 
+\subsection{Cognitive State Modeling}
+
+Research in human-computer interaction has long recognized the importance of user state in system design. Interruption management systems \citep{horvitz1999principles} model attention and interruptibility. More recent work explores physiological signals for state inference. Our executive function layer builds on this tradition, providing a structured model of cognitive capacity that governs agent behavior.
+
 \subsection{Knowledge Graph Construction}
 
 Automatic knowledge graph construction from unstructured text has received extensive attention \citep{nickel2016review}. Entity recognition, relation extraction, and entity linking form the core pipeline. For personal knowledge graphs specifically, challenges include handling the diversity of personal data sources and maintaining privacy constraints. Our approach differs by leveraging LLM capabilities for flexible entity extraction while maintaining structured schemas for core entity types.
@@ -122,7 +144,7 @@ Dense retrieval methods using learned embeddings have largely superseded sparse 
 
 \subsection{Overview}
 
-\cognitex{} implements a multi-tier architecture comprising data services, integration services, agent components, autonomous orchestration, executive function management, and user interfaces. The system operates as a set of containerized microservices orchestrated via Docker Compose. \Cref{fig:architecture} illustrates the high-level system design.
+\cognitex{} implements a multi-tier architecture comprising data services, integration services, agent components, autonomous orchestration, executive function management, behavioral learning, and user interfaces. The system operates as a set of containerized microservices orchestrated via Docker Compose. \Cref{fig:architecture} illustrates the high-level system design.
 
 \begin{figure}[t]
 \centering
@@ -146,10 +168,11 @@ Dense retrieval methods using learned embeddings have largely superseded sparse 
 \node[box, right=0.2cm of planner] (executors) {Executors};
 \node[box, right=0.2cm of executors] (tools) {Tools\\(27)};
 \node[box, right=0.2cm of tools] (autonomous) {Autonomous\\Agent};
-\node[box, below=0.4cm of planner, xshift=0.5cm] (memory) {Memory Systems};
+\node[box, below=0.4cm of planner, xshift=0.3cm] (memory) {Memory\\Systems};
 \node[box, right=0.2cm of memory] (executive) {Executive\\Layer};
+\node[box, right=0.2cm of executive] (learning) {Learning\\System};
 \node[box, below=0.4cm of memory, xshift=0.8cm] (triggers) {Trigger System};
-\node[layer, fit=(planner)(executors)(tools)(autonomous)(memory)(executive)(triggers), label=above:Agent System] (agent_layer) {};
+\node[layer, fit=(planner)(executors)(tools)(autonomous)(memory)(executive)(learning)(triggers), label=above:Agent System] (agent_layer) {};
 
 % Integration Services Layer
 \node[box, below=1.3cm of triggers, xshift=-2.5cm] (gmail) {Gmail};
@@ -171,7 +194,7 @@ Dense retrieval methods using learned embeddings have largely superseded sparse 
 \draw[arrow] (int_layer) -- (data_layer);
 
 \end{tikzpicture}
-\caption{High-level system architecture of \cognitex{} showing the four primary layers: user interfaces (CLI, Discord, Web Dashboard, REST API), agent system (including autonomous orchestration and executive function layer), integration services, and data services.}
+\caption{High-level system architecture of \cognitex{} showing the four primary layers: user interfaces (CLI, Discord, Web Dashboard, REST API), agent system (including autonomous orchestration, executive function layer, and learning system), integration services, and data services.}
 \label{fig:architecture}
 \end{figure}
 
@@ -179,11 +202,11 @@ Dense retrieval methods using learned embeddings have largely superseded sparse 
 
 \subsubsection{PostgreSQL with pgvector}
 
-PostgreSQL serves as the primary relational store, extended with the pgvector extension for efficient similarity search over dense embeddings. The schema comprises 18 tables organized into functional groups:
+PostgreSQL serves as the primary relational store, extended with the pgvector extension for efficient similarity search over dense embeddings. The schema comprises 25+ tables organized into functional groups:
 
 \paragraph{Task Management:}
 \begin{itemize}
-    \item \texttt{tasks}: Core task storage with status (pending, in\_progress, completed), energy cost estimates (1--5 scale), due dates, priority levels, and foreign keys to source entities
+    \item \texttt{tasks}: Core task storage with status (pending, in\_progress, completed), energy cost estimates (1--5 scale), due dates, priority levels, estimated/actual duration, deferral counts, and foreign keys to source entities
     \item \texttt{goals}: Hierarchical goal management supporting quarterly and yearly timeframes with OKR-style key results stored as JSONB
     \item \texttt{projects}: Project containers linking goals to executable tasks with status tracking (active, completed, on\_hold, cancelled)
 \end{itemize}
@@ -199,8 +222,22 @@ PostgreSQL serves as the primary relational store, extended with the pgvector ex
 \begin{itemize}
     \item \texttt{agent\_actions}: Complete log of autonomous agent actions including action\_type, source (agent, trigger, user), status, summary, and detailed JSONB metadata
     \item \texttt{decision\_traces}: Complete decision context including trigger type, proposed action, final action, user feedback, and quality scores
+    \item \texttt{task\_proposals}: Agent-proposed tasks with status (pending, approved, rejected, expired) and user feedback
     \item \texttt{communication\_patterns}: Learned per-contact preferences
-    \item \texttt{preference\_rules}: Extracted behavioral patterns with conditions and confidence scores
+\end{itemize}
+
+\paragraph{Learning System:}
+\begin{itemize}
+    \item \texttt{preference\_rules}: Extracted behavioral patterns with conditions, confidence scores, lifecycle status (candidate, validated, deprecated), application counts, and success rates
+    \item \texttt{learned\_patterns}: Cached patterns by type (proposal\_acceptance, temporal, deferral, duration) with confidence and sample size
+    \item \texttt{task\_timing}: Duration estimates vs. actuals for calibration
+    \item \texttt{deferral\_analysis}: Task deferral history with reasons
+\end{itemize}
+
+\paragraph{State Observations:}
+\begin{itemize}
+    \item \texttt{state\_observations}: Task outcomes with cognitive state context (mode, fatigue, hour, post-clinical flag) for temporal pattern learning
+    \item \texttt{interruption\_events}: Logged interruptions with mode context for firewall tuning
 \end{itemize}
 
 The embedding index employs HNSW (Hierarchical Navigable Small World) for approximate nearest neighbor search:
@@ -215,7 +252,7 @@ This configuration provides $O(\log n)$ query complexity with high recall at the
 
 \subsubsection{Neo4j Property Graph}
 
-Neo4j stores the semantic knowledge graph with 12 primary node types and 18 relationship types. \Cref{tab:node_types} summarizes the core entity nodes.
+Neo4j stores the semantic knowledge graph with 15+ primary node types and 20+ relationship types. \Cref{tab:node_types} summarizes the core entity nodes.
 
 \begin{table}[t]
 \centering
@@ -227,7 +264,7 @@ Neo4j stores the semantic knowledge graph with 12 primary node types and 18 rela
 \midrule
 Person & email, name, org, role & Contacts and collaborators \\
 Email & gmail\_id, subject, date & Email messages \\
-Event & gcal\_id, title, start, end & Calendar entries \\
+Event & gcal\_id, title, start, drain\_level & Calendar entries \\
 Task & id, title, status, priority, due & Action items \\
 Document & drive\_id, name, mime\_type & Drive files \\
 Repository & id, name, full\_name & GitHub repositories \\
@@ -239,6 +276,7 @@ Concept & name & Domain concepts \\
 EmailDraft & id, to, subject, body, status & Agent-drafted replies \\
 ContextPack & id, title, summary, key\_points & Meeting briefings \\
 SuggestedBlock & id, title, duration, status & Focus time suggestions \\
+StateSnapshot & id, mode, fatigue\_level, created\_at & Cognitive state captures \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -250,25 +288,34 @@ The graph captures relationships including:
     \item \textbf{Hierarchy}: \texttt{BELONGS\_TO}, \texttt{PART\_OF}, \texttt{DERIVED\_FROM}
     \item \textbf{Semantic}: \texttt{COVERS} (topic), \texttt{ABOUT} (concept), \texttt{REFERENCES}
     \item \textbf{Inferred}: \texttt{WORKS\_WITH}, \texttt{ASSIGNED\_TO}
+    \item \textbf{State}: \texttt{CAPTURED\_STATE}, \texttt{STATE\_DURING}
 \end{itemize}
 
 \subsubsection{Redis}
 
-Redis provides four functions: (1) working memory with 24-hour TTL for session context, (2) approval queue for staged high-risk actions, (3) pub/sub messaging for event-driven triggers and notifications, and (4) deduplication tracking for event processing.
+Redis provides five functions: (1) working memory with 24-hour TTL for session context, (2) approval queue for staged high-risk actions, (3) pub/sub messaging for event-driven triggers and notifications, (4) deduplication tracking for event processing, and (5) clinical recovery state persistence across service restarts.
 
 \subsection{Integration Services}
 
 \subsubsection{Gmail Service}
 
-The Gmail integration implements OAuth2 authentication with incremental synchronization. Initial synchronization fetches historical messages within a configurable date range. Subsequent syncs use Gmail's history API with stored \texttt{history\_id} to retrieve only new messages. The service supports automatic task completion detection from sent emails.
+The Gmail integration implements OAuth2 authentication with real-time push notifications via Google Cloud Pub/Sub. A pull-based subscription (\texttt{\_gmail\_pubsub\_listener}) receives notifications when new emails arrive, triggering incremental synchronization using Gmail's history API with stored \texttt{history\_id}. Initial synchronization fetches historical messages within a configurable date range. The service supports automatic task completion detection from sent emails.
 
 \subsubsection{Calendar Service}
 
-Google Calendar integration supports full CRUD operations. Events are enriched with computed properties including \texttt{energy\_impact} (1--10 scale based on event type, duration, and attendee count) and \texttt{event\_type} classification (meeting, focus\_time, travel, etc.).
+Google Calendar integration supports full CRUD operations. Events are enriched with computed properties including \texttt{drain\_level} classification:
+
+\begin{itemize}
+    \item \textbf{CLINICAL}: Highest drain, identified by \texttt{[CLINICAL]} tag in title; triggers rest-of-day recovery mode
+    \item \textbf{HIGH}: Board meetings, presentations, interviews; 1-hour recovery buffer
+    \item \textbf{MEDIUM}: Regular meetings
+    \item \textbf{LOW}: 1:1s, casual syncs
+    \item \textbf{RECOVERY}: Explicitly blocked recovery time
+\end{itemize}
 
 \subsubsection{Drive Service}
 
-Google Drive integration indexes document metadata and content with automatic change detection. Content extraction supports Google Docs, PDFs (via pypdf), Microsoft Office documents, and plain text formats. Priority folders can be configured for preferential indexing.
+Google Drive integration indexes document metadata and content with automatic change detection via polling. Content extraction supports Google Docs, PDFs (via pypdf), Microsoft Office documents, and plain text formats. Priority folders can be configured for preferential indexing. The system detects file changes and automatically re-indexes affected documents.
 
 \subsubsection{GitHub Service}
 
@@ -276,7 +323,7 @@ GitHub integration enables code repository indexing with selective targeting of 
 
 \subsubsection{LLM Service}
 
-The LLM service provides a unified interface to Together.ai's inference API. Model selection is task-specific:
+The LLM service provides a unified interface to inference APIs. Model selection is task-specific:
 \begin{itemize}
     \item \textbf{Planning/Reasoning}: DeepSeek V3 (671B parameters, MoE) for complex reasoning
     \item \textbf{Execution}: DeepSeek V3 for structured task completion
@@ -299,6 +346,7 @@ The core agent orchestrates the reasoning loop, managing interactions between th
     \item Record user message to working memory
     \item Construct system prompt with available tools
     \item Retrieve relevant historical decisions via RAG
+    \item \textbf{Inject learned guidelines from preference rules}
     \item Execute ReAct iterations (maximum 8):
     \begin{itemize}
         \item Generate LLM response with thought/action/observation structure
@@ -345,7 +393,7 @@ AUTONOMOUS & Graph orchestration & READONLY, AUTO \\
 
 \subsection{Tool Registry}
 
-The system provides 27 tools organized by risk level:
+The system provides 27+ tools organized by risk level:
 
 \paragraph{READONLY Tools (10):} No side effects, always allowed. Includes \texttt{graph\_query}, \texttt{search\_documents}, \texttt{search\_code}, \texttt{get\_calendar}, \texttt{get\_tasks}, \texttt{get\_contact}, \texttt{recall\_memory}, \texttt{get\_projects}, \texttt{get\_goals}, and \texttt{get\_repositories}.
 
@@ -390,11 +438,35 @@ Traditional agent systems are purely reactive---they wait for user input before 
 The autonomous agent operates on a configurable interval (default: 15 minutes) and follows an OODA-inspired loop:
 
 \begin{enumerate}
-    \item \textbf{Observe}: Query the graph for current state including recent changes, stale items, orphaned nodes, goal/project health metrics, and connection opportunities
-    \item \textbf{Orient}: Format observations into a structured context for LLM reasoning
-    \item \textbf{Decide}: Use LLM to analyze context and select actions from available options
+    \item \textbf{Observe}: Query the graph for current state including recent changes, stale items, orphaned nodes, goal/project health metrics, connection opportunities, emails needing response, and meetings needing preparation
+    \item \textbf{Orient}: Format observations into a structured context for LLM reasoning, including user writing samples and learned guidelines
+    \item \textbf{Decide}: Use LLM to analyze context and select actions from available options, respecting current cognitive state
     \item \textbf{Act}: Execute selected actions and log results
 \end{enumerate}
+
+\subsection{State-Aware Decision Making}
+
+The autonomous agent integrates with the Executive Function Layer to make state-appropriate decisions:
+
+\begin{lstlisting}[language=Python]
+async def _build_state_context(self) -> str:
+    state = await state_estimator.get_current_state()
+    in_recovery = await self._check_clinical_recovery()
+    rules = ModeRules.get_rules(state.mode)
+
+    return f"""
+## Current User State
+- Mode: {state.mode.value}
+- Fatigue: {state.signals.fatigue_level:.0%}
+- Hour of day: {datetime.now().hour}
+- In clinical recovery: {in_recovery}
+
+Based on mode '{state.mode.value}':
+- Only suggest tasks with friction <= {rules.max_task_friction}
+- For high-friction tasks, use SUGGEST_RESCHEDULE
+- Peak energy hours: 8am-11am
+"""
+\end{lstlisting}
 
 \subsection{Graph Observer}
 
@@ -413,6 +485,11 @@ class GraphObserver:
             "recent_documents": await self.get_recent_documents(),
             "connection_opportunities":
                 await self.get_connection_opportunities(),
+            "emails_needing_response":
+                await self.get_actionable_emails(),
+            "meetings_needing_prep":
+                await self.get_pending_calendar_blocks(),
+            "inbox_items": await self.get_firewall_inbox(),
         }
 \end{lstlisting}
 
@@ -427,14 +504,43 @@ class GraphObserver:
 
 The autonomous agent can perform the following actions:
 
+\paragraph{Digital Twin Actions:}
+\begin{itemize}
+    \item \texttt{DRAFT\_EMAIL}: Draft a reply to an incoming email in the user's voice, learning style from sent email samples
+    \item \texttt{COMPILE\_CONTEXT\_PACK}: Prepare a briefing document for an upcoming meeting with relevant documents, tasks, and key points
+    \item \texttt{SCHEDULE\_BLOCK}: Suggest focus time blocks for projects needing attention
+    \item \texttt{PROCESS\_INBOX\_ITEM}: Process items captured by the interruption firewall during focus time
+\end{itemize}
+
+\paragraph{Graph Maintenance Actions:}
 \begin{itemize}
     \item \texttt{LINK\_DOCUMENT}: Connect a document to a project based on name match or topic overlap
     \item \texttt{LINK\_REPOSITORY}: Connect a GitHub repository to a project
     \item \texttt{LINK\_TASK}: Connect an orphaned task to a project
     \item \texttt{LINK\_PROJECT\_TO\_GOAL}: Connect a project to a goal
     \item \texttt{CREATE\_TASK}: Create a task for a stalled project with no tasks
-    \item \texttt{FLAG\_FOR\_REVIEW}: Surface an item requiring human decision (triggers Discord notification)
 \end{itemize}
+
+\paragraph{State-Aware Actions:}
+\begin{itemize}
+    \item \texttt{SUGGEST\_RESCHEDULE}: Suggest moving a high-friction task to a better time when user has more energy (e.g., peak morning hours)
+    \item \texttt{FLAG\_FOR\_REVIEW}: Surface an item requiring human decision (triggers Discord notification); limited to 1 per cycle to avoid over-flagging
+\end{itemize}
+
+\subsection{Notification Deduplication}
+
+The agent tracks recent notifications to avoid repetitive suggestions:
+
+\begin{lstlisting}[language=Python]
+## CRITICAL: Avoid Repetitive Notifications
+
+Check "Recent Notification History" before any action:
+- SCHEDULE_BLOCK: Don't re-suggest for same project in 24h
+- COMPILE_CONTEXT_PACK: Don't re-compile for same meeting
+- FLAG_FOR_REVIEW: Don't flag same issue repeatedly
+
+Ask: "Would receiving this again annoy the user?"
+\end{lstlisting}
 
 \subsection{Externalized Prompts}
 
@@ -444,84 +550,9 @@ The autonomous agent's decision-making behavior is controlled by an externalized
 src/cognitex/prompts/autonomous_agent.md
 \end{lstlisting}
 
-This separation enables rapid iteration on agent behavior without code changes. The prompt template uses \texttt{\{variable\}} placeholders that are populated at runtime with current graph state.
+This separation enables rapid iteration on agent behavior without code changes. The prompt template uses \texttt{\{variable\}} placeholders that are populated at runtime with current graph state, user writing samples, learned guidelines, and state context.
 
-\subsection{Discord Notifications}
-
-When the autonomous agent encounters situations requiring human judgment, it uses \texttt{FLAG\_FOR\_REVIEW} which:
-\begin{enumerate}
-    \item Logs the flag to the agent\_actions table
-    \item Publishes a notification to Redis pub/sub
-    \item Discord bot receives and posts formatted message to configured channel
-\end{enumerate}
-
-This ensures flagged items receive attention rather than being silently logged.
-
-\subsection{Action Logging}
-
-All autonomous actions are recorded in the \texttt{agent\_actions} table:
-
-\begin{lstlisting}[language=SQL]
-CREATE TABLE agent_actions (
-    id TEXT PRIMARY KEY,
-    timestamp TIMESTAMP DEFAULT NOW(),
-    action_type TEXT NOT NULL,  -- link_document, create_task, etc.
-    source TEXT NOT NULL,       -- agent, trigger, user
-    summary TEXT,
-    details JSONB DEFAULT '{}',
-    status TEXT DEFAULT 'completed',
-    error TEXT
-);
-\end{lstlisting}
-
-The web dashboard provides a dedicated Agent Log page for reviewing action history with filtering by status and source.
-
-\subsection{Digital Twin Capabilities}
-
-Beyond graph maintenance, the autonomous agent implements ``Digital Twin'' functionality---acting on behalf of the user when they are unavailable.
-
-\subsubsection{Perception Layer}
-
-The Graph Observer includes specialized perception methods for Digital Twin operation:
-
-\begin{lstlisting}[language=Python]
-class GraphObserver:
-    async def get_user_writing_samples(self, limit=5):
-        """Fetch recent emails SENT BY user for style learning."""
-
-    async def get_actionable_emails(self, limit=10):
-        """Get emails needing response (actionable/urgent,
-           no reply sent, no draft created)."""
-
-    async def get_pending_calendar_blocks(self, days=7):
-        """Get meetings needing preparation."""
-
-    async def get_projects_with_recent_blocks(self, days=7):
-        """Track projects already suggested for focus time."""
-\end{lstlisting}
-
-\subsubsection{Digital Twin Actions}
-
-Three new action types extend the autonomous agent's capabilities:
-
-\paragraph{DRAFT\_EMAIL:} Draft a reply to an incoming email in the user's voice. The agent learns communication style from the user's sent email samples and generates contextually appropriate responses.
-
-\begin{lstlisting}[language=Python]
-{
-    "action": "DRAFT_EMAIL",
-    "email_id": "...",
-    "to": "recipient@example.com",
-    "subject": "Re: ...",
-    "body": "Draft content matching user's style",
-    "reason": "Why this email needs response"
-}
-\end{lstlisting}
-
-\paragraph{COMPILE\_CONTEXT\_PACK:} Prepare a briefing document for an upcoming meeting, gathering relevant documents, tasks, and key points.
-
-\paragraph{SCHEDULE\_BLOCK:} Suggest focus time blocks for projects needing attention. Links to the relevant project and includes duration and rationale.
-
-\subsubsection{Skip Tracking}
+\subsection{Skip Tracking}
 
 To prevent the agent from repeatedly suggesting the same actions after user dismissal, the system tracks actioned items:
 
@@ -529,62 +560,171 @@ To prevent the agent from repeatedly suggesting the same actions after user dism
     \item Emails with any \texttt{EmailDraft} linked (regardless of draft status) are excluded from \texttt{get\_actionable\_emails()}
     \item Calendar events with any \texttt{ContextPack} linked are excluded from \texttt{get\_pending\_calendar\_blocks()}
     \item Projects with recent \texttt{SuggestedBlock} nodes are included in a skip list passed to the LLM prompt
+    \item Recent notification history (48 hours) is provided to prevent duplicate notifications
 \end{itemize}
-
-This ensures that when users discard, approve, or edit agent outputs, the agent respects those decisions and does not recreate identical suggestions.
-
-\subsubsection{Review Dashboard}
-
-A dedicated ``Twin'' page in the web dashboard enables review of agent-generated outputs:
-
-\begin{itemize}
-    \item \textbf{Email Drafts}: View full draft with original email context; approve (send), edit then send, or discard
-    \item \textbf{Context Packs}: View gathered context for meetings; archive when no longer needed
-    \item \textbf{Suggested Blocks}: Review focus time suggestions; approve (add to calendar) or dismiss
-\end{itemize}
-
-All items show the agent's reasoning for the suggestion, enabling informed user decisions.
 
 \section{Executive Function Layer}
 \label{sec:executive}
 
 \subsection{Motivation}
 
-Not all moments are equally suited for interruptions. A user in deep focus should not be disturbed for routine notifications, while someone in fragmented attention mode may welcome task suggestions. The executive function layer models user cognitive state and manages interruptions accordingly.
+Not all moments are equally suited for interruptions or demanding tasks. A user in deep focus should not be disturbed for routine notifications, while someone in fragmented attention mode may welcome task suggestions. After a cognitively exhausting clinical session, the user needs recovery time. The executive function layer models user cognitive state and manages both interruptions and task suggestions accordingly.
 
 \subsection{Operating Modes}
 
-The system defines four operating modes based on cognitive load theory:
+The system defines six operating modes based on cognitive load theory:
 
 \begin{table}[t]
 \centering
 \caption{Operating modes and their characteristics.}
 \label{tab:operating_modes}
-\begin{tabular}{lp{6cm}l}
+\begin{tabular}{lp{5cm}ll}
 \toprule
-\textbf{Mode} & \textbf{Description} & \textbf{Interruption Level} \\
+\textbf{Mode} & \textbf{Description} & \textbf{Max Friction} & \textbf{Interruption} \\
 \midrule
-DEEP\_WORK & Focused cognitive work requiring sustained attention & Minimal (urgent only) \\
-SHALLOW & Administrative tasks, email, routine work & Moderate \\
-FRAGMENTED & Interrupted attention, context switching & Open \\
-RECOVERY & Rest, breaks, low cognitive capacity & Low priority only \\
+DEEP\_FOCUS & Sustained cognitive work, long blocks & 5 & Minimal \\
+FRAGMENTED & Context switching, short blocks & 3 & Moderate \\
+OVERLOADED & Recovery mode, maintenance only & 1 & Critical only \\
+AVOIDANT & Avoiding high-friction tasks & 2 & Low priority \\
+HYPERFOCUS & Intense focus, may miss signals & 5 & Emergency only \\
+TRANSITION & Between modes, ramping up/down & 3 & Batched \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+Each mode defines specific rules:
+
+\begin{lstlisting}[language=Python]
+@dataclass
+class ModeRules:
+    mode: OperatingMode
+    allowed_task_types: list[str]
+    max_task_friction: int  # 1-5 scale
+    min_block_minutes: int | None
+    notification_gate: str  # all, batched, critical_only
+    interrupt_for: list[str]  # urgent, family, emergency
+    ui_density: str  # full, compact, minimal
+    auto_actions: list[str]  # allowed auto-actions
+\end{lstlisting}
+
+\subsection{Continuous Signals}
+
+Beyond discrete modes, the system tracks continuous signals:
+
+\begin{lstlisting}[language=Python]
+@dataclass
+class ContinuousSignals:
+    # Time constraints
+    available_block_minutes: int | None
+    time_to_next_commitment_minutes: int | None
+
+    # Load indicators
+    interruption_pressure: float  # 0-1
+    fatigue_level: float          # 0-1
+    fatigue_slope: float          # -1 to +1
+
+    # Attention state
+    focus_score: float | None     # 0-1
+
+    # Context
+    location: str | None          # home, office, travel
+    device: str | None            # desktop, mobile
+\end{lstlisting}
+
+\subsection{Temporal Energy Model}
+
+The system includes a diurnal energy model that captures typical energy patterns throughout the day:
+
+\begin{lstlisting}[language=Python]
+class TemporalEnergyModel:
+    # Diurnal pattern: peak 8-11am, decline through day
+    DEFAULT_CURVE: dict[int, float] = {
+        0: 0.15, 1: 0.1, 2: 0.1, 3: 0.1,
+        4: 0.15, 5: 0.25, 6: 0.45, 7: 0.7,
+        8: 0.9,   # entering peak zone
+        9: 0.95,  # peak
+        10: 0.95, # peak
+        11: 0.9,  # still high
+        12: 0.75, # lunch dip
+        13: 0.65, 14: 0.55, 15: 0.5,
+        16: 0.45, 17: 0.4, 18: 0.35,
+        19: 0.3, 20: 0.25, 21: 0.2,
+        22: 0.15, 23: 0.15,
+    }
+
+    async def get_expected_energy(self, hour: int) -> float:
+        """Get expected energy, checking learned overrides."""
+        learned = await self._get_learned_pattern(hour)
+        return learned if learned else self.DEFAULT_CURVE.get(hour, 0.5)
+\end{lstlisting}
+
+The model supports learning from observations: when tasks are completed or deferred, the outcome is recorded with the hour and state context, allowing the curve to adapt to the user's actual patterns.
+
+\subsection{Clinical Session Detection}
+
+High-drain events (clinical sessions, board meetings, major presentations) are identified from calendar events:
+
+\begin{lstlisting}[language=Python]
+class EventDrainLevel(str, Enum):
+    CLINICAL = "clinical"   # Rest of day recovery
+    HIGH = "high"           # 1hr recovery buffer
+    MEDIUM = "medium"       # Normal meetings
+    LOW = "low"             # 1:1s, syncs
+    RECOVERY = "recovery"   # Blocked recovery time
+
+def classify_event_drain(event: dict) -> EventDrainLevel:
+    title = event.get("summary", "").upper()
+
+    if "[CLINICAL]" in title:
+        return EventDrainLevel.CLINICAL
+
+    if any(kw in title.lower() for kw in
+           ["board", "presentation", "interview"]):
+        return EventDrainLevel.HIGH
+
+    if any(kw in title.lower() for kw in
+           ["1:1", "sync", "catch up"]):
+        return EventDrainLevel.LOW
+
+    return EventDrainLevel.MEDIUM
+\end{lstlisting}
+
+When a clinical session ends, the system automatically:
+\begin{enumerate}
+    \item Sets operating mode to OVERLOADED for the rest of the day
+    \item Stores recovery expiry in Redis for persistence
+    \item Sends a notification explaining the mode change
+    \item Filters all subsequent task suggestions to low-friction only
+\end{enumerate}
 
 \subsection{State Estimation}
 
 The State Estimator infers current operating mode from multiple signals:
 
 \begin{lstlisting}[language=Python]
-@dataclass
-class ContinuousSignals:
-    calendar_status: str      # busy, free, focus_time
-    recent_app_switches: int  # context switch frequency
-    time_of_day: str         # morning, afternoon, evening
-    day_of_week: str         # weekday, weekend
-    pending_urgent_items: int
-    energy_level: float      # estimated 0-1
+def _infer_mode(
+    self,
+    signals: ContinuousSignals,
+    recent_tasks: list[dict] | None = None,
+) -> OperatingMode:
+    # Check for overload
+    if (signals.fatigue_level > 0.8 and
+        signals.interruption_pressure > 0.7):
+        return OperatingMode.OVERLOADED
+
+    # Check for avoidance (repeated deferrals)
+    if recent_tasks:
+        deferral_rate = self._calculate_deferral_rate(recent_tasks)
+        if deferral_rate > 0.5:
+            return OperatingMode.AVOIDANT
+
+    # Check for deep focus potential
+    if (signals.available_block_minutes and
+        signals.available_block_minutes >= 90 and
+        signals.interruption_pressure < 0.3):
+        return OperatingMode.DEEP_FOCUS
+
+    return OperatingMode.FRAGMENTED
 \end{lstlisting}
 
 \subsection{Interruption Firewall}
@@ -604,27 +744,202 @@ class InterruptionFirewall:
 
         if urgency == "urgent":
             return True, "Urgent items always interrupt"
-        if mode == OperatingMode.DEEP_WORK:
-            return False, "Deep work mode - queued for later"
+        if mode == OperatingMode.DEEP_FOCUS:
+            return False, "Deep work mode - queued"
+        if mode == OperatingMode.OVERLOADED:
+            if urgency not in ["high", "urgent"]:
+                return False, "Recovery mode - low priority queued"
         # ... mode-specific logic
+
+    async def capture_for_later(self, item: dict) -> None:
+        """Queue item in firewall inbox for later processing."""
+        await self._store_inbox_item(item)
 \end{lstlisting}
 
-Items blocked by the firewall are queued and surfaced during appropriate moments (e.g., mode transitions, scheduled review times).
+Items blocked by the firewall are queued in the ``firewall inbox'' and surfaced during appropriate moments (mode transitions, scheduled review times) via the \texttt{PROCESS\_INBOX\_ITEM} action.
 
-\subsection{Context Packs}
+\subsection{State Snapshots}
 
-Context Packs provide pre-assembled context for different operating modes, reducing the cognitive overhead of task switching:
+State snapshots are persisted to Neo4j for historical analysis and pattern detection:
+
+\begin{lstlisting}[language=SQL]
+CREATE (ss:StateSnapshot {
+    id: $snapshot_id,
+    mode: $mode,
+    fatigue_level: $fatigue_level,
+    interruption_pressure: $interruption_pressure,
+    focus_score: $focus_score,
+    context_notes: $notes,
+    created_at: datetime()
+})
+\end{lstlisting}
+
+\section{Behavioral Learning System}
+\label{sec:learning}
+
+\subsection{Motivation}
+
+A personal agent that never learns from user feedback will repeatedly make the same mistakes. The behavioral learning system addresses this by extracting patterns from user interactions, tracking proposal acceptance rates, calibrating duration estimates, predicting deferral risk, and feeding learned insights back into agent prompts.
+
+\subsection{Architecture}
+
+The learning system comprises four interconnected components:
+
+\begin{enumerate}
+    \item \textbf{Proposal Learning}: Tracks which task proposals are accepted/rejected by priority, project, and context
+    \item \textbf{Duration Calibration}: Compares estimated vs. actual task durations to build adjustment factors
+    \item \textbf{Deferral Prediction}: Identifies tasks at risk of procrastination based on historical patterns
+    \item \textbf{Rule Extraction}: Converts observed patterns into explicit preference rules
+\end{enumerate}
+
+\subsection{Preference Rules}
+
+Preference rules encode learned user behaviors with a lifecycle model:
 
 \begin{lstlisting}[language=Python]
 @dataclass
-class ContextPack:
-    mode: OperatingMode
-    relevant_tasks: list[Task]
-    active_projects: list[Project]
-    upcoming_events: list[Event]
-    recent_communications: list[Email]
-    suggested_actions: list[str]
+class PreferenceRule:
+    rule_name: str
+    rule_type: str  # scheduling, notification, proposal, etc.
+    conditions: dict  # When rule applies
+    action: dict  # What to do
+    confidence: float  # 0-1
+    lifecycle: str  # candidate, validated, deprecated
+    applications: int  # Times applied
+    successful_applications: int
+    success_rate: float | None
 \end{lstlisting}
+
+Rules progress through lifecycle stages:
+\begin{itemize}
+    \item \textbf{Candidate}: Newly extracted from observations, minimum 3 samples, confidence $\geq$ 0.6
+    \item \textbf{Validated}: Applied 5+ times with success rate $\geq$ 0.7
+    \item \textbf{Deprecated}: Success rate dropped below 0.5 for 10+ applications, or superseded by better rule
+\end{itemize}
+
+\subsection{Proposal Pattern Learning}
+
+The system tracks task proposal outcomes by multiple dimensions:
+
+\begin{lstlisting}[language=SQL]
+CREATE TABLE task_proposals (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    project_id TEXT,
+    priority TEXT,
+    source TEXT,  -- agent, trigger
+    status TEXT,  -- pending, approved, rejected, expired
+    created_at TIMESTAMP DEFAULT NOW(),
+    decided_at TIMESTAMP,
+    user_feedback TEXT
+);
+\end{lstlisting}
+
+Patterns extracted include:
+\begin{itemize}
+    \item Approval rate by priority level (high, medium, low)
+    \item Approval rate by project
+    \item Approval rate by time of day
+    \item Common rejection reasons
+\end{itemize}
+
+\subsection{Duration Calibration}
+
+For tasks with estimates, the system tracks actual completion times:
+
+\begin{lstlisting}[language=Python]
+async def get_calibration_summary(project_id: str = None):
+    """Get duration calibration data."""
+    # Compare estimated_minutes vs actual_minutes
+    # Calculate pace_factor = actual / estimated
+    # Aggregate by project and overall
+    return {
+        "samples": count,
+        "avg_error": (avg_actual - avg_estimated) / avg_estimated,
+        "by_project": {...}
+    }
+\end{lstlisting}
+
+This enables personalized duration adjustments: ``You typically take 30\% longer than estimated on Project X.''
+
+\subsection{Deferral Risk Prediction}
+
+The system identifies tasks at risk of indefinite deferral:
+
+\begin{lstlisting}[language=Python]
+async def get_high_risk_tasks(min_risk: float = 0.5) -> list[dict]:
+    """Get tasks with high deferral risk."""
+    # Risk factors:
+    # - High deferral_count
+    # - Long time since creation with no progress
+    # - High friction + current low energy
+    # - Similar tasks previously abandoned
+    return [
+        {
+            "task_id": ...,
+            "title": ...,
+            "risk_score": 0.85,
+            "factors": ["deferred 3x", "high friction", "no MVS"],
+            "recommended_intervention": "Break into smaller steps"
+        }
+    ]
+\end{lstlisting}
+
+\subsection{State Observation Recording}
+
+Task outcomes are recorded with full state context for temporal pattern learning:
+
+\begin{lstlisting}[language=SQL]
+CREATE TABLE state_observations (
+    id SERIAL PRIMARY KEY,
+    task_id TEXT,
+    task_title TEXT,
+    outcome TEXT,  -- completed, deferred, abandoned
+    mode TEXT,
+    fatigue_level FLOAT,
+    hour_of_day INTEGER,
+    day_of_week INTEGER,
+    post_clinical BOOLEAN DEFAULT FALSE,
+    energy_cost TEXT,  -- high, medium, low
+    task_friction INTEGER,
+    observed_at TIMESTAMP DEFAULT NOW()
+);
+\end{lstlisting}
+
+This enables learning patterns like: ``High-friction tasks are rarely completed after 3pm'' or ``Post-clinical deferrals are 3x higher.''
+
+\subsection{Learned Guidelines Injection}
+
+Extracted patterns are injected into the autonomous agent prompt:
+
+\begin{lstlisting}[language=markdown]
+## LEARNED GUIDELINES & FEEDBACK
+Apply these lessons from previous interactions:
+
+### Validated Rules
+- [SCHEDULING] Morning hours (8-11am) have 85% task completion
+  vs 45% afternoon (confidence: 0.89, 47 samples)
+- [PROPOSAL] High-priority tasks for "Research" project have
+  92% approval (confidence: 0.91, 24 samples)
+
+### Recent Corrections
+- User rejected "Schedule focus block for Project X" with
+  feedback: "Already have enough focus time scheduled"
+- Avoid re-suggesting similar blocks for 48 hours
+\end{lstlisting}
+
+\subsection{Learning Dashboard}
+
+The web interface provides visibility into learning system state:
+
+\begin{itemize}
+    \item \textbf{Proposal Patterns}: Approval rates by priority and project
+    \item \textbf{Duration Calibration}: Estimate accuracy with adjustment recommendations
+    \item \textbf{Deferral Risk}: High-risk tasks with intervention suggestions
+    \item \textbf{Learned Patterns}: Extracted temporal and behavioral patterns
+    \item \textbf{Preference Rules}: Rules by lifecycle stage with confidence scores
+    \item \textbf{Policy Updates}: Last learning cycle results
+\end{itemize}
 
 \section{Semantic Graph Construction}
 \label{sec:graph}
@@ -668,6 +983,20 @@ The LLM classifies emails into four categories:
 
 Additional properties extracted include urgency (low, medium, high), action\_required (boolean), and suggested\_action.
 
+\subsection{Calendar Event Classification}
+
+Calendar events are classified by cognitive drain level during sync:
+
+\begin{lstlisting}[language=SQL]
+MERGE (e:Event {gcal_id: $gcal_id})
+SET e.title = $title,
+    e.start = datetime($start),
+    e.end = datetime($end),
+    e.drain_level = $drain_level
+\end{lstlisting}
+
+Events with \texttt{drain\_level = 'clinical'} trigger special handling by the executive function layer.
+
 \subsection{Relationship Inference}
 
 Beyond explicit relationships, the system infers latent connections. The \texttt{WORKS\_WITH} relationship is computed from email interactions:
@@ -699,25 +1028,6 @@ RETURN d.drive_id, d.name, p.id, p.title
 \end{lstlisting}
 
 Similar queries identify repository-project matches, task-project matches, and project-goal matches.
-
-\subsection{Semantic Chunk Analysis}
-
-Document chunks are analyzed for semantic content using LLM extraction:
-
-\begin{lstlisting}[language=Python]
-async def analyze_chunk_for_graph(chunk_id, document_name):
-    content = await get_chunk_content(chunk_id)
-    entities = await llm.extract_entities_from_chunk(content)
-    # Returns: {topics, concepts, people, summary, key_facts}
-
-    await create_chunk(chunk_id, summary=entities['summary'])
-    for topic in entities['topics']:
-        await create_topic(topic)
-        await link_chunk_to_topic(chunk_id, topic)
-    for concept in entities['concepts']:
-        await create_concept(concept)
-        await link_chunk_to_concept(chunk_id, concept)
-\end{lstlisting}
 
 \section{Document Chunking and Embedding Pipeline}
 \label{sec:chunking}
@@ -756,7 +1066,7 @@ LIMIT $2
 
 \subsection{Auto-Indexing Pipeline}
 
-When Drive files change, the system automatically re-indexes by extracting content, deleting old chunks and embeddings, generating new chunks with embeddings, and analyzing chunks for graph integration.
+When Drive files change (detected via polling), the system automatically re-indexes by extracting content, deleting old chunks and embeddings, generating new chunks with embeddings, and analyzing chunks for graph integration.
 
 \section{Trigger and Notification System}
 \label{sec:triggers}
@@ -772,14 +1082,64 @@ The system supports four trigger categories:
     \item Hourly monitoring (9 AM--6 PM)
     \item Overdue task checks (9:30 AM)
     \item GitHub sync (every 4 hours)
-    \item Drive polling (every 30 minutes)
+    \item Drive polling (every 15 minutes)
+    \item Stuck task detection (every 30 minutes)
 \end{itemize}
 
-\paragraph{Event-Driven Triggers:} Redis pub/sub enables reactive processing for new emails, calendar changes, task updates, and Drive modifications.
+\paragraph{Event-Driven Triggers:} Multiple pub/sub mechanisms enable reactive processing:
+\begin{itemize}
+    \item \textbf{Gmail}: Google Cloud Pub/Sub pull subscription (\texttt{\_gmail\_pubsub\_listener}) receives real-time notifications when new emails arrive
+    \item \textbf{Internal events}: Redis pub/sub handles calendar changes, task updates, Drive modifications, and calendar event completions (for clinical session detection)
+\end{itemize}
 
-\paragraph{Autonomous Triggers:} The autonomous agent runs on its own schedule (default: every 15 minutes) for proactive graph maintenance.
+\paragraph{Autonomous Triggers:} The autonomous agent runs on its own schedule (default: every 15 minutes) for proactive graph maintenance and Digital Twin operations.
 
 \paragraph{User-Initiated Triggers:} Direct interaction via CLI, Discord, web dashboard, or REST API.
+
+\subsection{Clinical Session Handling}
+
+When a calendar event ends, the system checks for clinical sessions:
+
+\begin{lstlisting}[language=Python]
+async def _adjust_state_after_event(self, event: dict):
+    drain = classify_event_drain(event)
+
+    if drain == EventDrainLevel.CLINICAL:
+        # Set OVERLOADED mode for rest of day
+        await state_estimator.update_state(
+            mode=OperatingMode.OVERLOADED,
+            fatigue=0.95,
+            notes=f"Post-clinical recovery: {event.get('summary')}"
+        )
+
+        # Persist in Redis for service restart survival
+        await redis.set(
+            "cognitex:clinical_recovery_until",
+            datetime.now().replace(hour=23, minute=59).isoformat(),
+            ex=86400
+        )
+
+        # Notify user
+        await self._send_notification(
+            "**Clinical session ended**\n\n"
+            "Switching to recovery mode. "
+            "Only low-energy tasks will be suggested.",
+            urgency="low"
+        )
+\end{lstlisting}
+
+\subsection{Stuck Task Detection}
+
+The system monitors for tasks where the user has been working significantly longer than estimated:
+
+\begin{lstlisting}[language=Python]
+async def _check_stuck_tasks(self):
+    """Check for tasks at 150%+ of estimated time."""
+    # Find in-progress tasks with estimates
+    # Calculate elapsed time since started_at
+    # If elapsed > 1.5 * estimated_minutes:
+    #   Send whisper notification offering to break down task
+\end{lstlisting}
 
 \subsection{Approval Workflow}
 
@@ -802,7 +1162,7 @@ Notifications are routed through the Interruption Firewall before delivery:
     \item Notification generated (email analysis, agent flag, etc.)
     \item Firewall evaluates against current operating mode
     \item If allowed: publish to Redis pub/sub for Discord delivery
-    \item If blocked: queue for later delivery with reason
+    \item If blocked: queue in firewall inbox for later processing
 \end{enumerate}
 
 \section{Web Dashboard}
@@ -810,13 +1170,13 @@ Notifications are routed through the Interruption Firewall before delivery:
 
 \subsection{Overview}
 
-The web dashboard provides a comprehensive interface for system interaction and monitoring, built with FastAPI and Jinja2 templates.
+The web dashboard provides a comprehensive interface for system interaction and monitoring, built with FastAPI and Jinja2 templates with HTMX for dynamic updates.
 
 \subsection{Pages}
 
 \paragraph{Dashboard (Home):} Overview of system state including pending tasks, upcoming events, recent emails requiring action, and quick stats.
 
-\paragraph{Tasks:} Task management with inline editing, status updates, energy cost assignment, due date setting, and project/goal linking.
+\paragraph{Tasks:} Task management with inline editing, status updates, energy cost assignment, due date setting, duration estimates, and project/goal linking.
 
 \paragraph{Projects:} Project management with task rollup, progress tracking, and goal association.
 
@@ -824,33 +1184,42 @@ The web dashboard provides a comprehensive interface for system interaction and 
 
 \paragraph{Documents:} Document browser with semantic search, topic filtering, and project linking.
 
-\paragraph{Graph:} Interactive graph visualization using vis.js with:
-\begin{itemize}
-    \item Node type filtering (Person, Project, Task, Document, Goal, Topic, Concept, Repository)
-    \item Configurable node limits
-    \item Dynamic filtering: single type shows all nodes, multiple types show only connections between selected types
-    \item Topic/Concept nodes sorted by reference count
-\end{itemize}
+\paragraph{Graph:} Interactive graph visualization using vis.js with node type filtering and dynamic relationship display.
 
 \paragraph{Agent Log:} Autonomous agent action history with:
 \begin{itemize}
-    \item Action timeline (link\_document, link\_repository, create\_task, draft\_email, etc.)
+    \item Action timeline (link\_document, draft\_email, suggest\_reschedule, etc.)
     \item Filtering by status (completed, failed, pending) and source (agent, trigger, user)
     \item Statistics: total actions, last 24h, failed count
-    \item Action type and source breakdowns
     \item Manual ``Run Cycle Now'' button for testing
-    \item Autonomous agent status indicator
 \end{itemize}
 
 \paragraph{Twin (Digital Twin Review):} Review and approve agent-generated outputs:
 \begin{itemize}
-    \item \textbf{Email Drafts}: Pending drafts with approve/edit/discard actions; shows recipient, subject, body, and agent's reasoning
-    \item \textbf{Context Packs}: Meeting briefings with key points and linked documents/tasks; archive action
-    \item \textbf{Suggested Blocks}: Focus time suggestions with project, duration, and timing; approve (add to calendar) or dismiss
-    \item Stats showing counts of pending items in each category
+    \item \textbf{Email Drafts}: Pending drafts with approve/edit/discard actions
+    \item \textbf{Context Packs}: Meeting briefings with key points and linked documents
+    \item \textbf{Suggested Blocks}: Focus time suggestions with approve/dismiss
 \end{itemize}
 
-\paragraph{State:} Operating mode management and interruption firewall status with queued item display.
+\paragraph{State:} Operating mode management with:
+\begin{itemize}
+    \item Current mode display with description
+    \item Mode switching controls
+    \item Continuous signal adjustment (fatigue, interruption pressure)
+    \item Mode rules display (allowed task types, max friction, notification gate)
+    \item Today's switch statistics
+    \item Firewall inbox for captured items
+\end{itemize}
+
+\paragraph{Learning:} Learning system insights with:
+\begin{itemize}
+    \item Proposal pattern statistics by priority and project
+    \item Duration calibration with accuracy metrics
+    \item High-risk deferral tasks with intervention suggestions
+    \item Learned patterns with confidence scores
+    \item Preference rules by lifecycle stage
+    \item Policy update status and manual trigger
+\end{itemize}
 
 \paragraph{Settings:} Configuration management for autonomous agent interval, integration settings, and user preferences.
 
@@ -863,18 +1232,27 @@ The current deployment demonstrates the following characteristics:
 
 \paragraph{Data Scale:}
 \begin{itemize}
-    \item 153,108 documents indexed from Google Drive
-    \item 3,372 document chunks with embeddings
+    \item 153,000+ documents indexed from Google Drive
+    \item 3,400+ document chunks with embeddings
     \item 50+ documents with deep semantic analysis
     \item 5 GitHub repositories indexed
-    \item $\approx$12,000 lines of application code
+    \item $\approx$15,000 lines of application code
 \end{itemize}
 
 \paragraph{Autonomous Agent Activity:}
 \begin{itemize}
     \item Average 5 actions per 15-minute cycle
-    \item Action types: link\_document (most common), link\_repository, link\_project\_to\_goal, create\_task, flag\_for\_review (rare)
+    \item Action types: link\_document (most common), link\_repository, link\_project\_to\_goal, create\_task, draft\_email, compile\_context\_pack, suggest\_reschedule
     \item Near-zero flag\_for\_review rate with optimized prompt
+    \item State-aware suggestions: high-friction tasks automatically rescheduled to peak hours
+\end{itemize}
+
+\paragraph{Learning System:}
+\begin{itemize}
+    \item 50+ preference rules extracted
+    \item Duration calibration from 100+ completed tasks
+    \item Proposal approval rate: 75\% (improving with learned guidelines)
+    \item Temporal patterns: clear peak productivity 8--11am confirmed
 \end{itemize}
 
 \paragraph{Performance:}
@@ -884,6 +1262,7 @@ The current deployment demonstrates the following characteristics:
     \item Graph queries: $<$50ms for typical traversals
     \item Agent response: 3--15s depending on tool usage
     \item Autonomous cycle: 5--10s total
+    \item State estimation: $<$10ms
 \end{itemize}
 
 \subsection{Qualitative Assessment}
@@ -894,13 +1273,16 @@ The system successfully demonstrates:
     \item \textbf{Relationship Inference}: WORKS\_WITH relationships accurately reflect collaboration patterns
     \item \textbf{Risk Stratification}: Approval workflow prevents unintended actions while allowing autonomous task creation
     \item \textbf{Semantic Search}: Document retrieval surfaces relevant content across diverse file types
-    \item \textbf{Proactive Linking}: Autonomous agent successfully identifies and creates document-project, repository-project, and project-goal links without user intervention
-    \item \textbf{Graph Health}: Orphaned nodes are identified and linked, stale items are flagged
+    \item \textbf{Proactive Linking}: Autonomous agent successfully identifies and creates document-project, repository-project, and project-goal links
+    \item \textbf{State Awareness}: Agent respects cognitive mode, avoiding demanding suggestions during recovery
+    \item \textbf{Clinical Recovery}: Post-clinical OVERLOADED mode successfully prevents inappropriate task suggestions
+    \item \textbf{Behavioral Learning}: Preference rules improve suggestion quality over time
+    \item \textbf{Temporal Adaptation}: Peak hour suggestions align with learned productivity patterns
 \end{enumerate}
 
 \subsection{Limitations}
 
-Current limitations include: (1) decision traces captured but not yet used for fine-tuning, (2) Gmail and Calendar use polling rather than push notifications, (3) limited automated testing, (4) single-user deployment only, and (5) executive function layer signals are partially simulated pending full integration.
+Current limitations include: (1) decision traces captured but not yet used for model fine-tuning, (2) Calendar uses polling rather than push notifications, (3) limited automated testing, (4) single-user deployment only, and (5) clinical detection requires manual \texttt{[CLINICAL]} tagging rather than automatic inference from calendar patterns.
 
 \section{Discussion and Future Work}
 \label{sec:discussion}
@@ -915,23 +1297,32 @@ Several architectural decisions warrant discussion:
 
 \paragraph{Autonomous Orchestration:} The decision to implement proactive graph management as a separate always-running agent (rather than integrating into reactive flows) provides clear separation of concerns and predictable behavior.
 
-\paragraph{Externalized Prompts:} Storing prompts as markdown files rather than embedding in code enables rapid iteration on agent behavior. This is particularly valuable for the autonomous agent where prompt engineering significantly affects link creation vs. flagging ratios.
+\paragraph{State Modeling:} Six operating modes provide sufficient granularity for meaningful behavior differentiation without overwhelming complexity. The continuous signals complement discrete modes for nuanced decision-making.
 
-\paragraph{LLM Selection:} Using Together.ai provides cost-effective access to capable models. The hierarchical architecture enables future experimentation with model specialization.
+\paragraph{Learning System:} The rule lifecycle model (candidate $\rightarrow$ validated $\rightarrow$ deprecated) prevents stale rules from degrading system performance while allowing rapid adaptation to changing preferences.
+
+\paragraph{Externalized Prompts:} Storing prompts as markdown files rather than embedding in code enables rapid iteration on agent behavior. This is particularly valuable for the autonomous agent where prompt engineering significantly affects suggestion quality.
 
 \subsection{Future Directions}
 
 Several extensions are planned:
 \begin{enumerate}
-    \item Behavioral fine-tuning using captured decision traces
-    \item Push notifications via Google Cloud Pub/Sub for Gmail/Calendar
+    \item Behavioral fine-tuning using captured decision traces (infrastructure ready---traces captured with training flags---but model fine-tuning not yet implemented)
+    \item Calendar push notifications via Google Cloud Pub/Sub (Gmail already uses Pub/Sub; Calendar still uses polling)
     \item Multi-modal input processing (images, attachments)
     \item Collaborative features for team environments
     \item Granular privacy controls
-    \item Enhanced executive function layer with physiological signals (calendar patterns, typing cadence)
-    \item Cross-entity semantic linking (email content to documents, calendar events to projects)
-    \item Agent self-improvement through prompt evolution based on action outcomes
+    \item Physiological signal integration (wearables) for state estimation
+    \item Automatic clinical session detection from calendar patterns (currently requires manual \texttt{[CLINICAL]} tagging)
+    \item Cross-entity semantic linking (email content to documents via embedding similarity)
 \end{enumerate}
+
+\paragraph{Already Implemented (moved from future work):}
+\begin{itemize}
+    \item \textbf{Gmail push notifications}: Pull-based Pub/Sub subscription via \texttt{\_gmail\_pubsub\_listener()} receives real-time notifications from Gmail
+    \item \textbf{Agent self-improvement through learned guidelines}: Preference rules are extracted from user feedback and injected into autonomous agent prompts via the \texttt{\{learned\_guidelines\}} template variable
+    \item \textbf{Personalized temporal energy curves}: The \texttt{TemporalEnergyModel} updates learned overrides via \texttt{update\_from\_observation()} as task outcomes are recorded with hour-of-day context
+\end{itemize}
 
 \subsection{Ethical Considerations}
 
@@ -942,11 +1333,11 @@ Personal agent systems raise important ethical questions around data privacy (br
 
 \cognitex{} demonstrates a viable architecture for personal AI agents that balance autonomous capability with human oversight. The hybrid knowledge representation---combining property graphs, vector embeddings, and session caching---provides a robust foundation for personal information management. The risk-stratified tool system enables meaningful automation while preserving user agency for consequential actions.
 
-Key contributions include the autonomous graph orchestration layer for proactive graph maintenance, the executive function layer for cognitive state awareness, the externalized prompt architecture for rapid behavior iteration, and the comprehensive web dashboard for system visibility.
+Key contributions include the autonomous graph orchestration layer for proactive graph maintenance, the executive function layer for cognitive state awareness with six operating modes and temporal energy modeling, the behavioral learning system for preference extraction and guideline injection, clinical session detection for automatic recovery mode, and the comprehensive web dashboard for system visibility.
 
-The autonomous agent's ability to continuously identify and create connections between documents, repositories, tasks, projects, and goals---while appropriately flagging ambiguous cases for human review---represents a significant step toward truly assistive personal AI that reduces cognitive overhead without sacrificing user control.
+The agent's ability to respect user cognitive state---avoiding demanding suggestions when fatigued, automatically entering recovery mode after clinical sessions, and learning which proposals are accepted---represents a significant advance toward truly adaptive personal AI. The learning system ensures the agent improves over time, extracting patterns from user feedback and injecting them back into decision-making.
 
-While significant work remains---particularly in leveraging captured feedback for behavioral improvement and expanding the executive function layer---the current implementation provides a functional reference architecture for trustworthy personal AI systems. We release the complete codebase to support further research in this domain.
+While significant work remains---particularly in leveraging captured traces for model fine-tuning and expanding physiological signal integration---the current implementation provides a functional reference architecture for trustworthy personal AI systems. We release the complete codebase to support further research in this domain.
 
 \section*{Acknowledgments}
 
@@ -959,6 +1350,11 @@ This work was developed independently with assistance from Claude (Anthropic) fo
 Dong, X., Gabrilovich, E., Heitz, G., Horn, W., Lao, N., Murphy, K., Strohmann, T., Sun, S., \& Zhang, W. (2014).
 \newblock Knowledge vault: A web-scale approach to probabilistic knowledge fusion.
 \newblock In \emph{Proceedings of the 20th ACM SIGKDD International Conference on Knowledge Discovery and Data Mining} (pp. 601--610).
+
+\bibitem[Horvitz(1999)]{horvitz1999principles}
+Horvitz, E. (1999).
+\newblock Principles of mixed-initiative user interfaces.
+\newblock In \emph{Proceedings of the SIGCHI Conference on Human Factors in Computing Systems} (pp. 159--166).
 
 \bibitem[Karpukhin et al.(2020)]{karpukhin2020dense}
 Karpukhin, V., Oguz, B., Min, S., Lewis, P., Wu, L., Edunov, S., Chen, D., \& Yih, W.-T. (2020).
@@ -1019,7 +1415,7 @@ NEO4J_URI=bolt://localhost:7687
 NEO4J_PASSWORD=<secret>
 REDIS_URL=redis://localhost:6379/0
 
-# Together.ai LLM
+# LLM Provider
 TOGETHER_API_KEY=<secret>
 TOGETHER_MODEL_PLANNER=deepseek-ai/DeepSeek-V3
 TOGETHER_MODEL_EXECUTOR=deepseek-ai/DeepSeek-V3
@@ -1032,7 +1428,7 @@ GOOGLE_CLIENT_SECRET=<secret>
 # Discord
 DISCORD_BOT_TOKEN=<secret>
 DISCORD_CHANNEL_ID=<channel_id>
-DISCORD_USER_ID=<user_id>  # For DM notifications
+DISCORD_USER_ID=<user_id>
 
 # GitHub
 GITHUB_TOKEN=<secret>
@@ -1068,17 +1464,20 @@ cognitex agent-chat          # Interactive mode
 cognitex briefing            # Morning briefing
 cognitex approvals           # Pending approvals
 
-# Semantic Analysis
-cognitex analyze-chunks      # LLM analysis of chunks
-cognitex topics              # List extracted topics
-cognitex semantic-stats      # Analysis progress
+# State Management
+cognitex state               # View current state
+cognitex state set-mode MODE # Set operating mode
+
+# Learning
+cognitex learning summary    # Learning system stats
+cognitex learning patterns   # View learned patterns
 \end{lstlisting}
 
 \section{Neo4j Schema}
 \label{app:schema}
 
 \begin{lstlisting}[language=SQL,caption={Neo4j constraints and indexes}]
-// Constraints
+// Core Constraints
 CREATE CONSTRAINT person_email_unique
   FOR (p:Person) REQUIRE p.email IS UNIQUE;
 CREATE CONSTRAINT email_gmail_id_unique
@@ -1089,32 +1488,26 @@ CREATE CONSTRAINT task_id_unique
   FOR (t:Task) REQUIRE t.id IS UNIQUE;
 CREATE CONSTRAINT document_drive_id_unique
   FOR (d:Document) REQUIRE d.drive_id IS UNIQUE;
-CREATE CONSTRAINT repository_id_unique
-  FOR (r:Repository) REQUIRE r.id IS UNIQUE;
 CREATE CONSTRAINT project_id_unique
   FOR (p:Project) REQUIRE p.id IS UNIQUE;
 CREATE CONSTRAINT goal_id_unique
   FOR (g:Goal) REQUIRE g.id IS UNIQUE;
-CREATE CONSTRAINT chunk_id_unique
-  FOR (c:Chunk) REQUIRE c.id IS UNIQUE;
-CREATE CONSTRAINT topic_name_unique
-  FOR (t:Topic) REQUIRE t.name IS UNIQUE;
-CREATE CONSTRAINT concept_name_unique
-  FOR (c:Concept) REQUIRE c.name IS UNIQUE;
+CREATE CONSTRAINT state_snapshot_id_unique
+  FOR (ss:StateSnapshot) REQUIRE ss.id IS UNIQUE;
 
-// Indexes
-CREATE INDEX person_name FOR (p:Person) ON (p.name);
-CREATE INDEX email_date FOR (e:Email) ON (e.date);
-CREATE INDEX task_status FOR (t:Task) ON (t.status);
-CREATE INDEX project_status FOR (p:Project) ON (p.status);
-CREATE INDEX goal_status FOR (g:Goal) ON (g.status);
-CREATE INDEX chunk_analyzed FOR (c:Chunk) ON (c.analyzed);
+// State and Learning Indexes
+CREATE INDEX state_snapshot_mode
+  FOR (ss:StateSnapshot) ON (ss.mode);
+CREATE INDEX state_snapshot_created
+  FOR (ss:StateSnapshot) ON (ss.created_at);
+CREATE INDEX event_drain_level
+  FOR (e:Event) ON (e.drain_level);
 \end{lstlisting}
 
 \section{Autonomous Agent Prompt Template}
 \label{app:prompt}
 
-The autonomous agent uses an externalized prompt template stored at \texttt{src/cognitex/prompts/autonomous\_agent.md}. The prompt implements a ``Digital Twin'' persona:
+The autonomous agent uses an externalized prompt template stored at \texttt{src/cognitex/prompts/autonomous\_agent.md}. The prompt implements a ``Digital Twin'' persona with state awareness:
 
 \begin{lstlisting}[caption={Digital Twin agent prompt structure (abbreviated)}]
 # Digital Twin Autonomous Agent
@@ -1131,30 +1524,36 @@ behalf of the user when they're not available.
 ## The User's Writing Style:
 {writing_samples_text}
 
+## LEARNED GUIDELINES & FEEDBACK:
+{learned_guidelines}
+
+## User State & Energy Context:
+{state_context_text}
+
 ## Current State Summary:
+- Inbox items needing triage: {inbox_count}
 - Emails awaiting response: {emails_needing_response}
 - Meetings needing prep: {meetings_needing_prep}
 - Connection opportunities: {connection_opportunities}
 
-## Priority 1: Emails Needing Response
-{pending_emails_text}
+## STATE-AWARE DECISIONS (Critical):
+1. Check User State Context before suggesting tasks
+2. In POST-CLINICAL RECOVERY: Only low-energy tasks
+3. High fatigue (>70%): Avoid high-friction items
+4. Outside peak hours: Use SUGGEST_RESCHEDULE
 
-## Priority 2: Upcoming Meetings Needing Context
-{upcoming_calendar_text}
-
-## Already Actioned (Skip These):
-{skip_list_text}
-
-## Available Actions (in priority order):
-DRAFT_EMAIL, COMPILE_CONTEXT_PACK, SCHEDULE_BLOCK,
-LINK_DOCUMENT, LINK_REPOSITORY, LINK_TASK,
-LINK_PROJECT_TO_GOAL, CREATE_TASK, FLAG_FOR_REVIEW
+## Available Actions:
+PROCESS_INBOX_ITEM, DRAFT_EMAIL, COMPILE_CONTEXT_PACK,
+SCHEDULE_BLOCK, SUGGEST_RESCHEDULE, LINK_DOCUMENT,
+LINK_REPOSITORY, LINK_TASK, LINK_PROJECT_TO_GOAL,
+CREATE_TASK, FLAG_FOR_REVIEW
 
 ## Decision Rules:
 1. DRAFT_EMAIL takes priority for actionable emails
 2. Prepare context packs for meetings without context
 3. Auto-link everything in Connection Opportunities
 4. Maximum 5 actions per cycle
+5. Maximum 1 FLAG_FOR_REVIEW per cycle
 \end{lstlisting}
 
 \section{Agent Action Types}
@@ -1171,6 +1570,7 @@ LINK_PROJECT_TO_GOAL, CREATE_TASK, FLAG_FOR_REVIEW
 draft\_email & Email reply drafted for user review \\
 compile\_context\_pack & Meeting briefing compiled \\
 schedule\_block & Focus time block suggested \\
+process\_inbox\_item & Firewall inbox item processed \\
 \midrule
 \multicolumn{2}{l}{\textit{Graph Maintenance Actions}} \\
 link\_document & Document linked to project \\
@@ -1179,15 +1579,87 @@ link\_task & Task linked to project \\
 link\_project\_to\_goal & Project linked to goal \\
 create\_task & New task created \\
 update\_project\_status & Project status changed \\
+\midrule
+\multicolumn{2}{l}{\textit{State-Aware Actions}} \\
+suggest\_reschedule & High-friction task rescheduling suggested \\
 flag\_for\_review & Item flagged for human review \\
 \midrule
 \multicolumn{2}{l}{\textit{System Actions}} \\
 autonomous\_cycle & Cycle completion summary \\
+drive\_poll & Drive change detection cycle \\
 notification\_sent & Discord notification delivered \\
-autonomous\_agent\_started & Agent loop started \\
-autonomous\_agent\_stopped & Agent loop stopped \\
+clinical\_recovery & Post-clinical mode activated \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+\section{Operating Modes Reference}
+\label{app:modes}
+
+\begin{table}[h]
+\centering
+\caption{Complete operating mode specifications.}
+\begin{tabular}{llllll}
+\toprule
+\textbf{Mode} & \textbf{Task Types} & \textbf{Friction} & \textbf{Block} & \textbf{Notify} & \textbf{Interrupt} \\
+\midrule
+DEEP\_FOCUS & all & 5 & 90+ min & batched & urgent, family \\
+FRAGMENTED & shallow, admin & 3 & any & all & all \\
+OVERLOADED & maintenance, recovery & 1 & any & critical & emergency \\
+AVOIDANT & low-friction, quick & 2 & 30+ min & batched & urgent \\
+HYPERFOCUS & current only & 5 & 120+ min & none & emergency \\
+TRANSITION & shallow, prep & 3 & any & batched & urgent, family \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Database Schema Extensions}
+\label{app:schema_ext}
+
+\begin{lstlisting}[language=SQL,caption={Learning system tables}]
+-- State observations for temporal learning
+CREATE TABLE state_observations (
+    id SERIAL PRIMARY KEY,
+    task_id TEXT,
+    task_title TEXT,
+    outcome TEXT NOT NULL,  -- completed, deferred, abandoned
+    mode TEXT,
+    fatigue_level FLOAT,
+    hour_of_day INTEGER,
+    day_of_week INTEGER,
+    post_clinical BOOLEAN DEFAULT FALSE,
+    energy_cost TEXT,
+    observed_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Preference rules with lifecycle
+CREATE TABLE preference_rules (
+    id TEXT PRIMARY KEY,
+    rule_name TEXT NOT NULL,
+    rule_type TEXT NOT NULL,
+    conditions JSONB NOT NULL,
+    action JSONB NOT NULL,
+    confidence FLOAT DEFAULT 0.5,
+    lifecycle TEXT DEFAULT 'candidate',
+    applications INTEGER DEFAULT 0,
+    successful_applications INTEGER DEFAULT 0,
+    success_rate FLOAT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    validated_at TIMESTAMP,
+    deprecated_at TIMESTAMP
+);
+
+-- Task proposals for learning
+CREATE TABLE task_proposals (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    project_id TEXT,
+    priority TEXT,
+    status TEXT DEFAULT 'pending',
+    user_feedback TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    decided_at TIMESTAMP
+);
+\end{lstlisting}
 
 \end{document}

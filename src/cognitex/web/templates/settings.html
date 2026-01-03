@@ -224,6 +224,83 @@ GOOGLE_AI_API_KEY=...</pre>
                 {% endfor %}
             </p>
         </div>
+
+        <div class="card">
+            <h2>Remote Session Sync</h2>
+            <p style="color: #666; font-size: 0.85rem; margin-bottom: 1rem;">
+                Sync coding sessions from other machines (laptop, workstation) to capture development context.
+            </p>
+
+            <div style="margin-bottom: 1rem;">
+                <strong style="font-size: 0.9rem;">Sync API Key</strong>
+                <div style="display: flex; gap: 0.5rem; align-items: center; margin-top: 0.25rem;">
+                    {% if sync_api_key %}
+                    <code style="background: #f5f5f5; padding: 0.25rem 0.5rem; font-size: 0.8rem;">
+                        {{ sync_api_key[:8] }}...{{ sync_api_key[-4:] }}
+                    </code>
+                    <button class="btn btn-secondary" style="font-size: 0.75rem; padding: 0.25rem 0.5rem;"
+                            onclick="navigator.clipboard.writeText('{{ sync_api_key }}'); this.textContent='Copied!'; setTimeout(() => this.textContent='Copy', 2000);">
+                        Copy
+                    </button>
+                    {% else %}
+                    <span style="color: #dc2626;">Not configured</span>
+                    <span style="font-size: 0.8rem; color: #666;">Set SYNC_API_KEY in .env</span>
+                    {% endif %}
+                </div>
+            </div>
+
+            <div style="margin-bottom: 1rem;">
+                <strong style="font-size: 0.9rem;">Sessions Synced</strong>
+                <div style="font-size: 0.85rem; color: #666;">
+                    {{ sync_session_count }} coding sessions from {{ sync_machine_count }} machine(s)
+                </div>
+            </div>
+
+            <details style="margin-top: 1rem;">
+                <summary style="cursor: pointer; font-weight: 500; color: #2563eb;">
+                    Setup Instructions
+                </summary>
+                <div style="margin-top: 0.75rem; padding: 0.75rem; background: #f8fafc; border-radius: 4px;">
+                    <p style="font-size: 0.85rem; margin-bottom: 0.75rem;">
+                        <strong>1. Install cognitex-sync on your local machine:</strong>
+                    </p>
+                    <pre style="background: #1e293b; color: #e2e8f0; padding: 0.5rem; font-size: 0.75rem; border-radius: 4px; overflow-x: auto;">
+# Download and install
+curl -sSL {{ request.url_for('download_sync_installer') }} | bash
+
+# Or manually with pip
+pip install cognitex-sync</pre>
+
+                    <p style="font-size: 0.85rem; margin: 0.75rem 0;">
+                        <strong>2. Configure with your server:</strong>
+                    </p>
+                    <pre style="background: #1e293b; color: #e2e8f0; padding: 0.5rem; font-size: 0.75rem; border-radius: 4px; overflow-x: auto;">
+cognitex-sync configure \
+  --server {{ request.base_url }} \
+  --api-key {{ sync_api_key or 'YOUR_API_KEY' }}</pre>
+
+                    <p style="font-size: 0.85rem; margin: 0.75rem 0;">
+                        <strong>3. Sync your sessions:</strong>
+                    </p>
+                    <pre style="background: #1e293b; color: #e2e8f0; padding: 0.5rem; font-size: 0.75rem; border-radius: 4px; overflow-x: auto;">
+# One-time sync
+cognitex-sync push
+
+# Or run as background daemon
+cognitex-sync daemon --interval 30</pre>
+
+                    <p style="font-size: 0.8rem; color: #666; margin-top: 0.75rem;">
+                        Supports: Claude Code, with more CLI tools coming soon.
+                    </p>
+                </div>
+            </details>
+
+            <div style="margin-top: 1rem;">
+                <a href="{{ request.url_for('download_sync_package') }}" class="btn btn-secondary" style="font-size: 0.85rem;">
+                    Download cognitex-sync Package
+                </a>
+            </div>
+        </div>
     </div>
 </div>
 {% endblock %}

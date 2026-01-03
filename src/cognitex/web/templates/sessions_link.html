@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+
+{% block title %}Link Sessions to Projects - Cognitex{% endblock %}
+
+{% block content %}
+<h1>Link Coding Sessions to Projects</h1>
+
+<p style="color: #666; margin-bottom: 1.5rem;">
+    Review unlinked coding sessions and approve suggested project matches.
+    <strong>{{ total_unlinked }}</strong> sessions need review.
+</p>
+
+{% if suggestions %}
+<div class="card" style="margin-bottom: 1rem; padding: 0.75rem 1rem; background: #f0f9ff;">
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+        <span>
+            <strong>Quick Actions:</strong>
+            Accept all high-confidence matches (score > 90%)
+        </span>
+        <button class="btn btn-primary" onclick="acceptHighConfidence()">
+            Accept All High-Confidence
+        </button>
+    </div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 1rem;">
+    {% for item in suggestions %}
+    <div class="card" id="session-{{ loop.index }}" style="padding: 1rem;">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem;">
+            <div style="flex: 1;">
+                <div style="font-size: 0.8rem; color: #666; margin-bottom: 0.25rem;">
+                    <code>{{ item.project_path }}</code>
+                </div>
+                {% if item.summary %}
+                <div style="font-size: 0.9rem; margin-bottom: 0.5rem;">
+                    {{ item.summary }}{% if item.summary|length >= 200 %}...{% endif %}
+                </div>
+                {% endif %}
+                <div style="font-size: 0.75rem; color: #999;">
+                    {{ item.cli_type }} session
+                    {% if item.ended_at %} &bull; {{ item.ended_at[:16] }}{% endif %}
+                </div>
+            </div>
+
+            <div id="actions-{{ loop.index }}" style="display: flex; flex-direction: column; gap: 0.5rem; min-width: 280px;">
+                {% if item.matches %}
+                    {% for match in item.matches %}
+                    <div style="display: flex; align-items: center; gap: 0.5rem;">
+                        <button class="btn {% if match.score >= 0.9 %}btn-primary{% else %}btn-secondary{% endif %}"
+                                style="flex: 1; font-size: 0.85rem; padding: 0.4rem 0.75rem; text-align: left;"
+                                hx-post="/api/sessions/link"
+                                hx-vals='{"session_id": "{{ item.session_id }}", "project_id": "{{ match.project_id }}"}'
+                                hx-target="#actions-{{ loop.index }}"
+                                hx-swap="innerHTML"
+                                data-session-id="{{ item.session_id }}"
+                                data-project-id="{{ match.project_id }}"
+                                data-score="{{ match.score }}">
+                            {{ match.project_title }}
+                            <span style="opacity: 0.7; font-size: 0.75rem; margin-left: 0.5rem;">
+                                {{ (match.score * 100)|int }}%
+                            </span>
+                        </button>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <span style="color: #999; font-size: 0.85rem;">No matches found</span>
+                {% endif %}
+
+                <div style="display: flex; gap: 0.5rem; margin-top: 0.25rem;">
+                    <select id="manual-{{ loop.index }}" style="flex: 1; font-size: 0.85rem; padding: 0.3rem;">
+                        <option value="">-- Select project --</option>
+                        {% for proj in projects %}
+                        <option value="{{ proj.id }}">{{ proj.title }}</option>
+                        {% endfor %}
+                    </select>
+                    <button class="btn btn-secondary" style="font-size: 0.85rem; padding: 0.3rem 0.6rem;"
+                            onclick="linkManual('{{ item.session_id }}', {{ loop.index }})">
+                        Link
+                    </button>
+                    <button class="btn" style="font-size: 0.85rem; padding: 0.3rem 0.6rem;"
+                            hx-post="/api/sessions/skip"
+                            hx-vals='{"session_id": "{{ item.session_id }}"}'
+                            hx-target="#actions-{{ loop.index }}"
+                            hx-swap="innerHTML">
+                        Skip
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+{% else %}
+<div class="card" style="text-align: center; padding: 2rem;">
+    <p style="font-size: 1.1rem; color: #16a34a;">All sessions are linked to projects!</p>
+    <a href="/projects" class="btn btn-primary">View Projects</a>
+</div>
+{% endif %}
+
+<script>
+function linkManual(sessionId, index) {
+    const select = document.getElementById('manual-' + index);
+    const projectId = select.value;
+    if (!projectId) {
+        alert('Please select a project');
+        return;
+    }
+
+    const actionsDiv = document.getElementById('actions-' + index);
+
+    fetch('/api/sessions/link', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: `session_id=${encodeURIComponent(sessionId)}&project_id=${encodeURIComponent(projectId)}`
+    })
+    .then(response => response.text())
+    .then(html => {
+        actionsDiv.innerHTML = html;
+    });
+}
+
+function acceptHighConfidence() {
+    const links = [];
+    document.querySelectorAll('button[data-score]').forEach(btn => {
+        const score = parseFloat(btn.dataset.score);
+        if (score >= 0.9) {
+            links.push({
+                session_id: btn.dataset.sessionId,
+                project_id: btn.dataset.projectId
+            });
+        }
+    });
+
+    if (links.length === 0) {
+        alert('No high-confidence matches found');
+        return;
+    }
+
+    if (!confirm(`Link ${links.length} sessions with >90% confidence?`)) {
+        return;
+    }
+
+    fetch('/api/sessions/link-bulk', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({links: links})
+    })
+    .then(response => response.json())
+    .then(data => {
+        alert(`Linked ${data.linked} sessions!`);
+        window.location.reload();
+    });
+}
+</script>
+{% endblock %}

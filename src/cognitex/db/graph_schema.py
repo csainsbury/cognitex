@@ -50,6 +50,11 @@ SCHEMA_STATEMENTS = [
     "CREATE INDEX chunk_index IF NOT EXISTS FOR (c:Chunk) ON (c.chunk_index)",
     "CREATE INDEX chunk_content_type IF NOT EXISTS FOR (c:Chunk) ON (c.content_type)",
     "CREATE INDEX chunk_analyzed IF NOT EXISTS FOR (c:Chunk) ON (c.analyzed)",
+    # CodingSession constraints and indexes (CLI session ingestion)
+    "CREATE CONSTRAINT coding_session_id IF NOT EXISTS FOR (cs:CodingSession) REQUIRE cs.session_id IS UNIQUE",
+    "CREATE INDEX coding_session_project IF NOT EXISTS FOR (cs:CodingSession) ON (cs.project_path)",
+    "CREATE INDEX coding_session_ended IF NOT EXISTS FOR (cs:CodingSession) ON (cs.ended_at)",
+    "CREATE INDEX coding_session_cli IF NOT EXISTS FOR (cs:CodingSession) ON (cs.cli_type)",
 ]
 
 

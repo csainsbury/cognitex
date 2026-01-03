@@ -3535,6 +3535,147 @@ def github_sync(
     asyncio.run(sync_repo())
 
 
+@app.command("sessions-sync")
+def sessions_sync(
+    cli: str = typer.Option("claude", "--cli", "-c", help="CLI tool to sync from (claude)"),
+    project: str = typer.Option(None, "--project", "-p", help="Limit to specific project path"),
+    force: bool = typer.Option(False, "--force", "-f", help="Force re-sync of all sessions"),
+) -> None:
+    """Sync coding CLI sessions into the knowledge graph.
+
+    Ingests sessions from AI coding assistants (Claude Code, etc.) to provide
+    rich context about project development progress, decisions, and next steps.
+    """
+    async def run_sync():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.db.graph_schema import init_graph_schema
+        from cognitex.services.coding_sessions import get_session_ingester
+
+        console.print(f"\n[bold]Syncing {cli} coding sessions...[/bold]\n")
+
+        await init_neo4j()
+        await init_graph_schema()
+
+        ingester = get_session_ingester()
+
+        # Discover sessions
+        sessions = await ingester.discover_sessions(cli)
+
+        if project:
+            sessions = [s for s in sessions if project in s["project_path"]]
+
+        if not sessions:
+            console.print("[yellow]No sessions found.[/yellow]")
+            return
+
+        console.print(f"Found {len(sessions)} sessions to process\n")
+
+        # Show session table
+        table = Table(title="Discovered Sessions")
+        table.add_column("Session ID", style="cyan")
+        table.add_column("Project", style="green")
+        table.add_column("Modified", style="dim")
+        table.add_column("Size", justify="right")
+
+        for s in sessions[:20]:  # Show first 20
+            table.add_row(
+                s["session_id"][:12],
+                s["project_path"].split("/")[-1],
+                s["modified_at"].strftime("%Y-%m-%d %H:%M"),
+                f"{s['size_bytes'] // 1024}KB",
+            )
+        console.print(table)
+
+        if len(sessions) > 20:
+            console.print(f"[dim]... and {len(sessions) - 20} more[/dim]\n")
+
+        # Sync with progress
+        console.print()
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Syncing sessions...", total=len(sessions))
+
+            ingested = 0
+            for session_meta in sessions:
+                progress.update(task, description=f"Processing {session_meta['session_id'][:8]}...")
+
+                if force:
+                    ingester._processed_sessions.discard(session_meta["session_id"])
+
+                result = await ingester.ingest_session(session_meta, force=force)
+                if result:
+                    ingested += 1
+
+                progress.advance(task)
+
+        await close_neo4j()
+
+        console.print(f"\n[bold green]✓ Synced {ingested} coding sessions![/bold green]")
+        console.print("[dim]Sessions are linked to projects and can provide development context.[/dim]")
+
+    asyncio.run(run_sync())
+
+
+@app.command("sessions-context")
+def sessions_context(
+    project: str = typer.Argument(..., help="Project name to get context for"),
+    limit: int = typer.Option(5, "--limit", "-l", help="Number of recent sessions"),
+) -> None:
+    """Show development context from recent coding sessions for a project."""
+    async def show_context():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.services.coding_sessions import get_session_ingester
+
+        await init_neo4j()
+
+        ingester = get_session_ingester()
+        sessions = await ingester.get_project_development_context(project, limit=limit)
+
+        if not sessions:
+            console.print(f"[yellow]No coding sessions found for project '{project}'[/yellow]")
+            console.print("[dim]Try running: cognitex sessions-sync first[/dim]")
+            await close_neo4j()
+            return
+
+        console.print(f"\n[bold]Development Context for {project}[/bold]\n")
+
+        for i, s in enumerate(sessions, 1):
+            console.print(f"[bold cyan]Session {i}:[/bold cyan] {s.get('slug', s.get('session_id', 'unknown')[:8])}")
+            console.print(f"  [dim]Branch:[/dim] {s.get('git_branch', 'unknown')}")
+            console.print(f"  [dim]State:[/dim] {s.get('completion_state', 'unknown')}")
+
+            if s.get("summary"):
+                console.print(f"\n  [bold]Summary:[/bold] {s['summary']}")
+
+            if s.get("decisions"):
+                console.print("\n  [bold]Decisions:[/bold]")
+                for d in s["decisions"][:5]:
+                    console.print(f"    • {d}")
+
+            if s.get("next_steps"):
+                console.print("\n  [bold]Next Steps:[/bold]")
+                for step in s["next_steps"][:5]:
+                    console.print(f"    → {step}")
+
+            console.print()
+
+        # Aggregate next steps
+        next_steps = await ingester.get_development_next_steps(project)
+        if next_steps:
+            console.print("[bold yellow]Aggregated Next Steps:[/bold yellow]")
+            for step in next_steps[:10]:
+                console.print(f"  → {step}")
+
+        await close_neo4j()
+
+    asyncio.run(show_context())
+
+
 @app.command("github-embeddings")
 def github_embeddings(
     repo: str = typer.Option(None, "--repo", "-r", help="Limit to specific repo (owner/repo)"),

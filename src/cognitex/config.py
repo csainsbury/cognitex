@@ -122,6 +122,12 @@ class Settings(BaseSettings):
         description="Comma-separated list of repos to auto-sync daily (e.g., owner/repo,owner/repo2)",
     )
 
+    # Sync API (for remote session ingestion)
+    sync_api_key: SecretStr = Field(
+        default=SecretStr(""),
+        description="API key for remote session sync (cognitex-sync clients)",
+    )
+
     # Push notifications
     webhook_base_url: str = Field(
         default="",

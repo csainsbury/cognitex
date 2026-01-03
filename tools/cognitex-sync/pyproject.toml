@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cognitex-sync"
+version = "0.1.0"
+description = "Sync coding CLI sessions to Cognitex knowledge graph"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "Chris Sherlock", email = "chris@example.com" }
+]
+keywords = ["cognitex", "claude", "coding", "ai", "sync"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "httpx>=0.25.0",
+    "watchdog>=3.0.0",
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+]
+
+[project.scripts]
+cognitex-sync = "cognitex_sync.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/csainsbury/cognitex"
+Documentation = "https://github.com/csainsbury/cognitex"
+Repository = "https://github.com/csainsbury/cognitex"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cognitex_sync"]

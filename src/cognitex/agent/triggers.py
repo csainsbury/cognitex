@@ -178,6 +178,16 @@ class TriggerSystem:
             replace_existing=True,
         )
 
+        # Coding sessions sync (every 2 hours during work hours)
+        # Ingests Claude Code and other CLI sessions for project context
+        self.scheduler.add_job(
+            self._coding_sessions_sync,
+            CronTrigger(hour="8,10,12,14,16,18", minute=30),
+            id="coding_sessions_sync",
+            name="Coding Sessions Sync",
+            replace_existing=True,
+        )
+
         # Stuck task detection (every 30 minutes during work hours)
         # Checks for tasks where elapsed time > 150% of estimated time
         self.scheduler.add_job(
@@ -719,6 +729,59 @@ class TriggerSystem:
             try:
                 from cognitex.agent.action_log import log_action
                 await log_action("drive_poll", "trigger", status="failed", error=str(e))
+            except Exception:
+                pass
+
+    async def _coding_sessions_sync(self) -> None:
+        """
+        Sync coding CLI sessions (Claude Code, etc.) to capture development context.
+
+        Ingests session conversations to extract:
+        - Project summaries and progress
+        - Technical decisions made
+        - Files changed
+        - Next steps planned
+        """
+        logger.debug("Starting coding sessions sync")
+
+        try:
+            from cognitex.services.coding_sessions import get_session_ingester
+            from cognitex.agent.action_log import log_action
+
+            ingester = get_session_ingester()
+
+            # Sync all Claude Code sessions
+            stats = await ingester.sync_all_sessions(cli_type="claude")
+
+            if stats["ingested"] > 0:
+                logger.info(
+                    "Coding sessions synced",
+                    ingested=stats["ingested"],
+                    discovered=stats["discovered"],
+                )
+                await log_action(
+                    "coding_sessions_sync",
+                    "trigger",
+                    summary=f"Synced {stats['ingested']} coding sessions",
+                    details=stats,
+                )
+
+                # Notify if significant sessions ingested
+                if stats["ingested"] >= 2:
+                    await self._send_notification(
+                        f"**Coding Sessions Synced**\n\n"
+                        f"Ingested {stats['ingested']} new coding sessions with "
+                        f"development context.",
+                        urgency="low"
+                    )
+            else:
+                logger.debug("No new coding sessions to sync")
+
+        except Exception as e:
+            logger.error("Coding sessions sync failed", error=str(e))
+            try:
+                from cognitex.agent.action_log import log_action
+                await log_action("coding_sessions_sync", "trigger", status="failed", error=str(e))
             except Exception:
                 pass
 

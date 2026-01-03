@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -3629,6 +3629,7 @@ async def api_analyze_node(
 async def settings_page(request: Request):
     """Settings page for model configuration."""
     from cognitex.services.model_config import get_model_config_service
+    from cognitex.db.neo4j import get_driver
 
     service = get_model_config_service()
     config = await service.get_config()
@@ -3653,6 +3654,26 @@ async def settings_page(request: Request):
     finally:
         await redis.close()
 
+    # Get sync API key and session stats
+    sync_api_key = settings.sync_api_key.get_secret_value()
+    sync_session_count = 0
+    sync_machine_count = 0
+
+    try:
+        driver = get_driver()
+        async with driver.session() as neo_session:
+            result = await neo_session.run("""
+                MATCH (cs:CodingSession)
+                RETURN count(cs) as count,
+                       count(DISTINCT split(cs.session_id, ':')[0]) as machines
+            """)
+            record = await result.single()
+            if record:
+                sync_session_count = record["count"]
+                sync_machine_count = record["machines"]
+    except Exception:
+        pass
+
     return templates.TemplateResponse(
         "settings.html",
         {
@@ -3662,6 +3683,9 @@ async def settings_page(request: Request):
             "chat_models": chat_models,
             "embedding_models": embedding_models,
             "providers": providers,
+            "sync_api_key": sync_api_key,
+            "sync_session_count": sync_session_count,
+            "sync_machine_count": sync_machine_count,
         },
     )
 
@@ -3933,6 +3957,445 @@ async def api_settings_models_preset(request: Request, preset: str):
             "providers": providers,
         },
     )
+
+
+# =============================================================================
+# Session Sync API (for cognitex-sync clients)
+# =============================================================================
+
+
+def verify_sync_api_key(authorization: str = Header(None)) -> bool:
+    """Verify the sync API key from Authorization header."""
+    from cognitex.config import get_settings
+
+    settings = get_settings()
+    expected_key = settings.sync_api_key.get_secret_value()
+
+    if not expected_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Sync API not configured. Set SYNC_API_KEY in environment.",
+        )
+
+    if not authorization:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing Authorization header. Use: Authorization: Bearer <api_key>",
+        )
+
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid Authorization format. Use: Bearer <api_key>",
+        )
+
+    provided_key = authorization[7:]  # Remove "Bearer " prefix
+    if provided_key != expected_key:
+        raise HTTPException(status_code=403, detail="Invalid API key")
+
+    return True
+
+
+@app.post("/api/sync/sessions")
+async def api_sync_sessions(
+    request: Request,
+    _auth: bool = Depends(verify_sync_api_key),
+):
+    """
+    Ingest coding sessions from remote machines.
+
+    Accepts JSON with session data:
+    {
+        "machine_id": "laptop-chris",
+        "cli_type": "claude",
+        "sessions": [
+            {
+                "session_id": "abc123",
+                "project_path": "/Users/chris/projects/myapp",
+                "git_branch": "main",
+                "started_at": "2025-01-03T10:00:00Z",
+                "ended_at": "2025-01-03T11:30:00Z",
+                "messages": [...],  # Optional: raw messages for LLM extraction
+                "summary": "...",   # Optional: pre-extracted summary
+                "decisions": [...],
+                "next_steps": [...],
+                "topics": [...],
+            }
+        ]
+    }
+    """
+    from cognitex.services.coding_sessions import get_session_ingester
+    from cognitex.db.neo4j import get_driver
+
+    try:
+        data = await request.json()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
+
+    machine_id = data.get("machine_id", "unknown")
+    cli_type = data.get("cli_type", "claude")
+    sessions = data.get("sessions", [])
+
+    if not sessions:
+        return {"status": "ok", "message": "No sessions to ingest", "ingested": 0}
+
+    ingester = get_session_ingester()
+    driver = get_driver()
+
+    ingested = 0
+    errors = []
+
+    for session_data in sessions:
+        try:
+            session_id = session_data.get("session_id")
+            if not session_id:
+                errors.append({"error": "Missing session_id"})
+                continue
+
+            # Check if we have pre-extracted summary or need to extract from messages
+            summary = session_data.get("summary")
+            decisions = session_data.get("decisions", [])
+            next_steps = session_data.get("next_steps", [])
+            topics = session_data.get("topics", [])
+            files_changed = session_data.get("files_changed", [])
+            completion_state = session_data.get("completion_state", "unknown")
+
+            # If no summary but messages provided, extract using LLM
+            if not summary and session_data.get("messages"):
+                extracted = await ingester.extract_session_summary(
+                    session_data["messages"],
+                    session_data.get("project_path", "unknown"),
+                )
+                summary = extracted.get("summary")
+                decisions = extracted.get("decisions", decisions)
+                next_steps = extracted.get("next_steps", next_steps)
+                topics = extracted.get("topics", topics)
+                files_changed = extracted.get("files_changed", files_changed)
+                completion_state = extracted.get("completion_state", completion_state)
+
+            # Store in Neo4j
+            async with driver.session() as neo_session:
+                await ingester._store_session(
+                    neo_session,
+                    session_id=f"{machine_id}:{session_id}",  # Namespace by machine
+                    cli_type=cli_type,
+                    project_path=session_data.get("project_path", "unknown"),
+                    git_branch=session_data.get("git_branch", "unknown"),
+                    slug=session_data.get("slug", session_id[:8]),
+                    started_at=session_data.get("started_at"),
+                    ended_at=session_data.get("ended_at"),
+                    user_messages=session_data.get("user_messages", 0),
+                    assistant_messages=session_data.get("assistant_messages", 0),
+                    summary=summary,
+                    decisions=decisions,
+                    files_changed=files_changed,
+                    next_steps=next_steps,
+                    topics=topics,
+                    completion_state=completion_state,
+                )
+
+            ingested += 1
+
+        except Exception as e:
+            errors.append({
+                "session_id": session_data.get("session_id"),
+                "error": str(e),
+            })
+
+    return {
+        "status": "ok",
+        "machine_id": machine_id,
+        "ingested": ingested,
+        "errors": errors if errors else None,
+    }
+
+
+@app.get("/api/sync/status")
+async def api_sync_status(_auth: bool = Depends(verify_sync_api_key)):
+    """Check sync API status and get server info."""
+    from cognitex.db.neo4j import get_driver
+
+    driver = get_driver()
+    async with driver.session() as session:
+        result = await session.run(
+            "MATCH (cs:CodingSession) RETURN count(cs) as count"
+        )
+        record = await result.single()
+        session_count = record["count"] if record else 0
+
+    return {
+        "status": "ok",
+        "version": "1.0.0",
+        "total_sessions": session_count,
+    }
+
+
+@app.get("/downloads/cognitex-sync-install.sh", name="download_sync_installer")
+async def download_sync_installer(request: Request):
+    """Download the cognitex-sync installer script."""
+    from fastapi.responses import PlainTextResponse
+
+    # Get the server URL and API key for the install script
+    from cognitex.config import get_settings
+    settings = get_settings()
+    sync_api_key = settings.sync_api_key.get_secret_value()
+
+    script = f'''#!/bin/bash
+# cognitex-sync installer
+# Usage: curl -sSL {request.base_url}downloads/cognitex-sync-install.sh | bash
+
+set -e
+
+echo "Installing cognitex-sync..."
+
+# Check for Python
+if ! command -v python3 &> /dev/null; then
+    echo "Error: Python 3 is required but not installed."
+    exit 1
+fi
+
+# Create temp directory and download package
+TMPDIR=$(mktemp -d)
+cd "$TMPDIR"
+
+echo "Downloading package..."
+curl -sSL "{request.base_url}downloads/cognitex-sync.tar.gz" -o cognitex-sync.tar.gz
+tar xzf cognitex-sync.tar.gz
+cd cognitex-sync
+
+echo "Installing..."
+pip install --user -q .
+
+# Add to PATH if needed
+if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+    export PATH="$HOME/.local/bin:$PATH"
+fi
+
+# Cleanup
+cd /
+rm -rf "$TMPDIR"
+
+echo ""
+echo "cognitex-sync installed successfully!"
+echo ""
+echo "Configure with:"
+echo "  cognitex-sync configure --server {request.base_url} --api-key YOUR_API_KEY"
+echo ""
+echo "Then sync your sessions:"
+echo "  cognitex-sync push"
+'''
+
+    return PlainTextResponse(
+        content=script,
+        media_type="text/x-shellscript",
+        headers={"Content-Disposition": "attachment; filename=cognitex-sync-install.sh"}
+    )
+
+
+@app.get("/downloads/cognitex-sync.tar.gz", name="download_sync_package")
+async def download_sync_package():
+    """Download the cognitex-sync package as a tarball."""
+    import tarfile
+    import io
+    from pathlib import Path
+
+    # Find the cognitex-sync package directory
+    package_dir = Path(__file__).parent.parent.parent.parent / "tools" / "cognitex-sync"
+
+    if not package_dir.exists():
+        raise HTTPException(status_code=404, detail="Package not found")
+
+    # Create tarball in memory
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for file_path in package_dir.rglob("*"):
+            if file_path.is_file() and "__pycache__" not in str(file_path):
+                arcname = f"cognitex-sync/{file_path.relative_to(package_dir)}"
+                tar.add(file_path, arcname=arcname)
+
+    buffer.seek(0)
+
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(
+        buffer,
+        media_type="application/gzip",
+        headers={"Content-Disposition": "attachment; filename=cognitex-sync.tar.gz"}
+    )
+
+
+# -------------------------------------------------------------------
+# Session Linking (Human-in-the-loop fuzzy matching)
+# -------------------------------------------------------------------
+
+
+def _fuzzy_match_score(s1: str, s2: str) -> float:
+    """Calculate fuzzy match score between two strings."""
+    from difflib import SequenceMatcher
+    s1_lower = s1.lower()
+    s2_lower = s2.lower()
+
+    # Direct containment is a strong signal
+    if s2_lower in s1_lower:
+        return 0.9 + (len(s2) / len(s1)) * 0.1
+
+    # Use SequenceMatcher for fuzzy matching
+    return SequenceMatcher(None, s1_lower, s2_lower).ratio()
+
+
+def _extract_path_components(path: str) -> list[str]:
+    """Extract meaningful components from a path for matching."""
+    # Normalize and split
+    path = path.replace("//", "/").rstrip("/")
+    parts = path.split("/")
+    # Filter out common non-meaningful parts
+    skip = {"home", "chris", "projects", "Documents", "codex", ""}
+    return [p for p in parts if p not in skip]
+
+
+@app.get("/sessions/link", response_class=HTMLResponse)
+async def sessions_link_page(request: Request):
+    """Page to review and approve session-to-project links."""
+    from cognitex.db.neo4j import get_driver
+
+    driver = get_driver()
+    async with driver.session() as session:
+        # Get unlinked sessions
+        unlinked_result = await session.run("""
+            MATCH (cs:CodingSession)
+            WHERE NOT (cs)-[:DEVELOPS]->(:Project)
+            RETURN cs.session_id as session_id,
+                   cs.project_path as project_path,
+                   cs.summary as summary,
+                   cs.ended_at as ended_at,
+                   cs.cli_type as cli_type
+            ORDER BY cs.ended_at DESC
+            LIMIT 100
+        """)
+        unlinked_sessions = await unlinked_result.data()
+
+        # Get all projects for matching
+        projects_result = await session.run("""
+            MATCH (p:Project)
+            RETURN p.id as id, p.title as title, p.status as status
+            ORDER BY p.title
+        """)
+        projects = await projects_result.data()
+
+    # Calculate fuzzy matches for each unlinked session
+    suggestions = []
+    for sess in unlinked_sessions:
+        path = sess.get("project_path", "")
+        path_components = _extract_path_components(path)
+        path_str = "/".join(path_components).lower()
+
+        matches = []
+        for proj in projects:
+            title = proj.get("title", "")
+            if not title:
+                continue
+
+            # Score based on path components
+            best_score = 0
+            for component in path_components:
+                score = _fuzzy_match_score(component, title)
+                best_score = max(best_score, score)
+
+            # Also try full path match
+            full_score = _fuzzy_match_score(path_str, title)
+            best_score = max(best_score, full_score)
+
+            if best_score >= 0.4:  # Threshold for showing as suggestion
+                matches.append({
+                    "project_id": proj["id"],
+                    "project_title": title,
+                    "score": best_score,
+                    "status": proj.get("status", ""),
+                })
+
+        # Sort by score descending
+        matches.sort(key=lambda x: x["score"], reverse=True)
+
+        suggestions.append({
+            "session_id": sess["session_id"],
+            "project_path": path,
+            "summary": sess.get("summary", "")[:200] if sess.get("summary") else "",
+            "ended_at": sess.get("ended_at", ""),
+            "cli_type": sess.get("cli_type", "claude"),
+            "matches": matches[:5],  # Top 5 suggestions
+        })
+
+    return templates.TemplateResponse(
+        "sessions_link.html",
+        {
+            "request": request,
+            "suggestions": suggestions,
+            "projects": projects,
+            "total_unlinked": len(unlinked_sessions),
+        },
+    )
+
+
+@app.post("/api/sessions/link", response_class=HTMLResponse)
+async def api_sessions_link(
+    session_id: Annotated[str, Form()],
+    project_id: Annotated[str, Form()],
+):
+    """Approve a session-to-project link."""
+    from cognitex.db.neo4j import get_driver
+
+    driver = get_driver()
+    async with driver.session() as session:
+        result = await session.run("""
+            MATCH (cs:CodingSession {session_id: $session_id})
+            MATCH (p:Project {id: $project_id})
+            MERGE (cs)-[:DEVELOPS]->(p)
+            RETURN p.title as project_title
+        """, session_id=session_id, project_id=project_id)
+        record = await result.single()
+
+        if record:
+            return HTMLResponse(
+                f'<span class="badge badge-active">Linked to {record["project_title"]}</span>'
+            )
+        else:
+            return HTMLResponse(
+                '<span class="badge badge-error">Link failed</span>',
+                status_code=400
+            )
+
+
+@app.post("/api/sessions/link-bulk", response_class=JSONResponse)
+async def api_sessions_link_bulk(request: Request):
+    """Approve multiple session-to-project links at once."""
+    from cognitex.db.neo4j import get_driver
+
+    data = await request.json()
+    links = data.get("links", [])
+
+    driver = get_driver()
+    linked = 0
+
+    async with driver.session() as session:
+        for link in links:
+            session_id = link.get("session_id")
+            project_id = link.get("project_id")
+            if session_id and project_id:
+                await session.run("""
+                    MATCH (cs:CodingSession {session_id: $session_id})
+                    MATCH (p:Project {id: $project_id})
+                    MERGE (cs)-[:DEVELOPS]->(p)
+                """, session_id=session_id, project_id=project_id)
+                linked += 1
+
+    return {"status": "ok", "linked": linked}
+
+
+@app.post("/api/sessions/skip", response_class=HTMLResponse)
+async def api_sessions_skip(session_id: Annotated[str, Form()]):
+    """Mark a session as skipped (no project link needed)."""
+    # For now, just return a visual indicator - could store in Redis if we want persistence
+    return HTMLResponse('<span class="badge">Skipped</span>')
 
 
 def run_server(host: str = "127.0.0.1", port: int = 8080):
