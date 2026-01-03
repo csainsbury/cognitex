@@ -1144,12 +1144,12 @@ async def today_page(request: Request):
     tasks = await task_service.list(status="pending", limit=10)
     tasks = sorted(tasks, key=lambda t: {"high": 0, "medium": 1, "low": 2}.get(t.get("priority", "medium"), 1))[:5]
 
-    # Get upcoming deadlines
+    # Get upcoming deadlines (list query returns 'due' as alias for due_date)
     all_tasks = await task_service.list(include_done=False, limit=50)
     deadlines = [
-        {"title": t["title"], "due": t["due_date"]}
+        {"title": t["title"], "due": t["due"][:10] if t.get("due") else None}
         for t in all_tasks
-        if t.get("due_date")
+        if t.get("due")
     ][:5]
 
     return templates.TemplateResponse(
