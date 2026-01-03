@@ -699,39 +699,74 @@ class AutonomousAgent:
         return None
 
     async def _link_task(self, session, params: dict, reason: str) -> dict | None:
-        """Link a task to a project."""
+        """Link a task to a project.
+
+        NOTE: Task linking is disabled for autonomous agent.
+        Tasks should be linked manually by users or via the task linking UI
+        to prevent erroneous automatic associations.
+        """
         task_id = params.get("task_id")
         project_id = params.get("project_id")
+        task_name = params.get("task_name", "")
+        project_name = params.get("project_name", "")
 
         if not task_id or not project_id:
             return None
 
-        query = """
+        # Check if task is already linked to ANY project
+        check_query = """
         MATCH (t:Task {id: $task_id})
-        MATCH (p:Project {id: $project_id})
-        MERGE (t)-[r:BELONGS_TO]->(p)
-        SET r.created_at = datetime(),
-            r.created_by = 'autonomous_agent',
-            r.reason = $reason
-        RETURN t.title as task_title, p.title as project_title
+        OPTIONAL MATCH (t)-[:BELONGS_TO|PART_OF]->(existing:Project)
+        RETURN t.title as task_title, existing.title as existing_project
         """
         try:
-            result = await session.run(query, {
-                "task_id": task_id,
-                "project_id": project_id,
-                "reason": reason
-            })
+            result = await session.run(check_query, {"task_id": task_id})
             data = await result.single()
-            if data:
-                await log_action(
-                    "link_task",
-                    "agent",
-                    summary=f"Linked task '{data['task_title']}' to '{data['project_title']}'",
-                    details={"task_id": task_id, "project_id": project_id, "reason": reason}
+
+            if not data:
+                logger.warning("Task not found for linking", task_id=task_id)
+                return None
+
+            if data.get("existing_project"):
+                # Task already linked - don't re-link
+                logger.info(
+                    "Task already linked to project, skipping",
+                    task_id=task_id,
+                    task_title=data["task_title"],
+                    existing_project=data["existing_project"],
+                    proposed_project=project_name,
                 )
-                return {"linked": True, "task": data["task_title"], "project": data["project_title"]}
+                return {"skipped": True, "reason": f"Already linked to '{data['existing_project']}'"}
+
+            # For unlinked tasks, flag for human review instead of auto-linking
+            await log_action(
+                "flag_for_review",
+                "agent",
+                summary=f"Suggested linking task '{task_name}' to project '{project_name}'",
+                details={
+                    "type": "task_link_suggestion",
+                    "task_id": task_id,
+                    "task_name": task_name,
+                    "project_id": project_id,
+                    "project_name": project_name,
+                    "reason": reason,
+                }
+            )
+
+            # Send notification for review
+            from cognitex.services.notifications import publish_notification
+            await publish_notification(
+                f"**Task Link Suggestion**\n\n"
+                f"Link task '{task_name}' to project '{project_name}'?\n"
+                f"Reason: {reason}\n\n"
+                f"Review at /tasks to approve or dismiss.",
+                urgency="low",
+            )
+
+            return {"flagged": True, "task": task_name, "project": project_name}
+
         except Exception as e:
-            logger.warning("Failed to link task", error=str(e))
+            logger.warning("Failed to check/link task", error=str(e))
         return None
 
     async def _link_repository(self, session, params: dict, reason: str) -> dict | None:

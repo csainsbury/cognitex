@@ -100,7 +100,8 @@ Link a GitHub repository to a project when repo name matches project.
 ```
 
 ### LINK_TASK
-Link an orphaned task to a project when the task relates to the project.
+**NOTE: Task links require human approval.** Suggesting a task-project link will notify the user for review.
+Only suggest when you have HIGH confidence the task belongs to the project. Already-linked tasks are automatically skipped.
 ```json
 {{"action": "LINK_TASK", "task_id": "...", "task_name": "...", "project_id": "...", "project_name": "..."}}
 ```
