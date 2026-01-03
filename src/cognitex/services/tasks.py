@@ -178,7 +178,7 @@ class TaskService:
                 params["priority"] = priority
 
             if overdue_only:
-                filters.append("t.due < datetime()")
+                filters.append("t.due_date < datetime()")
                 filters.append("t.status <> 'done'")
 
             # Build the base query
@@ -222,7 +222,7 @@ class TaskService:
                 description: t.description,
                 status: t.status,
                 priority: t.priority,
-                due: toString(t.due),
+                due: toString(t.due_date),
                 effort_estimate: t.effort_estimate,
                 energy_cost: t.energy_cost,
                 source_type: t.source_type,
@@ -245,8 +245,8 @@ class TaskService:
                     WHEN 'medium' THEN 2
                     WHEN 'low' THEN 3
                 END,
-                CASE WHEN t.due IS NULL THEN 1 ELSE 0 END,
-                t.due ASC
+                CASE WHEN t.due_date IS NULL THEN 1 ELSE 0 END,
+                t.due_date ASC
             LIMIT $limit
             """
 
