@@ -106,6 +106,10 @@ This paper presents \cognitex{}, a personal agent system that addresses these ch
     \item \textbf{Externalized Prompt Architecture}: System prompts are stored as markdown files with templated variables, enabling rapid iteration on agent behavior without code changes.
 
     \item \textbf{Multi-Modal Triggering}: The agent responds to scheduled events (morning briefings, periodic monitoring), external triggers (new emails, calendar changes, Drive file updates), autonomous cycles (15-minute graph health checks), and direct user interaction through multiple interfaces (CLI, Discord, web dashboard, REST API).
+
+    \item \textbf{Coding Session Ingestion}: We introduce a distributed session sync architecture that captures AI coding assistant interactions (Claude Code, etc.) from multiple machines, extracts summaries and decisions via LLM, and links sessions to projects for rich development context. A standalone \texttt{cognitex-sync} package enables remote machines to push session data to the central server.
+
+    \item \textbf{Human-in-the-Loop Entity Linking}: A fuzzy matching interface for linking unstructured data to structured entities, allowing users to review and approve suggested matches before committing to the knowledge graph.
 \end{enumerate}
 
 \subsection{Paper Organization}
@@ -277,6 +281,7 @@ EmailDraft & id, to, subject, body, status & Agent-drafted replies \\
 ContextPack & id, title, summary, key\_points & Meeting briefings \\
 SuggestedBlock & id, title, duration, status & Focus time suggestions \\
 StateSnapshot & id, mode, fatigue\_level, created\_at & Cognitive state captures \\
+CodingSession & session\_id, project\_path, summary & AI coding assistant sessions \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -289,6 +294,7 @@ The graph captures relationships including:
     \item \textbf{Semantic}: \texttt{COVERS} (topic), \texttt{ABOUT} (concept), \texttt{REFERENCES}
     \item \textbf{Inferred}: \texttt{WORKS\_WITH}, \texttt{ASSIGNED\_TO}
     \item \textbf{State}: \texttt{CAPTURED\_STATE}, \texttt{STATE\_DURING}
+    \item \textbf{Development}: \texttt{DEVELOPS} (session to project), \texttt{WORKS\_ON} (session to repository)
 \end{itemize}
 
 \subsubsection{Redis}
@@ -320,6 +326,44 @@ Google Drive integration indexes document metadata and content with automatic ch
 \subsubsection{GitHub Service}
 
 GitHub integration enables code repository indexing with selective targeting of meaningful files (source code, documentation, configuration) while excluding generated artifacts (node\_modules, build outputs, binaries). Repository nodes in the graph can be linked to projects.
+
+\subsubsection{Coding Session Service}
+
+The coding session service captures and indexes interactions from AI coding assistants (Claude Code, Codex, etc.), providing rich development context for projects. The architecture supports both local and remote session ingestion:
+
+\paragraph{Local Session Discovery:} The system scans standard CLI session directories (e.g., \texttt{\textasciitilde/.claude/projects/}) for JSONL session files. Each session is parsed to extract metadata including project path, git branch, timestamps, and message content.
+
+\paragraph{Remote Session Sync:} A standalone \texttt{cognitex-sync} package enables machines without direct database access to push session data to the central server:
+
+\begin{lstlisting}[language=bash]
+# Install on remote machine
+pip install cognitex-sync
+
+# Configure with server credentials
+cognitex-sync configure --server https://cognitex.example.com \
+    --api-key <sync_api_key>
+
+# Push sessions (batched to avoid payload limits)
+cognitex-sync push
+\end{lstlisting}
+
+The sync client discovers sessions, batches them (5 per request to avoid HTTP 413 errors), and pushes to the \texttt{/api/sync/sessions} endpoint with Bearer token authentication.
+
+\paragraph{LLM-Based Summarization:} For sessions containing raw message history, the ingestion pipeline uses an LLM to extract structured summaries:
+
+\begin{lstlisting}[language=Python]
+{
+    "summary": "Implemented user authentication with JWT",
+    "decisions": ["Use bcrypt for password hashing",
+                  "Store refresh tokens in Redis"],
+    "files_changed": ["src/auth.py", "src/middleware.py"],
+    "next_steps": ["Add rate limiting", "Implement logout"],
+    "topics": ["authentication", "security", "JWT"],
+    "completion_state": "in_progress"
+}
+\end{lstlisting}
+
+\paragraph{Project Linking:} Sessions are automatically linked to Project and Repository nodes via path matching. A fuzzy matching interface (\texttt{/sessions/link}) enables human-in-the-loop review of suggested matches, calculating similarity scores between session paths and project titles using normalized Levenshtein distance.
 
 \subsubsection{LLM Service}
 
@@ -1221,7 +1265,17 @@ The web dashboard provides a comprehensive interface for system interaction and 
     \item Policy update status and manual trigger
 \end{itemize}
 
-\paragraph{Settings:} Configuration management for autonomous agent interval, integration settings, and user preferences.
+\paragraph{Settings:} Configuration management for autonomous agent interval, integration settings, remote session sync configuration with API key display and setup instructions, and user preferences.
+
+\paragraph{Session Linking:} Human-in-the-loop interface for linking coding sessions to projects:
+\begin{itemize}
+    \item Unlinked sessions with fuzzy match suggestions
+    \item Confidence scores based on path-to-title similarity
+    \item One-click approval for high-confidence matches
+    \item Bulk ``Accept All High-Confidence'' action for 90\%+ matches
+    \item Manual project selection dropdown for low-confidence or unmatched sessions
+    \item Skip option for sessions without relevant projects
+\end{itemize}
 
 \section{Evaluation}
 \label{sec:evaluation}
@@ -1236,6 +1290,8 @@ The current deployment demonstrates the following characteristics:
     \item 3,400+ document chunks with embeddings
     \item 50+ documents with deep semantic analysis
     \item 5 GitHub repositories indexed
+    \item 100+ coding sessions from multiple machines (local server + remote laptop)
+    \item 102 sessions linked to 4 projects via fuzzy matching
     \item $\approx$15,000 lines of application code
 \end{itemize}
 
@@ -1459,6 +1515,10 @@ cognitex tasks               # List tasks
 cognitex contacts            # List people
 cognitex doc-search "query"  # Semantic search
 
+# Coding Sessions
+cognitex sessions-sync       # Sync local Claude Code sessions
+cognitex sessions-context    # View project development context
+
 # Agent
 cognitex agent-chat          # Interactive mode
 cognitex briefing            # Morning briefing
@@ -1494,6 +1554,8 @@ CREATE CONSTRAINT goal_id_unique
   FOR (g:Goal) REQUIRE g.id IS UNIQUE;
 CREATE CONSTRAINT state_snapshot_id_unique
   FOR (ss:StateSnapshot) REQUIRE ss.id IS UNIQUE;
+CREATE CONSTRAINT coding_session_id_unique
+  FOR (cs:CodingSession) REQUIRE cs.session_id IS UNIQUE;
 
 // State and Learning Indexes
 CREATE INDEX state_snapshot_mode
@@ -1502,6 +1564,10 @@ CREATE INDEX state_snapshot_created
   FOR (ss:StateSnapshot) ON (ss.created_at);
 CREATE INDEX event_drain_level
   FOR (e:Event) ON (e.drain_level);
+CREATE INDEX coding_session_project
+  FOR (cs:CodingSession) ON (cs.project_path);
+CREATE INDEX coding_session_ended
+  FOR (cs:CodingSession) ON (cs.ended_at);
 \end{lstlisting}
 
 \section{Autonomous Agent Prompt Template}
