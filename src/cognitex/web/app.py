@@ -2816,15 +2816,15 @@ async def learning_page(request: Request):
     # Get learned patterns from database
     learned_patterns = []
     try:
-        from cognitex.db.postgres import get_postgres_session
+        from cognitex.db.postgres import get_session as get_postgres_session
         from sqlalchemy import text
 
         async for session in get_postgres_session():
             result = await session.execute(text("""
-                SELECT pattern_type, pattern_data, confidence, sample_count, created_at
+                SELECT pattern_type, pattern_data, confidence, sample_size, last_updated
                 FROM learned_patterns
                 WHERE confidence >= 0.3
-                ORDER BY confidence DESC, sample_count DESC
+                ORDER BY confidence DESC, sample_size DESC
                 LIMIT 10
             """))
             rows = result.fetchall()
@@ -2855,10 +2855,10 @@ async def learning_page(request: Request):
     # Get last policy update from action log
     last_update = None
     try:
-        from cognitex.db.postgres import get_postgres_session
+        from cognitex.db.postgres import get_session as get_pg_session
         from sqlalchemy import text
 
-        async for session in get_postgres_session():
+        async for session in get_pg_session():
             result = await session.execute(text("""
                 SELECT timestamp, details
                 FROM agent_actions
