@@ -2810,8 +2810,13 @@ async def learning_page(request: Request):
     except Exception as e:
         logger.warning("Failed to get high risk tasks", error=str(e))
 
-    # Get deferral stats
-    deferral_stats = summary.get("deferrals", {"total": 0, "avg_per_task": 0})
+    # Get deferral stats - ensure all expected keys exist
+    raw_deferrals = summary.get("deferrals", {})
+    deferral_stats = {
+        "total": raw_deferrals.get("total", 0),
+        "avg_per_task": raw_deferrals.get("avg_per_task", 0),
+        "by_reason": raw_deferrals.get("by_reason", {}),
+    }
 
     # Get learned patterns from database
     learned_patterns = []
