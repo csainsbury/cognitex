@@ -1,6 +1,7 @@
 """Google Calendar API service for fetching and syncing events."""
 
 from datetime import datetime, timedelta
+from enum import Enum
 from typing import Any
 
 import structlog
@@ -9,6 +10,83 @@ from googleapiclient.discovery import build
 from cognitex.services.google_auth import get_google_credentials
 
 logger = structlog.get_logger()
+
+
+class EventDrainLevel(str, Enum):
+    """Classification of cognitive drain level for calendar events.
+
+    Used to determine recovery needs after events:
+    - CLINICAL: Highest drain, requires rest of day recovery
+    - HIGH: High drain (board, presentations), needs 1hr recovery
+    - MEDIUM: Standard meetings
+    - LOW: Casual meetings, 1:1s
+    - RECOVERY: Explicitly blocked recovery/buffer time
+    """
+    CLINICAL = "clinical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    RECOVERY = "recovery"
+
+
+def classify_event_drain(event: dict) -> EventDrainLevel:
+    """Classify event drain level from calendar event.
+
+    Uses manual tags and heuristics to determine cognitive load:
+    - [CLINICAL] tag in title = highest drain, rest of day recovery
+    - Board/presentation/interview = high drain
+    - 1:1s/syncs = low drain
+    - Default = medium drain
+
+    Args:
+        event: Calendar event dict with 'summary' field
+
+    Returns:
+        EventDrainLevel enum value
+    """
+    title = event.get("summary", "")
+    title_upper = title.upper()
+    title_lower = title.lower()
+
+    # Manual clinical tag takes highest priority
+    if "[CLINICAL]" in title_upper:
+        return EventDrainLevel.CLINICAL
+
+    # Recovery/buffer blocks
+    if any(kw in title_lower for kw in ["buffer", "recovery", "break", "decompress"]):
+        return EventDrainLevel.RECOVERY
+
+    # High-drain keywords
+    if any(kw in title_lower for kw in [
+        "board", "presentation", "interview", "all-hands",
+        "town hall", "performance review", "strategy"
+    ]):
+        return EventDrainLevel.HIGH
+
+    # Low-drain keywords
+    if any(kw in title_lower for kw in [
+        "1:1", "1-on-1", "1 on 1", "sync", "catch up", "catchup",
+        "coffee", "lunch", "casual"
+    ]):
+        return EventDrainLevel.LOW
+
+    # Check duration - long meetings (90+ mins) are higher drain
+    start = event.get("start", {})
+    end = event.get("end", {})
+    if isinstance(start, dict) and isinstance(end, dict):
+        start_str = start.get("dateTime")
+        end_str = end.get("dateTime")
+        if start_str and end_str:
+            try:
+                start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                duration_mins = (end_dt - start_dt).total_seconds() / 60
+                if duration_mins >= 90:
+                    return EventDrainLevel.HIGH
+            except (ValueError, TypeError):
+                pass
+
+    return EventDrainLevel.MEDIUM
 
 
 class CalendarService:
@@ -245,6 +323,9 @@ def extract_event_metadata(event: dict) -> dict:
     # Estimate energy impact
     energy_impact = estimate_energy_impact(event_type, duration_minutes, len(attendees))
 
+    # Classify drain level for state management
+    drain_level = classify_event_drain(event)
+
     return {
         "gcal_id": event["id"],
         "title": event.get("summary", "(No title)"),
@@ -260,6 +341,7 @@ def extract_event_metadata(event: dict) -> dict:
         "attendee_count": len(attendees),
         "event_type": event_type,
         "energy_impact": energy_impact,
+        "drain_level": drain_level.value,  # For state management
         "is_recurring": "recurringEventId" in event,
         "hangout_link": event.get("hangoutLink", ""),
         "conference_data": bool(event.get("conferenceData")),

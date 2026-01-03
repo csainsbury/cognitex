@@ -801,21 +801,23 @@ class TriggerSystem:
             logger.error("Stuck task check failed", error=str(e))
 
     async def _check_mode_transition(self) -> None:
-        """Check for mode transitions after heavy meetings.
+        """Check for mode transitions after meetings.
 
-        When a heavy meeting ends, suggest low-energy recovery tasks.
+        Handles:
+        - CLINICAL sessions: Triggers rest-of-day OVERLOADED mode
+        - Heavy meetings: Suggests low-energy recovery tasks
         """
         logger.debug("Checking for mode transitions")
         from cognitex.agent.action_log import log_action
         from cognitex.db.redis import get_redis
 
         try:
-            from cognitex.agent.state_model import get_state_estimator
-            from cognitex.services.calendar import CalendarService
+            from cognitex.agent.state_model import get_state_estimator, OperatingMode
+            from cognitex.services.calendar import CalendarService, classify_event_drain, EventDrainLevel
             from datetime import datetime, timedelta
 
             state_estimator = get_state_estimator()
-            state = await state_estimator.get_current_state()
+            redis = get_redis()
 
             # Check if we just finished a meeting (within last 15 minutes)
             now = datetime.now()
@@ -849,25 +851,77 @@ class TriggerSystem:
                 time_since_end = now - event_end
                 if timedelta(0) < time_since_end <= timedelta(minutes=15):
                     summary = event.get("summary", "Meeting")
+                    event_id = event.get("id", "unknown")
 
-                    # Check if it was a "heavy" meeting
-                    is_heavy = self._is_heavy_meeting(event)
+                    # Classify the event drain level
+                    drain_level = classify_event_drain(event)
 
-                    if is_heavy:
-                        # Check if we already sent a transition nudge for this event
-                        redis = get_redis()
-                        nudge_key = f"cognitex:transition_nudge:{event.get('id')}"
-                        already_nudged = await redis.get(nudge_key)
+                    # Check if we already processed this event
+                    nudge_key = f"cognitex:transition_nudge:{event_id}"
+                    already_nudged = await redis.get(nudge_key)
+                    if already_nudged:
+                        continue
 
-                        if already_nudged:
-                            continue
+                    # Handle CLINICAL sessions - REST OF DAY recovery
+                    if drain_level == EventDrainLevel.CLINICAL:
+                        # Mark as processed (expires at midnight)
+                        seconds_until_midnight = (
+                            (now.replace(hour=23, minute=59, second=59) - now).seconds + 1
+                        )
+                        await redis.set(nudge_key, "1", ex=seconds_until_midnight)
 
+                        # Set OVERLOADED mode for rest of day
+                        await state_estimator.update_state(
+                            mode=OperatingMode.OVERLOADED,
+                            fatigue=0.95,
+                            notes=f"Post-clinical recovery (rest of day): {summary}"
+                        )
+
+                        # Store clinical recovery expiry in Redis
+                        recovery_until = now.replace(hour=23, minute=59, second=59).isoformat()
+                        await redis.set(
+                            "cognitex:clinical_recovery_until",
+                            recovery_until,
+                            ex=seconds_until_midnight
+                        )
+
+                        logger.info(
+                            "Clinical session ended - entering rest-of-day recovery",
+                            event=summary[:30],
+                            recovery_until=recovery_until,
+                        )
+
+                        # Notify user
+                        await self._send_notification(
+                            f"**Clinical session ended**\n\n"
+                            f"*{summary}*\n\n"
+                            f"Switching to recovery mode for the rest of the day. "
+                            f"Only low-energy tasks will be suggested.\n\n"
+                            f"_Take care of yourself._",
+                            urgency="low"
+                        )
+
+                        await log_action(
+                            "clinical_recovery",
+                            "trigger",
+                            summary=f"Rest-of-day recovery after clinical: '{summary[:30]}'",
+                            details={
+                                "event_id": event_id,
+                                "event_summary": summary,
+                                "recovery_until": recovery_until,
+                            }
+                        )
+                        continue
+
+                    # Handle HIGH drain meetings - suggest recovery
+                    if drain_level == EventDrainLevel.HIGH or self._is_heavy_meeting(event):
                         # Mark as nudged (expires in 1 hour)
                         await redis.set(nudge_key, "1", ex=3600)
 
                         logger.info(
                             "Heavy meeting ended, sending transition nudge",
                             event=summary[:30],
+                            drain_level=drain_level.value,
                         )
 
                         # Suggest low-energy tasks
@@ -900,8 +954,9 @@ class TriggerSystem:
                             "trigger",
                             summary=f"Recovery suggestion after '{summary[:30]}'",
                             details={
-                                "event_id": event.get("id"),
+                                "event_id": event_id,
                                 "event_summary": summary,
+                                "drain_level": drain_level.value,
                             }
                         )
 

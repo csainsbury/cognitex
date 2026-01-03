@@ -90,6 +90,31 @@ CREATE TABLE IF NOT EXISTS learned_patterns (
 CREATE INDEX IF NOT EXISTS idx_patterns_type ON learned_patterns(pattern_type);
 CREATE INDEX IF NOT EXISTS idx_patterns_updated ON learned_patterns(last_updated);
 
+-- State observations for learning energy patterns (Phase 5)
+-- Records task outcomes with state context to learn temporal/state patterns
+CREATE TABLE IF NOT EXISTS state_observations (
+    id SERIAL PRIMARY KEY,
+    task_id TEXT,
+    task_title TEXT,
+    outcome TEXT NOT NULL,  -- 'completed', 'deferred', 'abandoned'
+    mode TEXT,  -- Operating mode when task was attempted
+    fatigue_level FLOAT,  -- 0-1 scale
+    focus_score FLOAT,  -- 0-1 scale
+    hour_of_day INTEGER,  -- 0-23
+    day_of_week INTEGER,  -- 0=Monday, 6=Sunday
+    post_clinical BOOLEAN DEFAULT FALSE,
+    minutes_since_clinical INTEGER,
+    energy_cost TEXT,  -- 'high', 'medium', 'low' (task property)
+    task_friction INTEGER,  -- 0-5 scale
+    observed_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_state_obs_hour ON state_observations(hour_of_day);
+CREATE INDEX IF NOT EXISTS idx_state_obs_mode ON state_observations(mode);
+CREATE INDEX IF NOT EXISTS idx_state_obs_outcome ON state_observations(outcome);
+CREATE INDEX IF NOT EXISTS idx_state_obs_clinical ON state_observations(post_clinical);
+CREATE INDEX IF NOT EXISTS idx_state_obs_timestamp ON state_observations(observed_at);
+
 -- Add lifecycle columns to preference_rules if they don't exist
 -- These are added via ALTER TABLE to preserve existing data
 """

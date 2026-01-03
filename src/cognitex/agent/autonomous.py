@@ -180,6 +180,83 @@ class AutonomousAgent:
             actions_taken=len(actions_taken)
         )
 
+    async def _check_clinical_recovery(self) -> bool:
+        """Check if user is currently in post-clinical recovery mode.
+
+        Returns:
+            True if in clinical recovery (rest of day mode)
+        """
+        try:
+            from cognitex.db.redis import get_redis
+            redis = get_redis()
+            recovery_until = await redis.get("cognitex:clinical_recovery_until")
+            if recovery_until:
+                from datetime import datetime
+                recovery_str = recovery_until.decode() if isinstance(recovery_until, bytes) else recovery_until
+                recovery_time = datetime.fromisoformat(recovery_str)
+                return datetime.now() < recovery_time
+            return False
+        except Exception as e:
+            logger.debug("Could not check clinical recovery", error=str(e))
+            return False
+
+    async def _build_state_context(self) -> str:
+        """Build state context string for the LLM prompt.
+
+        Returns:
+            Formatted string describing current user state and energy level
+        """
+        try:
+            from cognitex.agent.state_model import get_state_estimator, get_temporal_model, ModeRules
+
+            state_estimator = get_state_estimator()
+            temporal_model = get_temporal_model()
+            state = await state_estimator.get_current_state()
+
+            # Check clinical recovery
+            in_clinical_recovery = await self._check_clinical_recovery()
+
+            # Get current time info
+            now = datetime.now()
+            hour = now.hour
+            expected_energy = temporal_model.get_expected_energy(hour)
+            peak_hours = temporal_model.get_peak_hours()
+            is_peak = hour in peak_hours
+
+            # Get mode rules
+            rules = ModeRules.get_rules(state.mode)
+
+            lines = [
+                f"- **Mode**: {state.mode.value}",
+                f"- **Fatigue**: {state.signals.fatigue_level:.0%}",
+                f"- **Hour**: {hour}:00 (expected energy: {expected_energy:.0%})",
+                f"- **Peak time**: {'Yes' if is_peak else 'No'} (peak hours: {', '.join(f'{h}:00' for h in peak_hours[:3])})",
+            ]
+
+            if state.signals.available_block_minutes:
+                lines.append(f"- **Available block**: {state.signals.available_block_minutes} mins")
+
+            if in_clinical_recovery:
+                lines.append("")
+                lines.append("**POST-CLINICAL RECOVERY MODE ACTIVE**")
+                lines.append("- Only low-energy, low-friction tasks allowed")
+                lines.append("- Do NOT suggest demanding work")
+                lines.append("- Use SUGGEST_RESCHEDULE for high-energy tasks to tomorrow morning")
+
+            # Add mode-specific guidance
+            lines.append("")
+            lines.append(f"**Mode rules for {state.mode.value}:**")
+            lines.append(f"- Max friction: {rules.max_task_friction}/5")
+            lines.append(f"- Allowed task types: {', '.join(rules.allowed_task_types)}")
+            if state.signals.fatigue_level > 0.7:
+                lines.append("- HIGH FATIGUE: Avoid high-energy tasks")
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            logger.debug("Could not build state context", error=str(e))
+            return "(State context unavailable)"
+
     async def _reason_about_context(self, context: dict) -> list[dict]:
         """Use LLM to reason about the graph context and decide on actions."""
         from cognitex.services.llm import get_llm_service
@@ -386,6 +463,11 @@ class AutonomousAgent:
 
         learned_guidelines = "\n".join(learned_lines) if learned_lines else "(No specific guidelines yet - keep learning from feedback)"
 
+        # =====================================================================
+        # STATE CONTEXT - Current user state affects what actions are appropriate
+        # =====================================================================
+        state_context_text = await self._build_state_context()
+
         prompt = format_prompt(
             "autonomous_agent",
             # Summary stats
@@ -400,6 +482,7 @@ class AutonomousAgent:
             inbox_text=inbox_text,
             writing_samples_text=samples_text,
             learned_guidelines=learned_guidelines,  # Learning feedback loop
+            state_context_text=state_context_text,  # User state/energy context
             pending_emails_text=pending_emails_text,
             upcoming_calendar_text=upcoming_calendar_text,
             opportunities_text=opp_text,
@@ -524,6 +607,8 @@ class AutonomousAgent:
             return await self._update_project_status(session, params, reason)
         elif action == "CREATE_TASK":
             return await self._create_task(session, params, reason)
+        elif action == "SUGGEST_RESCHEDULE":
+            return await self._suggest_reschedule(session, params, reason)
         elif action == "FLAG_FOR_REVIEW":
             return await self._flag_for_review(params, reason, flagged_this_cycle)
         else:
@@ -980,6 +1065,71 @@ class AutonomousAgent:
         except Exception as e:
             logger.warning("Failed to create task", error=str(e))
         return None
+
+    async def _suggest_reschedule(self, session, params: dict, reason: str) -> dict | None:
+        """Suggest rescheduling a high-friction task to a better time.
+
+        Used when current state/energy doesn't match task requirements.
+        Sends a notification suggesting the user reschedule to peak hours.
+        """
+        task_id = params.get("task_id")
+        task_title = params.get("task_title", "Task")
+        current_issue = params.get("current_issue", "Current state isn't optimal")
+        suggested_time = params.get("suggested_time", "tomorrow morning")
+
+        # Get temporal model for better suggestions
+        try:
+            from cognitex.agent.state_model import get_temporal_model
+            temporal = get_temporal_model()
+            peak_hour = temporal.get_peak_hour()
+            suggested_time = temporal.suggest_reschedule_time(for_high_energy=True)
+        except Exception as e:
+            logger.debug("Could not get temporal suggestion", error=str(e))
+
+        # Send notification suggesting reschedule
+        try:
+            from cognitex.agent.tools import SendNotificationTool
+
+            message = (
+                f"**Reschedule Suggestion**\n\n"
+                f"**Task:** {task_title}\n"
+                f"**Issue:** {current_issue}\n"
+                f"**Suggested time:** {suggested_time}\n\n"
+                f"_{reason}_"
+            )
+
+            tool = SendNotificationTool()
+            await tool.execute(message=message, urgency="low")
+
+            await log_action(
+                "suggest_reschedule",
+                "agent",
+                summary=f"Suggested rescheduling '{task_title}' to {suggested_time}",
+                details={
+                    "task_id": task_id,
+                    "task_title": task_title,
+                    "current_issue": current_issue,
+                    "suggested_time": suggested_time,
+                    "reason": reason,
+                }
+            )
+
+            logger.info(
+                "Sent reschedule suggestion",
+                task_title=task_title[:30],
+                suggested_time=suggested_time,
+            )
+
+            return {
+                "suggested": True,
+                "task_id": task_id,
+                "task_title": task_title,
+                "suggested_time": suggested_time,
+            }
+
+        except Exception as e:
+            logger.warning("Failed to send reschedule suggestion", error=str(e))
+            return None
 
     async def _send_proposal_notification(
         self, title: str, reason: str, proposal_id: str

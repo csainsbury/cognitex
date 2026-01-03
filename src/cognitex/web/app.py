@@ -53,6 +53,99 @@ async def get_people(limit: int = 50) -> list[dict]:
     return []
 
 
+async def _record_task_outcome(
+    task_id: str,
+    task_title: str,
+    outcome: str,  # 'completed', 'deferred', 'abandoned'
+    energy_cost: str = "medium",
+) -> None:
+    """Record task outcome with state context for learning.
+
+    Stores the observation in state_observations table and updates
+    the temporal energy model.
+    """
+    from datetime import datetime
+    import structlog
+    from cognitex.db.postgres import get_session
+    from cognitex.db.redis import get_redis
+    from sqlalchemy import text
+
+    logger = structlog.get_logger()
+
+    try:
+        # Get current state
+        state_estimator = get_state_estimator()
+        state = await state_estimator.get_current_state()
+
+        # Check if in clinical recovery
+        redis = get_redis()
+        recovery_until = await redis.get("cognitex:clinical_recovery_until")
+        post_clinical = False
+        minutes_since = None
+
+        if recovery_until:
+            post_clinical = True
+            # Could calculate minutes since clinical ended if needed
+
+        now = datetime.now()
+        hour = now.hour
+        day_of_week = now.weekday()
+
+        # Store observation
+        async for session in get_session():
+            await session.execute(text("""
+                INSERT INTO state_observations (
+                    task_id, task_title, outcome, mode, fatigue_level,
+                    focus_score, hour_of_day, day_of_week, post_clinical,
+                    minutes_since_clinical, energy_cost, observed_at
+                ) VALUES (
+                    :task_id, :task_title, :outcome, :mode, :fatigue,
+                    :focus, :hour, :dow, :post_clinical,
+                    :minutes_since, :energy_cost, NOW()
+                )
+            """), {
+                "task_id": task_id,
+                "task_title": task_title[:100],
+                "outcome": outcome,
+                "mode": state.mode.value,
+                "fatigue": state.signals.fatigue_level,
+                "focus": state.signals.focus_score,
+                "hour": hour,
+                "dow": day_of_week,
+                "post_clinical": post_clinical,
+                "minutes_since": minutes_since,
+                "energy_cost": energy_cost,
+            })
+            await session.commit()
+            break
+
+        # Update temporal model with observation
+        try:
+            from cognitex.agent.state_model import get_temporal_model
+            temporal = get_temporal_model()
+            await temporal.update_from_observation(
+                hour=hour,
+                task_completed=(outcome == "completed"),
+                task_difficulty=energy_cost,
+                post_clinical=post_clinical,
+            )
+        except Exception as e:
+            logger.debug("Could not update temporal model", error=str(e))
+
+        logger.debug(
+            "Recorded task outcome",
+            task_id=task_id,
+            outcome=outcome,
+            hour=hour,
+            mode=state.mode.value,
+        )
+
+    except Exception as e:
+        # Don't fail the main operation if recording fails
+        logger = structlog.get_logger()
+        logger.warning("Failed to record task outcome", error=str(e))
+
+
 async def search_people(query: str, limit: int = 10) -> list[dict]:
     """Search people by name or email."""
     from cognitex.db.neo4j import get_neo4j_session
@@ -407,12 +500,24 @@ async def task_update(
 
 @app.post("/tasks/{task_id}/complete", response_class=HTMLResponse)
 async def task_complete(request: Request, task_id: str):
-    """Mark task as complete."""
+    """Mark task as complete and record state observation for learning."""
     task_service = get_task_service()
+
+    # Get task info before completing (for learning)
+    task_before = await task_service.get(task_id)
+
     task = await task_service.complete(task_id)
 
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
+
+    # Record state observation for learning
+    await _record_task_outcome(
+        task_id=task_id,
+        task_title=task_before.get("title", "") if task_before else "",
+        outcome="completed",
+        energy_cost=task_before.get("energy_cost", "medium") if task_before else "medium",
+    )
 
     task = await task_service.get(task_id)
     return templates.TemplateResponse(

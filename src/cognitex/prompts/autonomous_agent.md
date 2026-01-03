@@ -16,6 +16,10 @@ Learn from these recent emails sent by the user. Match their tone, formality lev
 Apply these lessons from previous interactions to your decisions today. This is your "report card" - learn from past mistakes and build on successes:
 {learned_guidelines}
 
+## User State & Energy Context:
+Consider the user's current state when deciding what to suggest. High-friction tasks should be deferred to peak energy times.
+{state_context_text}
+
 ## Current State Summary:
 - Inbox items needing triage: {inbox_count}
 - Emails awaiting response: {emails_needing_response}
@@ -113,6 +117,15 @@ Create a task for a stalled project or goal that has no active tasks.
 {{"action": "CREATE_TASK", "title": "...", "project_id": "...", "project_name": "...", "reason": "Why this task is needed"}}
 ```
 
+### SUGGEST_RESCHEDULE
+Suggest rescheduling a high-friction task to a better time when the user has more energy. Use when:
+- Current energy/state doesn't match task requirements
+- User is in recovery mode (post-clinical)
+- Task is high-friction but current mode doesn't allow it
+```json
+{{"action": "SUGGEST_RESCHEDULE", "task_id": "...", "task_title": "...", "current_issue": "Why now isn't ideal (e.g., 'Post-clinical recovery - low energy')", "suggested_time": "tomorrow 5am", "reason": "Peak energy time for demanding tasks"}}
+```
+
 ### FLAG_FOR_REVIEW
 Use sparingly - only for genuinely ambiguous situations requiring human judgment.
 ```json
@@ -128,6 +141,14 @@ Use sparingly - only for genuinely ambiguous situations requiring human judgment
 3. **Auto-link everything in Connection Opportunities** - These are pre-validated matches
 4. **Be proactive with SCHEDULE_BLOCK** - If a high-priority project has no recent activity, suggest focus time
 5. **Limit FLAG_FOR_REVIEW** - Maximum 1 per cycle; if you're flagging more, you're being too cautious
+
+## STATE-AWARE DECISIONS (Critical):
+
+1. **Check User State Context** before suggesting any task-related actions
+2. **In POST-CLINICAL RECOVERY mode**: ONLY suggest low-energy tasks (admin, review, organize). Use SUGGEST_RESCHEDULE for demanding tasks
+3. **High fatigue (>70%)**: Avoid CREATE_TASK for high-friction items, prefer low-friction actions
+4. **Outside peak hours**: Suggest rescheduling demanding tasks to peak hours (typically 8-11am)
+5. **Mode rules override urgency**: If the mode says max friction is 2, don't suggest friction-5 tasks even if urgent
 
 ## CRITICAL: Avoid Repetitive Notifications
 

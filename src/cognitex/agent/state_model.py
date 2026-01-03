@@ -438,6 +438,231 @@ def get_state_estimator() -> StateEstimator:
 
 
 # =============================================================================
+# Phase 5: Temporal Energy Model
+# =============================================================================
+
+class TemporalEnergyModel:
+    """Models energy patterns by time of day.
+
+    Uses a default diurnal curve with peak energy 8-11am and steady
+    decline through the afternoon/evening. Learns from task completion
+    observations to personalize the curve over time.
+    """
+
+    # Default energy curve by hour (0.0-1.0 scale)
+    # Diurnal pattern: peak 8-11am, steady decline through day
+    DEFAULT_CURVE: dict[int, float] = {
+        0: 0.15,   # midnight - very low
+        1: 0.1,
+        2: 0.1,
+        3: 0.1,
+        4: 0.15,   # pre-dawn
+        5: 0.25,   # early rise
+        6: 0.45,   # waking up
+        7: 0.7,    # ramping up
+        8: 0.9,    # entering peak zone
+        9: 0.95,   # peak
+        10: 0.95,  # peak
+        11: 0.9,   # still high
+        12: 0.75,  # noon - starting to dip
+        13: 0.65,  # post-lunch dip
+        14: 0.55,  # afternoon low
+        15: 0.5,
+        16: 0.45,
+        17: 0.4,   # late afternoon
+        18: 0.35,
+        19: 0.3,   # evening
+        20: 0.25,
+        21: 0.2,
+        22: 0.15,
+        23: 0.15,
+    }
+
+    def __init__(self):
+        self._learned_overrides: dict[int, float] = {}
+
+    def get_expected_energy(self, hour: int) -> float:
+        """Get expected energy level for hour of day.
+
+        Args:
+            hour: Hour of day (0-23)
+
+        Returns:
+            Energy level (0.0-1.0)
+        """
+        # Check for learned overrides first
+        if hour in self._learned_overrides:
+            return self._learned_overrides[hour]
+        return self.DEFAULT_CURVE.get(hour, 0.5)
+
+    def get_peak_hours(self) -> list[int]:
+        """Get the hours with highest expected energy.
+
+        Returns:
+            List of hours sorted by energy (highest first)
+        """
+        all_hours = {**self.DEFAULT_CURVE, **self._learned_overrides}
+        sorted_hours = sorted(all_hours.items(), key=lambda x: x[1], reverse=True)
+        return [h for h, _ in sorted_hours[:5]]
+
+    def get_peak_hour(self) -> int:
+        """Get the single best hour for high-energy tasks.
+
+        Returns:
+            Hour with highest expected energy
+        """
+        return self.get_peak_hours()[0]
+
+    async def load_learned_patterns(self) -> None:
+        """Load learned temporal patterns from database."""
+        try:
+            from cognitex.db.postgres import get_session
+            from sqlalchemy import text
+
+            async for session in get_session():
+                result = await session.execute(text("""
+                    SELECT pattern_key, pattern_data
+                    FROM learned_patterns
+                    WHERE pattern_type = 'temporal_energy'
+                """))
+                rows = result.fetchall()
+
+                for row in rows:
+                    try:
+                        hour = int(row[0])
+                        data = row[1]
+                        if isinstance(data, dict) and "energy" in data:
+                            self._learned_overrides[hour] = data["energy"]
+                    except (ValueError, TypeError):
+                        continue
+
+                break
+
+            logger.debug(
+                "Loaded temporal patterns",
+                override_count=len(self._learned_overrides),
+            )
+        except Exception as e:
+            logger.debug("Could not load temporal patterns", error=str(e))
+
+    async def update_from_observation(
+        self,
+        hour: int,
+        task_completed: bool,
+        task_difficulty: str,  # 'high', 'medium', 'low'
+        post_clinical: bool = False,
+    ) -> None:
+        """Learn from task completion observations.
+
+        Updates the energy model based on whether tasks were completed
+        at different hours.
+
+        Args:
+            hour: Hour of day when task was attempted
+            task_completed: Whether the task was completed
+            task_difficulty: Task difficulty level
+            post_clinical: Whether this was after a clinical session
+        """
+        try:
+            from cognitex.db.postgres import get_session
+            from sqlalchemy import text
+            import json
+
+            # Skip learning from post-clinical observations (special case)
+            if post_clinical:
+                return
+
+            # Calculate adjustment based on outcome
+            # Completed tasks suggest energy was sufficient
+            # Deferred/failed tasks suggest energy was too low
+            adjustment = 0.02 if task_completed else -0.02
+
+            # Weight by task difficulty (harder tasks = stronger signal)
+            difficulty_weight = {"high": 1.5, "medium": 1.0, "low": 0.5}.get(
+                task_difficulty, 1.0
+            )
+            adjustment *= difficulty_weight
+
+            # Get current value
+            current = self.get_expected_energy(hour)
+            new_value = max(0.05, min(0.95, current + adjustment))
+
+            # Update learned pattern in database
+            async for session in get_session():
+                await session.execute(text("""
+                    INSERT INTO learned_patterns (id, pattern_type, pattern_key, pattern_data, sample_size, last_updated)
+                    VALUES (:id, 'temporal_energy', :hour, :data, 1, NOW())
+                    ON CONFLICT (pattern_type, pattern_key) DO UPDATE SET
+                        pattern_data = :data,
+                        sample_size = learned_patterns.sample_size + 1,
+                        last_updated = NOW()
+                """), {
+                    "id": f"temporal_energy_{hour}",
+                    "hour": str(hour),
+                    "data": json.dumps({"energy": new_value}),
+                })
+                await session.commit()
+                break
+
+            # Update in-memory cache
+            self._learned_overrides[hour] = new_value
+
+            logger.debug(
+                "Updated temporal pattern",
+                hour=hour,
+                completed=task_completed,
+                old_value=current,
+                new_value=new_value,
+            )
+        except Exception as e:
+            logger.debug("Could not update temporal pattern", error=str(e))
+
+    def is_peak_time(self) -> bool:
+        """Check if current time is in a peak energy window.
+
+        Returns:
+            True if current hour is in top 5 energy hours
+        """
+        current_hour = datetime.now().hour
+        return current_hour in self.get_peak_hours()
+
+    def suggest_reschedule_time(self, for_high_energy: bool = True) -> str:
+        """Suggest a better time for a task.
+
+        Args:
+            for_high_energy: If True, suggest peak hours; if False, suggest low-energy hours
+
+        Returns:
+            Human-readable time suggestion
+        """
+        peak_hour = self.get_peak_hour()
+        now = datetime.now()
+
+        if for_high_energy:
+            if now.hour < peak_hour:
+                # Today, at peak hour
+                return f"today around {peak_hour}:00"
+            else:
+                # Tomorrow morning
+                return f"tomorrow around {peak_hour}:00"
+        else:
+            # For low-energy tasks, suggest afternoon/evening
+            return "later this afternoon when energy naturally dips"
+
+
+# Singleton instance
+_temporal_model: TemporalEnergyModel | None = None
+
+
+def get_temporal_model() -> TemporalEnergyModel:
+    """Get the temporal energy model singleton."""
+    global _temporal_model
+    if _temporal_model is None:
+        _temporal_model = TemporalEnergyModel()
+    return _temporal_model
+
+
+# =============================================================================
 # Phase 4: Deferral Prediction (1.3)
 # =============================================================================
 
