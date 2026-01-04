@@ -25,8 +25,9 @@ async def init_postgres() -> None:
     _engine = create_async_engine(
         db_url,
         echo=settings.is_development,
-        pool_size=5,
-        max_overflow=10,
+        pool_size=20,
+        max_overflow=30,
+        pool_pre_ping=True,  # Verify connections before use
     )
     _session_factory = async_sessionmaker(
         bind=_engine,

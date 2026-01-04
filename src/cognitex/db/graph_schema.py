@@ -55,6 +55,11 @@ SCHEMA_STATEMENTS = [
     "CREATE INDEX coding_session_project IF NOT EXISTS FOR (cs:CodingSession) ON (cs.project_path)",
     "CREATE INDEX coding_session_ended IF NOT EXISTS FOR (cs:CodingSession) ON (cs.ended_at)",
     "CREATE INDEX coding_session_cli IF NOT EXISTS FOR (cs:CodingSession) ON (cs.cli_type)",
+    # Compound indexes for common query patterns
+    "CREATE INDEX email_action_date IF NOT EXISTS FOR (e:Email) ON (e.action_required, e.date)",
+    "CREATE INDEX task_status_priority IF NOT EXISTS FOR (t:Task) ON (t.status, t.priority)",
+    "CREATE INDEX task_status_due IF NOT EXISTS FOR (t:Task) ON (t.status, t.due_date)",
+    "CREATE INDEX event_date_type IF NOT EXISTS FOR (ev:Event) ON (ev.start, ev.event_type)",
 ]
 
 

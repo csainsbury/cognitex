@@ -626,3 +626,170 @@ async def get_recent_rejections(limit: int = 10) -> list[dict]:
         } for row in result.fetchall()]
 
     return []
+
+
+async def get_action_summary(days: int = 7) -> dict:
+    """Get summary of actions taken over the past N days.
+
+    Returns:
+        Dict with total_actions, by_type counts, and by_source counts
+    """
+    from cognitex.db.postgres import get_session
+
+    summary = {
+        "total_actions": 0,
+        "by_type": {},
+        "by_source": {},
+    }
+
+    async for session in get_session():
+        # Count by type
+        result = await session.execute(text("""
+            SELECT action_type, COUNT(*) as count
+            FROM agent_actions
+            WHERE timestamp > NOW() - INTERVAL ':days days'
+            GROUP BY action_type
+        """).bindparams(days=days))
+
+        for row in result.fetchall():
+            summary["by_type"][row.action_type] = row.count
+            summary["total_actions"] += row.count
+
+        # Count by source
+        result = await session.execute(text("""
+            SELECT source, COUNT(*) as count
+            FROM agent_actions
+            WHERE timestamp > NOW() - INTERVAL ':days days'
+            GROUP BY source
+        """).bindparams(days=days))
+
+        for row in result.fetchall():
+            summary["by_source"][row.source] = row.count
+
+        break
+
+    return summary
+
+
+# =============================================================================
+# Learning from Rejections (Phase 5)
+# =============================================================================
+
+async def learn_from_rejection(
+    proposal_type: str,
+    rejection_reason: str,
+    context: dict | None = None,
+) -> None:
+    """Record rejection pattern for learning.
+
+    This helps the agent avoid making similar proposals that are
+    likely to be rejected.
+
+    Args:
+        proposal_type: Type of proposal (e.g., 'task_create', 'email_draft')
+        rejection_reason: Why it was rejected
+        context: Additional context (project, time of day, etc.)
+    """
+    from cognitex.db.postgres import get_session
+    import json
+
+    async for session in get_session():
+        try:
+            await session.execute(text("""
+                INSERT INTO learned_patterns (id, pattern_type, pattern_key, pattern_data, sample_size, last_updated)
+                VALUES (:id, 'rejection', :key, :data, 1, NOW())
+                ON CONFLICT (pattern_type, pattern_key) DO UPDATE SET
+                    pattern_data = jsonb_set(
+                        COALESCE(learned_patterns.pattern_data, '{}'),
+                        '{reasons}',
+                        COALESCE(learned_patterns.pattern_data->'reasons', '[]') || :reason_json
+                    ),
+                    sample_size = learned_patterns.sample_size + 1,
+                    last_updated = NOW()
+            """), {
+                "id": f"rejection_{proposal_type}",
+                "key": proposal_type,
+                "data": json.dumps({
+                    "reasons": [rejection_reason],
+                    "context": context or {},
+                }),
+                "reason_json": json.dumps(rejection_reason),
+            })
+            await session.commit()
+        except Exception as e:
+            logger.warning("Could not record rejection pattern", error=str(e))
+        break
+
+
+async def get_rejection_patterns(proposal_type: str | None = None) -> dict:
+    """Get learned rejection patterns.
+
+    Args:
+        proposal_type: Optional filter by proposal type
+
+    Returns:
+        Dict of patterns by proposal type
+    """
+    from cognitex.db.postgres import get_session
+
+    patterns = {}
+
+    async for session in get_session():
+        if proposal_type:
+            result = await session.execute(text("""
+                SELECT pattern_key, pattern_data, sample_size
+                FROM learned_patterns
+                WHERE pattern_type = 'rejection' AND pattern_key = :key
+            """), {"key": proposal_type})
+        else:
+            result = await session.execute(text("""
+                SELECT pattern_key, pattern_data, sample_size
+                FROM learned_patterns
+                WHERE pattern_type = 'rejection'
+            """))
+
+        for row in result.fetchall():
+            patterns[row.pattern_key] = {
+                "data": row.pattern_data,
+                "sample_size": row.sample_size,
+            }
+        break
+
+    return patterns
+
+
+async def should_suppress_proposal(proposal_type: str, content: str) -> tuple[bool, str | None]:
+    """Check if a proposal should be suppressed based on rejection patterns.
+
+    Args:
+        proposal_type: Type of proposal
+        content: Proposal content to check
+
+    Returns:
+        (should_suppress, reason) - True if proposal matches rejection patterns
+    """
+    patterns = await get_rejection_patterns(proposal_type)
+
+    if proposal_type not in patterns:
+        return False, None
+
+    pattern_data = patterns[proposal_type].get("data", {})
+    sample_size = patterns[proposal_type].get("sample_size", 0)
+
+    # Only suppress if we have enough samples
+    if sample_size < 3:
+        return False, None
+
+    # Check if content matches common rejection reasons
+    reasons = pattern_data.get("reasons", [])
+    content_lower = content.lower()
+
+    for reason in reasons[-10:]:  # Check recent reasons
+        # Simple keyword matching - could be enhanced with semantic similarity
+        if isinstance(reason, str) and len(reason) > 10:
+            reason_keywords = reason.lower().split()
+            matches = sum(1 for kw in reason_keywords if kw in content_lower)
+            if matches >= 2:
+                return True, f"Similar to previously rejected: {reason[:50]}..."
+
+    return False, None

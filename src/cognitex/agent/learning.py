@@ -372,3 +372,210 @@ async def init_learning_system() -> LearningSystem:
 
     logger.info("Learning system initialized")
     return get_learning_system()
+
+
+# =============================================================================
+# State Observation Recording (Phase 5)
+# =============================================================================
+
+async def record_task_outcome(
+    task_id: str,
+    task_title: str,
+    completed: bool,
+    mode: str | None = None,
+    fatigue_level: float | None = None,
+    focus_score: float | None = None,
+    energy_cost: str | None = None,
+    task_friction: int | None = None,
+) -> None:
+    """Record a task outcome with state context for learning.
+
+    This feeds data into the temporal energy model and state-aware
+    recommendation system.
+
+    Args:
+        task_id: The task ID
+        task_title: Task title for reference
+        completed: True if task was completed, False if deferred/abandoned
+        mode: Current operating mode when task was attempted
+        fatigue_level: Current fatigue level (0-1)
+        focus_score: Current focus score (0-1)
+        energy_cost: Task energy cost ('high', 'medium', 'low')
+        task_friction: Task friction level (0-5)
+    """
+    from cognitex.db.postgres import get_session
+    from cognitex.db.redis import get_redis
+    from cognitex.agent.state_model import get_temporal_model
+    from sqlalchemy import text
+
+    now = datetime.now()
+    hour = now.hour
+    day_of_week = now.weekday()  # 0=Monday, 6=Sunday
+
+    # Check if we're in post-clinical recovery
+    redis = get_redis()
+    clinical_recovery = await redis.get("cognitex:clinical_recovery_until")
+    post_clinical = clinical_recovery is not None
+    minutes_since_clinical = None
+
+    if post_clinical and clinical_recovery:
+        try:
+            recovery_until = datetime.fromisoformat(clinical_recovery)
+            # We're IN recovery, so clinical session was recently
+            # Estimate: assume clinical ended at start of day minus hours passed
+            minutes_since_clinical = hour * 60  # Rough estimate
+        except (ValueError, TypeError):
+            pass
+
+    # Determine outcome string
+    outcome = "completed" if completed else "deferred"
+
+    try:
+        async for session in get_session():
+            await session.execute(text("""
+                INSERT INTO state_observations (
+                    task_id, task_title, outcome, mode, fatigue_level,
+                    focus_score, hour_of_day, day_of_week, post_clinical,
+                    minutes_since_clinical, energy_cost, task_friction, observed_at
+                ) VALUES (
+                    :task_id, :task_title, :outcome, :mode, :fatigue_level,
+                    :focus_score, :hour, :day_of_week, :post_clinical,
+                    :minutes_since_clinical, :energy_cost, :task_friction, :observed_at
+                )
+            """), {
+                "task_id": task_id,
+                "task_title": task_title[:200] if task_title else None,
+                "outcome": outcome,
+                "mode": mode,
+                "fatigue_level": fatigue_level,
+                "focus_score": focus_score,
+                "hour": hour,
+                "day_of_week": day_of_week,
+                "post_clinical": post_clinical,
+                "minutes_since_clinical": minutes_since_clinical,
+                "energy_cost": energy_cost,
+                "task_friction": task_friction,
+                "observed_at": now,
+            })
+            await session.commit()
+            break
+
+        # Update temporal energy model based on observation
+        temporal = get_temporal_model()
+        difficulty = energy_cost or "medium"
+        await temporal.update_from_observation(
+            hour=hour,
+            task_completed=completed,
+            task_difficulty=difficulty,
+            post_clinical=post_clinical,
+        )
+
+        logger.debug(
+            "Recorded task outcome observation",
+            task_id=task_id,
+            outcome=outcome,
+            hour=hour,
+            mode=mode,
+            post_clinical=post_clinical,
+        )
+    except Exception as e:
+        logger.warning("Failed to record task outcome", error=str(e))
+
+
+async def get_state_observations_summary(days: int = 7) -> dict:
+    """Get summary statistics from state observations.
+
+    Args:
+        days: Number of days to analyze
+
+    Returns:
+        Dict with completion rates by hour, mode, and energy level
+    """
+    from cognitex.db.postgres import get_session
+    from sqlalchemy import text
+
+    summary = {
+        "by_hour": {},
+        "by_mode": {},
+        "by_energy_cost": {},
+        "post_clinical_impact": {},
+        "total_observations": 0,
+    }
+
+    try:
+        async for session in get_session():
+            # Completion rate by hour
+            result = await session.execute(text("""
+                SELECT
+                    hour_of_day,
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE outcome = 'completed') as completed
+                FROM state_observations
+                WHERE observed_at > NOW() - INTERVAL ':days days'
+                GROUP BY hour_of_day
+                ORDER BY hour_of_day
+            """).bindparams(days=days))
+
+            for row in result.fetchall():
+                rate = row.completed / row.total if row.total > 0 else 0
+                summary["by_hour"][row.hour_of_day] = {
+                    "total": row.total,
+                    "completed": row.completed,
+                    "rate": round(rate, 2),
+                }
+
+            # Completion rate by mode
+            result = await session.execute(text("""
+                SELECT
+                    mode,
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE outcome = 'completed') as completed
+                FROM state_observations
+                WHERE observed_at > NOW() - INTERVAL ':days days'
+                  AND mode IS NOT NULL
+                GROUP BY mode
+            """).bindparams(days=days))
+
+            for row in result.fetchall():
+                rate = row.completed / row.total if row.total > 0 else 0
+                summary["by_mode"][row.mode] = {
+                    "total": row.total,
+                    "completed": row.completed,
+                    "rate": round(rate, 2),
+                }
+
+            # Post-clinical impact
+            result = await session.execute(text("""
+                SELECT
+                    post_clinical,
+                    COUNT(*) as total,
+                    COUNT(*) FILTER (WHERE outcome = 'completed') as completed
+                FROM state_observations
+                WHERE observed_at > NOW() - INTERVAL ':days days'
+                GROUP BY post_clinical
+            """).bindparams(days=days))
+
+            for row in result.fetchall():
+                rate = row.completed / row.total if row.total > 0 else 0
+                key = "post_clinical" if row.post_clinical else "normal"
+                summary["post_clinical_impact"][key] = {
+                    "total": row.total,
+                    "completed": row.completed,
+                    "rate": round(rate, 2),
+                }
+
+            # Total observations
+            result = await session.execute(text("""
+                SELECT COUNT(*) as count
+                FROM state_observations
+                WHERE observed_at > NOW() - INTERVAL ':days days'
+            """).bindparams(days=days))
+            row = result.fetchone()
+            summary["total_observations"] = row.count if row else 0
+
+            break
+
+    except Exception as e:
+        logger.warning("Failed to get state observations summary", error=str(e))
+
+    return summary

@@ -2860,6 +2860,283 @@ async def api_state_signal(
 
 
 # -------------------------------------------------------------------
+# Focus Mode Dashboard
+# -------------------------------------------------------------------
+
+
+@app.get("/focus", response_class=HTMLResponse)
+async def focus_dashboard(request: Request):
+    """Focus mode dashboard - minimal view with state-eligible tasks only.
+
+    Shows only tasks that match current energy/mode, hiding everything else
+    for a distraction-free work session.
+    """
+    from cognitex.agent.state_model import get_state_estimator, ModeRules, get_temporal_model
+    from cognitex.services.tasks import get_tasks
+
+    estimator = get_state_estimator()
+    temporal = get_temporal_model()
+    calendar_events = await get_today_events()
+    state = await estimator.infer_state(calendar_events=calendar_events)
+
+    rules = ModeRules.get_rules(state.mode)
+    max_friction = rules.get("max_task_friction", 5)
+
+    # Get all pending tasks
+    all_tasks = await get_tasks(status="pending", limit=100)
+
+    # Filter to state-eligible tasks
+    eligible_tasks = []
+    for task in all_tasks:
+        # Estimate friction from energy_cost
+        energy_cost = task.get("energy_cost", 5)
+        friction = min(5, max(1, (energy_cost or 3) // 2))  # Map 1-10 to 1-5
+
+        if friction <= max_friction:
+            eligible_tasks.append({
+                **task,
+                "friction": friction,
+            })
+
+    # Sort by priority, then due date
+    eligible_tasks.sort(key=lambda t: (
+        {"high": 0, "medium": 1, "low": 2}.get(t.get("priority", "medium"), 1),
+        t.get("due_date") or "9999-12-31",
+    ))
+
+    # Limit to top 5 for focus
+    focus_tasks = eligible_tasks[:5]
+
+    # Get peak time info
+    is_peak = temporal.is_peak_time()
+    peak_hours = temporal.get_peak_hours()[:3]
+
+    return templates.TemplateResponse(
+        "focus.html",
+        {
+            "request": request,
+            "state": state,
+            "tasks": focus_tasks,
+            "mode_name": state.mode.value,
+            "max_friction": max_friction,
+            "is_peak_time": is_peak,
+            "peak_hours": peak_hours,
+            "fatigue_percent": int(state.signals.fatigue_level * 100),
+        },
+    )
+
+
+# -------------------------------------------------------------------
+# Weekly Review Generator
+# -------------------------------------------------------------------
+
+
+@app.get("/review", response_class=HTMLResponse)
+async def weekly_review_page(request: Request):
+    """Weekly review page showing progress, patterns, and insights."""
+    return templates.TemplateResponse(
+        "review.html",
+        {"request": request},
+    )
+
+
+@app.get("/api/review/generate", response_class=HTMLResponse)
+async def api_generate_review():
+    """Generate weekly review using LLM summarization."""
+    from cognitex.services.llm import get_llm_service
+    from cognitex.services.tasks import get_tasks
+    from cognitex.agent.learning import get_state_observations_summary
+    from cognitex.agent.action_log import get_action_summary
+    from datetime import datetime, timedelta
+
+    llm = get_llm_service()
+
+    # Gather data from the past week
+    week_ago = datetime.now() - timedelta(days=7)
+
+    # Get completed tasks
+    completed_tasks = await get_tasks(status="completed", limit=50)
+    recent_completed = [
+        t for t in completed_tasks
+        if t.get("completed_at") and datetime.fromisoformat(str(t["completed_at"]).replace("Z", "")) > week_ago
+    ]
+
+    # Get state observations summary
+    state_summary = await get_state_observations_summary(days=7)
+
+    # Get action log summary
+    action_summary = await get_action_summary(days=7)
+
+    # Build review prompt
+    prompt = f"""Generate a brief weekly review summary based on this data:
+
+## Tasks Completed ({len(recent_completed)})
+{chr(10).join(f"- {t.get('title', 'Untitled')}" for t in recent_completed[:15])}
+
+## State Patterns
+- Observations: {state_summary.get('total_observations', 0)}
+- By mode: {state_summary.get('by_mode', {})}
+- Post-clinical impact: {state_summary.get('post_clinical_impact', {})}
+
+## Actions Taken
+- Total: {action_summary.get('total_actions', 0)}
+- By type: {action_summary.get('by_type', {})}
+
+Generate a 3-paragraph review covering:
+1. What was accomplished this week
+2. Patterns observed in productivity/energy
+3. Suggestions for next week
+
+Keep it concise and actionable. Use markdown formatting.
+"""
+
+    try:
+        review_text = await llm.complete(prompt, max_tokens=800)
+    except Exception as e:
+        review_text = f"Could not generate review: {str(e)}"
+
+    return HTMLResponse(f"""
+        <div class="review-content">
+            <h3>Weekly Review - {datetime.now().strftime('%B %d, %Y')}</h3>
+            <div class="review-body">
+                {review_text}
+            </div>
+            <div class="review-stats">
+                <span>Tasks completed: {len(recent_completed)}</span>
+                <span>Observations: {state_summary.get('total_observations', 0)}</span>
+            </div>
+        </div>
+    """)
+
+
+# -------------------------------------------------------------------
+# Voice Capture API
+# -------------------------------------------------------------------
+
+
+@app.post("/api/voice/transcribe")
+async def api_voice_transcribe(request: Request):
+    """Transcribe audio and add to inbox.
+
+    Accepts audio file upload, transcribes using speech-to-text,
+    and creates an inbox item for processing.
+    """
+    from cognitex.agent.interruption_firewall import get_interruption_firewall, IncomingItem, Urgency
+
+    form = await request.form()
+    audio_file = form.get("audio")
+
+    if not audio_file:
+        raise HTTPException(status_code=400, detail="No audio file provided")
+
+    # Read audio content
+    audio_content = await audio_file.read()
+
+    # Transcribe using LLM service (if supported) or placeholder
+    try:
+        from cognitex.services.llm import get_llm_service
+        llm = get_llm_service()
+
+        # For now, use a simple placeholder since most LLM services
+        # don't directly support audio transcription
+        # In production, you'd use Whisper or similar
+        transcription = "(Voice note - transcription pending)"
+
+        # If using a service that supports audio:
+        # transcription = await llm.transcribe_audio(audio_content)
+    except Exception as e:
+        transcription = f"(Could not transcribe: {str(e)})"
+
+    # Add to inbox
+    firewall = get_interruption_firewall()
+    item = IncomingItem(
+        source="voice",
+        subject="Voice Note",
+        preview=transcription[:200],
+        urgency=Urgency.NORMAL,
+        suggested_action="review",
+        metadata={"transcription": transcription},
+    )
+    await firewall.capture_item(item)
+
+    return {
+        "status": "captured",
+        "transcription": transcription[:200],
+    }
+
+
+# -------------------------------------------------------------------
+# Quick Capture Widget
+# -------------------------------------------------------------------
+
+
+@app.post("/api/capture")
+async def api_quick_capture(
+    content: str = "",
+    source: str = "widget",
+    url: str = "",
+    title: str = "",
+):
+    """Quick capture endpoint for browser extensions and widgets.
+
+    Accepts text content, URLs, or both and adds to inbox for triage.
+    """
+    from cognitex.agent.interruption_firewall import get_interruption_firewall, IncomingItem, Urgency
+
+    if not content and not url:
+        raise HTTPException(status_code=400, detail="No content or URL provided")
+
+    # Build preview
+    if url and content:
+        preview = f"{url}\n\n{content[:200]}"
+        subject = title or url[:50]
+    elif url:
+        preview = url
+        subject = title or "Captured URL"
+    else:
+        preview = content[:300]
+        subject = title or content[:50]
+
+    # Capture to inbox
+    firewall = get_interruption_firewall()
+    item = IncomingItem(
+        source=source,
+        subject=subject,
+        preview=preview,
+        urgency=Urgency.NORMAL,
+        suggested_action="review",
+        metadata={
+            "url": url,
+            "content": content,
+            "title": title,
+        },
+    )
+    await firewall.capture_item(item)
+
+    return {
+        "status": "captured",
+        "subject": subject,
+    }
+
+
+@app.get("/api/capture/status")
+async def api_capture_status():
+    """Get capture status for widget sync."""
+    from cognitex.agent.interruption_firewall import get_interruption_firewall
+
+    firewall = get_interruption_firewall()
+    items = await firewall.get_queued_items(limit=5)
+
+    return {
+        "inbox_count": len(items),
+        "recent": [
+            {"subject": i.subject, "source": i.source}
+            for i in items[:3]
+        ],
+    }
+
+
+# -------------------------------------------------------------------
 # Learning System
 # -------------------------------------------------------------------
 

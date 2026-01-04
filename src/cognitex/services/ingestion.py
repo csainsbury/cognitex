@@ -474,7 +474,8 @@ async def run_incremental_sync(history_id: str) -> dict:
 
     if not last_history_id:
         # First time - store current ID and return (nothing to sync yet)
-        await redis.set(redis_key, history_id)
+        # TTL of 30 days - if we don't sync for a month, reset
+        await redis.set(redis_key, history_id, ex=2592000)
         logger.info("First Gmail sync - storing initial history ID", history_id=history_id)
         return {
             "total": 0,
@@ -497,7 +498,7 @@ async def run_incremental_sync(history_id: str) -> dict:
     except Exception as e:
         # History ID might be too old - reset and try again next time
         logger.warning("History sync failed, resetting history ID", error=str(e))
-        await redis.set(redis_key, history_id)
+        await redis.set(redis_key, history_id, ex=2592000)  # 30 day TTL
         return {"error": str(e), "fallback_needed": True}
 
     # Extract new message IDs from history
@@ -508,7 +509,7 @@ async def run_incremental_sync(history_id: str) -> dict:
 
     # Update stored history ID
     new_history_id = history.get("historyId", history_id)
-    await redis.set(redis_key, new_history_id)
+    await redis.set(redis_key, new_history_id, ex=2592000)  # 30 day TTL
 
     if not new_message_ids:
         logger.info("No new messages found")

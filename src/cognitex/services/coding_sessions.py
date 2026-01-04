@@ -90,37 +90,46 @@ class CodingSessionIngester:
         Returns:
             List of message dicts
         """
-        messages = []
         path = Path(session_file)
 
         if not path.exists():
-            return messages
+            return []
 
         # Get starting position for incremental reads
         start_pos = 0
         if incremental and session_file in self._last_positions:
             start_pos = self._last_positions[session_file]
 
-        try:
-            with open(path, "r") as f:
-                if start_pos > 0:
-                    f.seek(start_pos)
+        def _read_file() -> tuple[list[dict], int]:
+            """Blocking file read - runs in thread pool."""
+            messages = []
+            end_pos = start_pos
+            try:
+                with open(path, "r") as f:
+                    if start_pos > 0:
+                        f.seek(start_pos)
 
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        msg = json.loads(line)
-                        messages.append(msg)
-                    except json.JSONDecodeError:
-                        continue
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            msg = json.loads(line)
+                            messages.append(msg)
+                        except json.JSONDecodeError:
+                            continue
 
-                # Save position for next incremental read
-                self._last_positions[session_file] = f.tell()
+                    end_pos = f.tell()
+            except Exception as e:
+                logger.error("Failed to parse session file", file=session_file, error=str(e))
 
-        except Exception as e:
-            logger.error("Failed to parse session file", file=session_file, error=str(e))
+            return messages, end_pos
+
+        # Run blocking file I/O in thread pool
+        messages, end_pos = await asyncio.to_thread(_read_file)
+
+        # Save position for next incremental read
+        self._last_positions[session_file] = end_pos
 
         return messages
 

@@ -581,6 +581,119 @@ class AutonomousAgent:
             logger.error("LLM reasoning failed", error=str(e), exc_info=True)
             return []
 
+    async def _validate_decision(self, session, decision: dict) -> tuple[bool, str | None]:
+        """Validate decision before execution (anti-hallucination grounding).
+
+        Checks:
+        1. Referenced IDs actually exist in the database
+        2. No scheduling conflicts
+        3. Proposal hasn't been rejected before (learning from rejections)
+
+        Returns:
+            (is_valid, error_message)
+        """
+        action = decision.get("action")
+        params = decision.get("params", {})
+
+        # Check for ID references that should exist
+        id_checks = {
+            "project_id": "Project",
+            "task_id": "Task",
+            "goal_id": "Goal",
+            "document_id": "Document",
+            "email_id": "Email",
+            "repository_id": "Repository",
+        }
+
+        for param_name, node_label in id_checks.items():
+            entity_id = params.get(param_name)
+            if entity_id:
+                exists = await self._verify_entity_exists(session, node_label, entity_id)
+                if not exists:
+                    return False, f"{node_label} with ID '{entity_id}' does not exist"
+
+        # Check for scheduling conflicts for calendar-related actions
+        if action == "SCHEDULE_BLOCK":
+            has_conflict, conflict_desc = await self._check_scheduling_conflict(
+                params.get("start_time"),
+                params.get("duration_minutes", 60),
+            )
+            if has_conflict:
+                return False, f"Scheduling conflict: {conflict_desc}"
+
+        # Check if similar proposal was recently rejected
+        if action in ("CREATE_TASK", "DRAFT_EMAIL"):
+            from cognitex.agent.action_log import should_suppress_proposal
+            content = params.get("title", "") + " " + params.get("description", "")
+            suppress, suppress_reason = await should_suppress_proposal(action.lower(), content)
+            if suppress:
+                logger.info("Suppressing proposal based on rejection patterns", reason=suppress_reason)
+                return False, suppress_reason
+
+        return True, None
+
+    async def _verify_entity_exists(self, session, label: str, entity_id: str) -> bool:
+        """Check if an entity exists in Neo4j."""
+        try:
+            result = await session.run(
+                f"MATCH (n:{label}) WHERE n.id = $id RETURN n LIMIT 1",
+                {"id": entity_id}
+            )
+            record = await result.single()
+            return record is not None
+        except Exception as e:
+            logger.debug("Entity verification failed", label=label, id=entity_id, error=str(e))
+            # Default to True to avoid blocking on verification errors
+            return True
+
+    async def _check_scheduling_conflict(
+        self,
+        start_time: str | None,
+        duration_minutes: int,
+    ) -> tuple[bool, str | None]:
+        """Check for calendar conflicts.
+
+        Returns:
+            (has_conflict, conflict_description)
+        """
+        if not start_time:
+            return False, None
+
+        try:
+            from datetime import datetime, timedelta
+            from cognitex.services.calendar import CalendarService
+
+            # Parse start time
+            start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00").replace("+00:00", ""))
+            end_dt = start_dt + timedelta(minutes=duration_minutes)
+
+            # Check existing events
+            cal = CalendarService()
+            events = cal.list_events(
+                time_min=start_dt - timedelta(hours=1),
+                time_max=end_dt + timedelta(hours=1),
+            )
+
+            for event in events.get("items", []):
+                event_start = event.get("start", {}).get("dateTime")
+                event_end = event.get("end", {}).get("dateTime")
+
+                if not event_start or not event_end:
+                    continue
+
+                event_start_dt = datetime.fromisoformat(event_start.replace("Z", "+00:00").replace("+00:00", ""))
+                event_end_dt = datetime.fromisoformat(event_end.replace("Z", "+00:00").replace("+00:00", ""))
+
+                # Check for overlap
+                if start_dt < event_end_dt and end_dt > event_start_dt:
+                    return True, f"Conflicts with '{event.get('summary', 'event')}' at {event_start}"
+
+            return False, None
+
+        except Exception as e:
+            logger.debug("Conflict check failed", error=str(e))
+            return False, None
+
     async def _execute_decision(
         self, session, decision: dict, flagged_this_cycle: set[str] | None = None
     ) -> dict | None:
@@ -588,6 +701,18 @@ class AutonomousAgent:
         action = decision.get("action")
         params = decision.get("params", {})
         reason = decision.get("reason", "")
+
+        # Validate before execution (anti-hallucination + conflict detection)
+        is_valid, error_msg = await self._validate_decision(session, decision)
+        if not is_valid:
+            logger.warning("Decision validation failed", action=action, error=error_msg)
+            await log_action(
+                f"{action}_blocked",
+                "validation",
+                summary=f"Blocked: {error_msg}",
+                details={"action": action, "params": params, "error": error_msg},
+            )
+            return None
 
         logger.info("Executing decision", action=action, reason=reason[:100])
 
