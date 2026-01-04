@@ -294,7 +294,8 @@ class TaskService:
                 project: HEAD([p IN projects WHERE p.id IS NOT NULL]).title,
                 project_id: HEAD([p IN projects WHERE p.id IS NOT NULL]).id,
                 goal: HEAD([g IN goals WHERE g.id IS NOT NULL]).title,
-                goal_id: HEAD([g IN goals WHERE g.id IS NOT NULL]).id
+                goal_id: HEAD([g IN goals WHERE g.id IS NOT NULL]).id,
+                subtasks: t.subtasks
             }} as task
             ORDER BY
                 CASE t.priority
@@ -310,7 +311,23 @@ class TaskService:
 
             result = await session.run(query, params)
             data = await result.data()
-            return [r["task"] for r in data]
+
+            # Parse subtasks JSON for each task
+            import json
+            tasks_list = []
+            for r in data:
+                task = r["task"]
+                subtasks_raw = task.get("subtasks")
+                if subtasks_raw:
+                    try:
+                        task["subtasks"] = json.loads(subtasks_raw) if isinstance(subtasks_raw, str) else subtasks_raw
+                    except (json.JSONDecodeError, TypeError):
+                        task["subtasks"] = []
+                else:
+                    task["subtasks"] = []
+                tasks_list.append(task)
+
+            return tasks_list
 
     async def complete(self, task_id: str) -> dict | None:
         """Mark a task as done."""

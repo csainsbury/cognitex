@@ -1,4 +1,5 @@
 <tr id="new-task-form" class="new-form">
+    <td></td>
     <td>
         <form id="task-create-form" hx-post="/tasks" hx-target="#new-task-form" hx-swap="outerHTML" hx-include="[form='task-create-form']">
             <input type="text" name="title" placeholder="Task title" required autofocus>
@@ -30,9 +31,11 @@
             {% endfor %}
         </select>
     </td>
-    <td colspan="2">
+    <td>
         <div class="people-picker" data-form-id="task-create-form" data-initial="[]"></div>
     </td>
+    <td></td>
+    <td></td>
     <td class="actions">
         <button type="submit" form="task-create-form" class="btn btn-primary btn-sm">Add</button>
         <button type="button" class="btn btn-secondary btn-sm"

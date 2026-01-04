@@ -882,6 +882,203 @@ async def task_unlink_project(request: Request, task_id: str, project_id: str):
     return HTMLResponse("")
 
 
+# =============================================================================
+# Subtask endpoints (lightweight steps within tasks)
+# =============================================================================
+
+
+@app.get("/tasks/{task_id}/subtasks", response_class=HTMLResponse)
+async def get_subtasks(request: Request, task_id: str):
+    """Get subtasks partial for a task."""
+    from cognitex.db.neo4j import get_neo4j_session
+    import json
+
+    subtasks = []
+    async for session in get_neo4j_session():
+        result = await session.run(
+            "MATCH (t:Task {id: $task_id}) RETURN t.subtasks as subtasks",
+            {"task_id": task_id}
+        )
+        record = await result.single()
+        if record and record["subtasks"]:
+            try:
+                subtasks = json.loads(record["subtasks"]) if isinstance(record["subtasks"], str) else record["subtasks"]
+            except (json.JSONDecodeError, TypeError):
+                subtasks = []
+        break
+
+    # Sort by order
+    subtasks = sorted(subtasks, key=lambda x: x.get("order", 0))
+
+    return templates.TemplateResponse(
+        "partials/task_subtasks.html",
+        {"request": request, "task_id": task_id, "subtasks": subtasks},
+    )
+
+
+@app.post("/tasks/{task_id}/subtasks", response_class=HTMLResponse)
+async def add_subtask(request: Request, task_id: str, text: Annotated[str, Form()]):
+    """Add a new subtask to a task."""
+    from cognitex.db.neo4j import get_neo4j_session
+    import json
+    import secrets
+
+    async for session in get_neo4j_session():
+        # Get existing subtasks
+        result = await session.run(
+            "MATCH (t:Task {id: $task_id}) RETURN t.subtasks as subtasks",
+            {"task_id": task_id}
+        )
+        record = await result.single()
+
+        subtasks = []
+        if record and record["subtasks"]:
+            try:
+                subtasks = json.loads(record["subtasks"]) if isinstance(record["subtasks"], str) else record["subtasks"]
+            except (json.JSONDecodeError, TypeError):
+                subtasks = []
+
+        # Add new subtask
+        new_subtask = {
+            "id": f"s_{secrets.token_hex(3)}",
+            "text": text.strip(),
+            "done": False,
+            "order": len(subtasks),
+        }
+        subtasks.append(new_subtask)
+
+        # Save back to Neo4j
+        await session.run(
+            "MATCH (t:Task {id: $task_id}) SET t.subtasks = $subtasks",
+            {"task_id": task_id, "subtasks": json.dumps(subtasks)}
+        )
+        break
+
+    return await get_subtasks(request, task_id)
+
+
+@app.post("/tasks/{task_id}/subtasks/{subtask_id}/toggle", response_class=HTMLResponse)
+async def toggle_subtask(request: Request, task_id: str, subtask_id: str):
+    """Toggle a subtask's done status."""
+    from cognitex.db.neo4j import get_neo4j_session
+    import json
+
+    async for session in get_neo4j_session():
+        result = await session.run(
+            "MATCH (t:Task {id: $task_id}) RETURN t.subtasks as subtasks",
+            {"task_id": task_id}
+        )
+        record = await result.single()
+
+        subtasks = []
+        if record and record["subtasks"]:
+            try:
+                subtasks = json.loads(record["subtasks"]) if isinstance(record["subtasks"], str) else record["subtasks"]
+            except (json.JSONDecodeError, TypeError):
+                subtasks = []
+
+        # Toggle the subtask
+        for subtask in subtasks:
+            if subtask.get("id") == subtask_id:
+                subtask["done"] = not subtask.get("done", False)
+                break
+
+        # Save back
+        await session.run(
+            "MATCH (t:Task {id: $task_id}) SET t.subtasks = $subtasks",
+            {"task_id": task_id, "subtasks": json.dumps(subtasks)}
+        )
+        break
+
+    return await get_subtasks(request, task_id)
+
+
+@app.delete("/tasks/{task_id}/subtasks/{subtask_id}", response_class=HTMLResponse)
+async def delete_subtask(request: Request, task_id: str, subtask_id: str):
+    """Delete a subtask."""
+    from cognitex.db.neo4j import get_neo4j_session
+    import json
+
+    async for session in get_neo4j_session():
+        result = await session.run(
+            "MATCH (t:Task {id: $task_id}) RETURN t.subtasks as subtasks",
+            {"task_id": task_id}
+        )
+        record = await result.single()
+
+        subtasks = []
+        if record and record["subtasks"]:
+            try:
+                subtasks = json.loads(record["subtasks"]) if isinstance(record["subtasks"], str) else record["subtasks"]
+            except (json.JSONDecodeError, TypeError):
+                subtasks = []
+
+        # Remove the subtask
+        subtasks = [s for s in subtasks if s.get("id") != subtask_id]
+
+        # Reorder remaining subtasks
+        for i, subtask in enumerate(subtasks):
+            subtask["order"] = i
+
+        # Save back
+        await session.run(
+            "MATCH (t:Task {id: $task_id}) SET t.subtasks = $subtasks",
+            {"task_id": task_id, "subtasks": json.dumps(subtasks)}
+        )
+        break
+
+    return await get_subtasks(request, task_id)
+
+
+@app.post("/tasks/{task_id}/subtasks/reorder")
+async def reorder_subtasks(request: Request, task_id: str):
+    """Reorder subtasks based on drag-and-drop."""
+    from cognitex.db.neo4j import get_neo4j_session
+    import json
+
+    body = await request.json()
+    ordered_ids = body.get("order", [])
+
+    async for session in get_neo4j_session():
+        result = await session.run(
+            "MATCH (t:Task {id: $task_id}) RETURN t.subtasks as subtasks",
+            {"task_id": task_id}
+        )
+        record = await result.single()
+
+        subtasks = []
+        if record and record["subtasks"]:
+            try:
+                subtasks = json.loads(record["subtasks"]) if isinstance(record["subtasks"], str) else record["subtasks"]
+            except (json.JSONDecodeError, TypeError):
+                subtasks = []
+
+        # Create lookup by id
+        subtask_map = {s["id"]: s for s in subtasks}
+
+        # Rebuild list in new order
+        reordered = []
+        for i, subtask_id in enumerate(ordered_ids):
+            if subtask_id in subtask_map:
+                subtask_map[subtask_id]["order"] = i
+                reordered.append(subtask_map[subtask_id])
+
+        # Add any subtasks that weren't in the order list
+        for subtask in subtasks:
+            if subtask["id"] not in ordered_ids:
+                subtask["order"] = len(reordered)
+                reordered.append(subtask)
+
+        # Save back
+        await session.run(
+            "MATCH (t:Task {id: $task_id}) SET t.subtasks = $subtasks",
+            {"task_id": task_id, "subtasks": json.dumps(reordered)}
+        )
+        break
+
+    return {"status": "ok"}
+
+
 @app.post("/tasks", response_class=HTMLResponse)
 async def task_create(
     request: Request,

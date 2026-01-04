@@ -1,4 +1,7 @@
-<tr id="task-{{ task.id }}">
+<tr id="task-{{ task.id }}" class="task-row" onclick="toggleSubtasks('{{ task.id }}', event)">
+    <td style="width: 30px;">
+        <span class="expand-icon">&#9654;</span>
+    </td>
     <td>
         <strong>{{ task.title }}</strong>
         {% if task.description %}
@@ -50,6 +53,17 @@
         -
         {% endif %}
     </td>
+    <td>
+        {% set subtasks = task.subtasks or [] %}
+        {% if subtasks | length > 0 %}
+        {% set done_count = subtasks | selectattr('done') | list | length %}
+        <span class="subtask-count {% if done_count == subtasks | length %}all-done{% endif %}">
+            {{ done_count }}/{{ subtasks | length }}
+        </span>
+        {% else %}
+        <span style="color: #9ca3af; font-size: 0.75rem;">+ steps</span>
+        {% endif %}
+    </td>
     <td class="actions">
         {% if task.status != 'done' %}
         <button class="btn btn-success btn-sm"
@@ -69,5 +83,15 @@
                 hx-swap="outerHTML"
                 hx-confirm="Delete this task?"
                 title="Delete">&#10005;</button>
+    </td>
+</tr>
+<tr id="subtasks-{{ task.id }}" class="subtasks-row" style="display: none;">
+    <td colspan="10">
+        <div class="subtasks-container"
+             hx-get="/tasks/{{ task.id }}/subtasks"
+             hx-trigger="load once"
+             hx-swap="innerHTML">
+            <span style="color: #9ca3af;">Loading steps...</span>
+        </div>
     </td>
 </tr>

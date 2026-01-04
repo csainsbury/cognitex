@@ -134,6 +134,8 @@ POSTGRES_ALTER_STATEMENTS = [
     "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS actual_minutes INTEGER",
     "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS deferral_count INTEGER DEFAULT 0",
     "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS last_deferred_at TIMESTAMP",
+    # Subtasks (lightweight steps) as JSONB
+    "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS subtasks JSONB DEFAULT '[]'",
 ]
 
 

@@ -751,6 +751,71 @@
         .timeframe-quarterly { background: var(--warning-bg); color: #92400e; }
         .timeframe-yearly { background: var(--primary-light); color: var(--primary-text); }
         .timeframe-multi_year { background: #f3e8ff; color: #6b21a8; }
+
+        /* Subtasks (expandable task steps) */
+        .task-row { cursor: pointer; }
+        .task-row:hover { background: #f8fafc; }
+        .subtasks-row { background: #f9fafb; }
+        .subtasks-row td { padding: 0 !important; }
+        .subtasks-container { padding: 1rem 1rem 1rem 3rem; }
+        .subtasks-list { max-width: 500px; }
+        .subtask-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 0.5rem;
+            border-bottom: 1px solid #e5e7eb;
+            background: #fff;
+            border-radius: 4px;
+            margin-bottom: 2px;
+        }
+        .subtask-item.dragging { opacity: 0.5; background: #e0e7ff; }
+        .subtask-item.drag-over { border-top: 2px solid var(--primary); }
+        .drag-handle { cursor: grab; color: #9ca3af; user-select: none; }
+        .drag-handle:active { cursor: grabbing; }
+        .subtask-text { flex: 1; }
+        .subtask-text.done { text-decoration: line-through; color: #9ca3af; }
+        .subtask-delete {
+            background: none;
+            border: none;
+            color: #dc2626;
+            cursor: pointer;
+            opacity: 0;
+            font-size: 1.1rem;
+            padding: 0 0.25rem;
+        }
+        .subtask-item:hover .subtask-delete { opacity: 1; }
+        .subtask-add { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
+        .subtask-add input {
+            flex: 1;
+            padding: 0.5rem 0.75rem;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+        }
+        .subtask-add button {
+            padding: 0.5rem 1rem;
+            background: var(--primary);
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        .subtask-add button:hover { background: var(--primary-hover); }
+        .subtask-count {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            background: #f1f5f9;
+            padding: 0.15rem 0.5rem;
+            border-radius: 10px;
+            white-space: nowrap;
+        }
+        .subtask-count.all-done { background: var(--success-bg); color: #065f46; }
+        .expand-icon {
+            color: #9ca3af;
+            font-size: 0.8rem;
+            transition: transform 0.2s;
+        }
+        .task-row.expanded .expand-icon { transform: rotate(90deg); }
     </style>
 </head>
 <body>
@@ -798,6 +863,86 @@
             link.addEventListener('click', () => {
                 document.getElementById('nav-links').classList.remove('open');
             });
+        });
+    });
+
+    // Subtasks expand/collapse
+    function toggleSubtasks(taskId, event) {
+        // Don't toggle if clicking buttons, inputs, links, or selects
+        if (event.target.closest('button, a, input, select, .btn')) return;
+
+        const taskRow = document.getElementById('task-' + taskId);
+        const subtasksRow = document.getElementById('subtasks-' + taskId);
+        if (!subtasksRow) return;
+
+        const isExpanded = subtasksRow.style.display !== 'none';
+        subtasksRow.style.display = isExpanded ? 'none' : 'table-row';
+        taskRow.classList.toggle('expanded', !isExpanded);
+    }
+
+    // Subtasks drag and drop
+    let draggedSubtask = null;
+
+    document.addEventListener('dragstart', (e) => {
+        if (e.target.classList.contains('subtask-item')) {
+            draggedSubtask = e.target;
+            e.target.classList.add('dragging');
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/plain', e.target.dataset.id);
+        }
+    });
+
+    document.addEventListener('dragend', (e) => {
+        if (e.target.classList.contains('subtask-item')) {
+            e.target.classList.remove('dragging');
+            document.querySelectorAll('.subtask-item.drag-over').forEach(el => el.classList.remove('drag-over'));
+            draggedSubtask = null;
+        }
+    });
+
+    document.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        if (!draggedSubtask) return;
+
+        const list = e.target.closest('.subtasks-list');
+        if (!list) return;
+
+        const afterElement = getDragAfterElement(list, e.clientY);
+        if (afterElement) {
+            list.insertBefore(draggedSubtask, afterElement);
+        } else {
+            const addForm = list.querySelector('.subtask-add');
+            list.insertBefore(draggedSubtask, addForm);
+        }
+    });
+
+    function getDragAfterElement(list, y) {
+        const draggableElements = [...list.querySelectorAll('.subtask-item:not(.dragging)')];
+        return draggableElements.reduce((closest, child) => {
+            const box = child.getBoundingClientRect();
+            const offset = y - box.top - box.height / 2;
+            if (offset < 0 && offset > closest.offset) {
+                return { offset: offset, element: child };
+            } else {
+                return closest;
+            }
+        }, { offset: Number.NEGATIVE_INFINITY }).element;
+    }
+
+    document.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        if (!draggedSubtask) return;
+
+        const list = e.target.closest('.subtasks-list');
+        if (!list) return;
+
+        const taskId = list.dataset.taskId;
+        const orderedIds = [...list.querySelectorAll('.subtask-item')].map(el => el.dataset.id);
+
+        await fetch(`/tasks/${taskId}/subtasks/reorder`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({order: orderedIds})
         });
     });
 

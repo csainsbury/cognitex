@@ -893,9 +893,20 @@ async def get_task(
     due_date = task_data.get("due_date")
     due_str = str(due_date) if due_date else None
 
+    # Parse subtasks JSON if present
+    subtasks_raw = task_data.get("subtasks")
+    subtasks = []
+    if subtasks_raw:
+        import json
+        try:
+            subtasks = json.loads(subtasks_raw) if isinstance(subtasks_raw, str) else subtasks_raw
+        except (json.JSONDecodeError, TypeError):
+            subtasks = []
+
     return {
         **task_data,
         "due": due_str,  # Alias for template compatibility
+        "subtasks": subtasks,
         "source_email": record["source_email"] if record["source_email"] and record["source_email"].get("gmail_id") else None,
         "source_event": record["source_event"] if record["source_event"] and record["source_event"].get("gcal_id") else None,
         "projects": projects,
