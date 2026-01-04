@@ -6282,5 +6282,90 @@ def init_phase4_cmd() -> None:
     asyncio.run(run())
 
 
+@app.command("consolidate")
+def consolidate_cmd(
+    days_back: int = typer.Option(1, "--days", "-d", help="Number of days to consolidate"),
+    archive: bool = typer.Option(False, "--archive", "-a", help="Also archive old memories"),
+    archive_days: int = typer.Option(30, "--archive-days", help="Archive memories older than N days"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be consolidated without writing"),
+) -> None:
+    """Run memory consolidation (dreaming) to summarize and prune memories.
+
+    This command consolidates episodic memories from the specified number of days,
+    generating daily summaries, extracting behavioral patterns, and optionally
+    archiving old low-value memories.
+
+    Examples:
+        cognitex consolidate                 # Consolidate yesterday
+        cognitex consolidate -d 7            # Consolidate last 7 days
+        cognitex consolidate --archive       # Also archive old memories
+        cognitex consolidate --dry-run       # Preview without writing
+    """
+    async def run():
+        from cognitex.db.postgres import init_postgres, close_postgres
+        from cognitex.db.neo4j import init_neo4j, close_neo4j
+        from cognitex.agent.consolidation import MemoryConsolidator
+
+        await init_postgres()
+        await init_neo4j()
+
+        try:
+            consolidator = MemoryConsolidator()
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                console=console,
+            ) as progress:
+                task = progress.add_task("Consolidating memories...", total=days_back + (1 if archive else 0))
+
+                # Consolidate each day
+                for i in range(days_back):
+                    target_date = datetime.now() - timedelta(days=i + 1)
+                    date_str = target_date.strftime("%Y-%m-%d")
+                    progress.update(task, description=f"Consolidating {date_str}...")
+
+                    if dry_run:
+                        console.print(f"[dim]Would consolidate: {date_str}[/dim]")
+                    else:
+                        result = await consolidator.run_nightly_consolidation(
+                            target_date=target_date
+                        )
+                        if result.get("summary_id"):
+                            console.print(f"[green]✓[/green] {date_str}: {result.get('event_count', 0)} events consolidated")
+                        else:
+                            console.print(f"[yellow]○[/yellow] {date_str}: No events to consolidate")
+
+                    progress.advance(task)
+
+                # Archive old memories if requested
+                if archive:
+                    progress.update(task, description="Archiving old memories...")
+                    if dry_run:
+                        console.print(f"[dim]Would archive memories older than {archive_days} days[/dim]")
+                    else:
+                        archive_result = await consolidator.archive_old_memories(
+                            older_than_days=archive_days
+                        )
+                        console.print(
+                            f"[green]✓[/green] Archived {archive_result.get('archived_count', 0)} old memories"
+                        )
+                    progress.advance(task)
+
+            console.print("\n[bold green]Consolidation complete![/bold green]")
+
+        except Exception as e:
+            console.print(f"[red]Error during consolidation: {e}[/red]")
+            raise typer.Exit(1)
+
+        finally:
+            await close_postgres()
+            await close_neo4j()
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     app()
