@@ -389,8 +389,12 @@ class SemanticAnalyzer:
                 except Exception:
                     pass  # If metadata fails, try to get content anyway
 
-                # Get file content
-                content = self.drive.get_file_content(file["id"], file["mime_type"])
+                # Get file content (run in thread to avoid blocking)
+                content = await asyncio.to_thread(
+                    self.drive.get_file_content,
+                    file["id"],
+                    file["mime_type"]
+                )
                 if not content:
                     logger.warning("Could not extract content", file_id=file["id"], name=file["name"])
                     stats["skipped"] += 1

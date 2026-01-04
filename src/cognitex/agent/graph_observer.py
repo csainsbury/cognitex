@@ -9,6 +9,7 @@ Provides the autonomous agent with visibility into:
 - Opportunities for new connections
 """
 
+import asyncio
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -26,27 +27,55 @@ class GraphObserver:
 
     async def get_full_context(self) -> dict:
         """Gather comprehensive context about the graph state."""
-        # Get firewall inbox items (captured interruptions waiting for triage)
-        inbox_items = await self._get_inbox_items()
+        # Execute independent queries in parallel for performance
+        (
+            inbox_items,
+            recent_changes,
+            stale_items,
+            orphaned_nodes,
+            goal_health,
+            project_health,
+            pending_tasks,
+            recent_documents,
+            connection_opportunities,
+            writing_samples,
+            pending_emails,
+            upcoming_calendar,
+            projects_with_recent_blocks,
+        ) = await asyncio.gather(
+            self._get_inbox_items(),
+            self.get_recent_changes(),
+            self.get_stale_items(),
+            self.get_orphaned_nodes(),
+            self.get_goal_health(),
+            self.get_project_health(),
+            self.get_pending_tasks(),
+            self.get_recent_documents(),
+            self.get_connection_opportunities(),
+            self.get_user_writing_samples(),
+            self.get_actionable_emails(),
+            self.get_pending_calendar_blocks(),
+            self.get_projects_with_recent_blocks(),
+        )
 
         context = {
             "timestamp": datetime.now().isoformat(),
             "summary": {},
             # Graph health metrics
-            "recent_changes": await self.get_recent_changes(),
-            "stale_items": await self.get_stale_items(),
-            "orphaned_nodes": await self.get_orphaned_nodes(),
-            "goal_health": await self.get_goal_health(),
-            "project_health": await self.get_project_health(),
-            "pending_tasks": await self.get_pending_tasks(),
-            "recent_documents": await self.get_recent_documents(),
-            "connection_opportunities": await self.get_connection_opportunities(),
+            "recent_changes": recent_changes,
+            "stale_items": stale_items,
+            "orphaned_nodes": orphaned_nodes,
+            "goal_health": goal_health,
+            "project_health": project_health,
+            "pending_tasks": pending_tasks,
+            "recent_documents": recent_documents,
+            "connection_opportunities": connection_opportunities,
             # Digital twin perception
-            "writing_samples": await self.get_user_writing_samples(),
-            "pending_emails": await self.get_actionable_emails(),
-            "upcoming_calendar": await self.get_pending_calendar_blocks(),
+            "writing_samples": writing_samples,
+            "pending_emails": pending_emails,
+            "upcoming_calendar": upcoming_calendar,
             # Already-actioned items (to prevent re-suggesting)
-            "projects_with_recent_blocks": await self.get_projects_with_recent_blocks(),
+            "projects_with_recent_blocks": projects_with_recent_blocks,
             # Firewall inbox - captured items needing triage
             "inbox_items": inbox_items,
         }

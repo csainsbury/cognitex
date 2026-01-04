@@ -1080,9 +1080,13 @@ async def run_priority_folder_indexing(
             if file_data["mimeType"] == "application/vnd.google-apps.folder":
                 continue
 
-            # Try to extract content
+            # Try to extract content (run in thread to avoid blocking)
             try:
-                content = drive.get_file_content(file_data["id"], file_data["mimeType"])
+                content = await asyncio.to_thread(
+                    drive.get_file_content,
+                    file_data["id"],
+                    file_data["mimeType"]
+                )
 
                 if not content or len(content.strip()) < 100:
                     folder_stats["skipped"] += 1
@@ -1350,8 +1354,12 @@ async def run_deep_document_indexing(
                 continue
 
             try:
-                # Extract content (this is the memory-intensive part)
-                content = drive.get_file_content(file_data["id"], mime_type)
+                # Extract content (run in thread to avoid blocking)
+                content = await asyncio.to_thread(
+                    drive.get_file_content,
+                    file_data["id"],
+                    mime_type
+                )
 
                 if not content or len(content.strip()) < 100:
                     folder_stats["skipped"] += 1
@@ -2027,8 +2035,8 @@ async def auto_index_drive_file(
             logger.info("Skipping large file", file=file_name, size=file_size)
             return stats
 
-        # Extract content
-        content = drive.get_file_content(file_id, mime_type)
+        # Extract content (run in thread to avoid blocking)
+        content = await asyncio.to_thread(drive.get_file_content, file_id, mime_type)
         if not content or len(content.strip()) < 100:
             stats["error"] = "No meaningful content found"
             return stats
