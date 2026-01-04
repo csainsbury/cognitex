@@ -6,13 +6,20 @@
 <style>
     /* Override container margin for chat page */
     .container {
-        margin-top: 1rem !important;
-        padding-bottom: 1rem !important;
+        margin-top: 0.5rem !important;
+        padding-bottom: 0.5rem !important;
+    }
+    .chat-header {
+        margin-bottom: 0.5rem !important;
+    }
+    .chat-header h1 {
+        margin-bottom: 0 !important;
+        font-size: 1.4rem !important;
     }
     .chat-container {
         display: flex;
         flex-direction: column;
-        height: calc(100vh - 100px);
+        height: calc(100vh - 140px);
         max-width: 900px;
         margin: 0 auto;
     }
@@ -22,14 +29,7 @@
         padding: 1rem;
         background: #fff;
         border-radius: 5px;
-        margin-bottom: 1rem;
-        display: flex;
-        flex-direction: column;
-        justify-content: flex-end;
-    }
-    .chat-messages-inner {
-        display: flex;
-        flex-direction: column;
+        margin-bottom: 0.5rem;
     }
     .message {
         margin-bottom: 1rem;
@@ -148,17 +148,15 @@
 
 <div class="chat-container">
     <div class="chat-messages" id="chat-messages">
-        <div class="chat-messages-inner" id="chat-messages-inner">
-            <div class="message message-agent">
-                Hello! I'm your Cognitex assistant. I can help you with:
-                <ul style="margin: 0.5rem 0 0 1rem;">
-                    <li>Searching your emails, documents, and calendar</li>
-                    <li>Creating and managing tasks</li>
-                    <li>Drafting emails (with your approval)</li>
-                    <li>Answering questions about your data</li>
-                </ul>
-                <br>What can I help you with today?
-            </div>
+        <div class="message message-agent">
+            Hello! I'm your Cognitex assistant. I can help you with:
+            <ul style="margin: 0.5rem 0 0 1rem;">
+                <li>Searching your emails, documents, and calendar</li>
+                <li>Creating and managing tasks</li>
+                <li>Drafting emails (with your approval)</li>
+                <li>Answering questions about your data</li>
+            </ul>
+            <br>What can I help you with today?
         </div>
     </div>
 
@@ -179,7 +177,6 @@
 
 <script>
 const messagesEl = document.getElementById('chat-messages');
-const messagesInnerEl = document.getElementById('chat-messages-inner');
 const inputEl = document.getElementById('chat-input');
 const sendBtn = document.getElementById('chat-send');
 const typingEl = document.getElementById('typing-indicator');
@@ -209,7 +206,7 @@ function addMessage(content, isUser) {
         div.innerHTML = formatMessage(content);
     }
 
-    messagesInnerEl.appendChild(div);
+    messagesEl.appendChild(div);
     messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
@@ -280,7 +277,7 @@ function clearChat() {
     if (confirm('Clear chat history? This will also clear the agent\'s working memory.')) {
         fetch('/api/chat/clear', { method: 'POST' })
             .then(() => {
-                messagesInnerEl.innerHTML = `
+                messagesEl.innerHTML = `
                     <div class="message message-agent">
                         Chat history cleared. How can I help you?
                     </div>
