@@ -336,6 +336,179 @@
             .two-col { grid-template-columns: 1fr; }
         }
 
+        /* ============================================
+           Mobile Responsive Styles
+           ============================================ */
+
+        /* Hamburger menu button - hidden on desktop */
+        .nav-toggle {
+            display: none;
+            background: none;
+            border: none;
+            color: #94a3b8;
+            font-size: 1.5rem;
+            cursor: pointer;
+            padding: 0.5rem;
+            line-height: 1;
+        }
+        .nav-toggle:hover { color: #fff; }
+
+        /* Logo/brand - hidden on desktop (links show instead) */
+        .nav-brand {
+            display: none;
+            color: #fff;
+            font-weight: 600;
+            font-size: 1.1rem;
+            text-decoration: none;
+        }
+
+        /* Nav links container - inline on desktop */
+        .nav-links {
+            display: contents;
+        }
+
+        .nav-user {
+            display: contents;
+        }
+
+        @media (max-width: 768px) {
+            /* Show hamburger and brand, hide regular nav links */
+            .nav-toggle { display: block; }
+            .nav-brand { display: block; }
+
+            nav {
+                flex-wrap: wrap;
+                padding: 0 1rem;
+                height: auto;
+                min-height: 50px;
+            }
+
+            .nav-brand {
+                order: 1;
+                padding: 0.75rem 0;
+                margin-right: auto;
+            }
+
+            .nav-toggle {
+                order: 2;
+                margin-left: auto;
+            }
+
+            .nav-links {
+                order: 3;
+                display: none;
+                width: 100%;
+                flex-direction: column;
+                background: #1e293b;
+                border-top: 1px solid #334155;
+                padding: 0.5rem 0;
+            }
+
+            .nav-links.open { display: flex; }
+
+            .nav-links a {
+                padding: 0.75rem 1rem;
+                border-bottom: none;
+                border-left: 3px solid transparent;
+            }
+
+            .nav-links a.active {
+                border-bottom: none;
+                border-left-color: var(--primary);
+                background: rgba(79, 70, 229, 0.1);
+            }
+
+            .nav-links a:hover {
+                background: rgba(255,255,255,0.05);
+            }
+
+            .nav-user {
+                width: 100%;
+                padding: 0.75rem 1rem;
+                border-top: 1px solid #334155;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }
+
+            /* Container adjustments */
+            .container {
+                padding: 0 1rem;
+                margin: 1rem auto;
+            }
+
+            h1 { font-size: 1.4rem; }
+
+            /* Stats grid */
+            .stats {
+                grid-template-columns: 1fr 1fr;
+                gap: 0.75rem;
+            }
+
+            .stat { padding: 1rem; }
+            .stat-value { font-size: 1.5rem; }
+
+            /* Cards */
+            .card { padding: 1rem; }
+
+            /* Tables - horizontal scroll */
+            .table-wrapper {
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+                margin: 0 -1rem;
+                padding: 0 1rem;
+            }
+
+            table { min-width: 600px; }
+
+            th, td {
+                padding: 0.5rem 0.75rem;
+                font-size: 0.8rem;
+            }
+
+            /* Buttons */
+            .btn { padding: 0.35rem 0.75rem; }
+            .btn-sm { padding: 0.2rem 0.5rem; }
+
+            /* Filters */
+            .filters {
+                flex-direction: column;
+                align-items: stretch;
+            }
+
+            .filters select, .filters input {
+                width: 100%;
+            }
+
+            /* Search box */
+            .search-box {
+                flex-direction: column;
+            }
+
+            .search-box input {
+                width: 100%;
+            }
+
+            /* Actions column */
+            .actions {
+                display: flex;
+                gap: 0.25rem;
+            }
+
+            /* Hide less important columns on mobile */
+            .hide-mobile { display: none; }
+        }
+
+        @media (max-width: 480px) {
+            .stats {
+                grid-template-columns: 1fr;
+            }
+
+            .stat-value { font-size: 1.3rem; }
+
+            .badge { font-size: 0.65rem; padding: 0.1rem 0.4rem; }
+        }
+
         /* Specific Component Styles */
         .event-card {
             border-left: 4px solid var(--primary);
@@ -582,23 +755,29 @@
 </head>
 <body>
     <nav>
-        <a href="/" {% if request.url.path == "/" %}class="active"{% endif %}>Dashboard</a>
-        <a href="/today" {% if "/today" in request.url.path %}class="active"{% endif %}>Today</a>
-        <a href="/chat" {% if "/chat" in request.url.path %}class="active"{% endif %}>Chat</a>
-        <a href="/tasks" {% if "/tasks" in request.url.path %}class="active"{% endif %}>Tasks</a>
-        <a href="/projects" {% if "/projects" in request.url.path %}class="active"{% endif %}>Projects</a>
-        <a href="/goals" {% if "/goals" in request.url.path %}class="active"{% endif %}>Goals</a>
-        <a href="/documents" {% if "/documents" in request.url.path %}class="active"{% endif %}>Documents</a>
-        <a href="/graph" {% if "/graph" in request.url.path %}class="active"{% endif %}>Graph</a>
-        <a href="/state" {% if "/state" in request.url.path %}class="active"{% endif %}>State</a>
-        <a href="/learning" {% if "/learning" in request.url.path %}class="active"{% endif %}>Learning</a>
-        <a href="/agent-log" {% if "/agent-log" in request.url.path %}class="active"{% endif %}>Agent Log</a>
-        <a href="/twin" {% if "/twin" in request.url.path %}class="active"{% endif %}>Twin</a>
-        <a href="/settings" {% if "/settings" in request.url.path %}class="active"{% endif %} style="margin-left: auto;">Settings</a>
-        {% if request.state.user %}
-        <span style="color: #64748b; font-size: 0.85rem; padding: 0 0.5rem;">{{ request.state.user.email }}</span>
-        <a href="/auth/logout" style="color: #ef4444; font-size: 0.85rem;">Logout</a>
-        {% endif %}
+        <a href="/" class="nav-brand">Cognitex</a>
+        <button class="nav-toggle" onclick="toggleNav()" aria-label="Toggle navigation">&#9776;</button>
+        <div class="nav-links" id="nav-links">
+            <a href="/" {% if request.url.path == "/" %}class="active"{% endif %}>Dashboard</a>
+            <a href="/today" {% if "/today" in request.url.path %}class="active"{% endif %}>Today</a>
+            <a href="/chat" {% if "/chat" in request.url.path %}class="active"{% endif %}>Chat</a>
+            <a href="/tasks" {% if "/tasks" in request.url.path %}class="active"{% endif %}>Tasks</a>
+            <a href="/projects" {% if "/projects" in request.url.path %}class="active"{% endif %}>Projects</a>
+            <a href="/goals" {% if "/goals" in request.url.path %}class="active"{% endif %}>Goals</a>
+            <a href="/documents" {% if "/documents" in request.url.path %}class="active"{% endif %}>Documents</a>
+            <a href="/graph" {% if "/graph" in request.url.path %}class="active"{% endif %}>Graph</a>
+            <a href="/state" {% if "/state" in request.url.path %}class="active"{% endif %}>State</a>
+            <a href="/learning" {% if "/learning" in request.url.path %}class="active"{% endif %}>Learning</a>
+            <a href="/agent-log" {% if "/agent-log" in request.url.path %}class="active"{% endif %}>Agent Log</a>
+            <a href="/twin" {% if "/twin" in request.url.path %}class="active"{% endif %}>Twin</a>
+            <a href="/settings" {% if "/settings" in request.url.path %}class="active"{% endif %}>Settings</a>
+            {% if request.state.user %}
+            <div class="nav-user">
+                <span style="color: #64748b; font-size: 0.85rem;">{{ request.state.user.email }}</span>
+                <a href="/auth/logout" style="color: #ef4444; font-size: 0.85rem;">Logout</a>
+            </div>
+            {% endif %}
+        </div>
     </nav>
 
     <div class="container">
@@ -606,6 +785,22 @@
     </div>
 
     <script>
+    // Mobile nav toggle
+    function toggleNav() {
+        const navLinks = document.getElementById('nav-links');
+        navLinks.classList.toggle('open');
+    }
+
+    // Close nav when clicking a link (mobile)
+    document.addEventListener('DOMContentLoaded', function() {
+        const navLinks = document.querySelectorAll('.nav-links a');
+        navLinks.forEach(link => {
+            link.addEventListener('click', () => {
+                document.getElementById('nav-links').classList.remove('open');
+            });
+        });
+    });
+
     // People Picker Component
     class PeoplePicker {
         constructor(container) {
