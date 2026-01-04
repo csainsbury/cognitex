@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+
+{% block title %}Morning Briefing - Cognitex{% endblock %}
+
+{% block content %}
+<div style="margin-bottom: 1rem;">
+    <a href="/today" class="link">&larr; Back to Today</a>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h1>Morning Briefing</h1>
+        <span style="font-size: 0.9rem; color: #888;">{{ today_date }}</span>
+    </div>
+
+    <div class="briefing-content" style="margin-top: 1rem; line-height: 1.6;">
+        {{ briefing_html | safe }}
+    </div>
+
+    <div style="margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #333;">
+        <button onclick="window.location.reload()" class="button" style="cursor: pointer;">
+            Regenerate Briefing
+        </button>
+    </div>
+</div>
+
+<style>
+.briefing-content h1, .briefing-content h2, .briefing-content h3 {
+    margin-top: 1.5rem;
+    margin-bottom: 0.75rem;
+}
+.briefing-content h1 { font-size: 1.4rem; }
+.briefing-content h2 { font-size: 1.2rem; }
+.briefing-content h3 { font-size: 1rem; }
+.briefing-content ul, .briefing-content ol {
+    margin: 0.5rem 0 0.5rem 1.5rem;
+}
+.briefing-content li {
+    margin-bottom: 0.25rem;
+}
+.briefing-content p {
+    margin-bottom: 0.75rem;
+}
+.briefing-content code {
+    background: #333;
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    font-size: 0.9em;
+}
+.briefing-content pre {
+    background: #1a1a1a;
+    padding: 1rem;
+    border-radius: 4px;
+    overflow-x: auto;
+}
+.briefing-content table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+}
+.briefing-content th, .briefing-content td {
+    border: 1px solid #333;
+    padding: 0.5rem;
+    text-align: left;
+}
+.briefing-content th {
+    background: #2a2a2a;
+}
+</style>
+{% endblock %}

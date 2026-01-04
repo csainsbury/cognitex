@@ -1194,6 +1194,40 @@ async def today_page(request: Request):
     )
 
 
+@app.get("/briefing", response_class=HTMLResponse)
+async def view_briefing(request: Request):
+    """Render the morning briefing as a web page (on-demand)."""
+    import structlog
+    from cognitex.agent.core import get_agent
+
+    logger = structlog.get_logger()
+
+    try:
+        agent = await get_agent()
+        content = await agent.morning_briefing()
+
+        # Convert markdown to HTML using markdown library if available
+        try:
+            import markdown
+            html_content = markdown.markdown(content, extensions=['tables', 'fenced_code'])
+        except ImportError:
+            # Fallback: wrap in pre tag if markdown not available
+            html_content = f"<pre style='white-space: pre-wrap;'>{content}</pre>"
+
+    except Exception as e:
+        logger.error("Failed to generate briefing", error=str(e))
+        html_content = f"<p class='error'>Failed to generate briefing: {e}</p>"
+
+    return templates.TemplateResponse(
+        "briefing.html",
+        {
+            "request": request,
+            "today_date": date.today().strftime("%A, %B %d, %Y"),
+            "briefing_html": html_content,
+        },
+    )
+
+
 # -------------------------------------------------------------------
 # Documents / Knowledge Search
 # -------------------------------------------------------------------
@@ -1867,8 +1901,40 @@ async def twin_page(request: Request):
 
 @app.post("/api/twin/drafts/{draft_id}/approve")
 async def approve_draft(draft_id: str):
-    """Approve and send an email draft."""
+    """Approve and send an email draft via the Agent."""
+    from cognitex.agent.core import get_agent
     from cognitex.db.neo4j import get_neo4j_session
+
+    # 1. Try to find the approval in working memory to use Agent flow
+    try:
+        agent = await get_agent()
+        approvals = await agent.get_pending_approvals()
+
+        # Find approval where params.draft_node_id or draft_id matches
+        target_approval = None
+        for app in approvals:
+            params = app.get("params", {})
+            if params.get("draft_node_id") == draft_id or params.get("draft_id") == draft_id:
+                target_approval = app
+                break
+
+        if target_approval:
+            # Use Agent to handle approval (triggers sending + learning)
+            result = await agent.handle_approval(target_approval["id"], approved=True)
+
+            if result.get("success"):
+                return HTMLResponse(f'''
+                    <div class="draft-card" style="background: #d1fae5; border-color: #065f46;">
+                        <p><strong>Approved!</strong> {result.get('action', 'Email queued for sending')}</p>
+                    </div>
+                ''')
+            else:
+                logger.warning("Agent approval failed", error=result.get("error"))
+    except Exception as e:
+        logger.warning("Could not use agent for approval", error=str(e))
+
+    # 2. Fallback: Direct graph update if approval not in working memory (expired)
+    logger.warning("Approval not in working memory, using direct update", draft_id=draft_id)
 
     async for session in get_neo4j_session():
         # Get draft details
@@ -1882,19 +1948,19 @@ async def approve_draft(draft_id: str):
         if not draft:
             raise HTTPException(status_code=404, detail="Draft not found")
 
-        # TODO: Actually send the email via Gmail API
-        # For now, just mark as approved
+        # Mark as approved (learning system won't receive this feedback)
         update_query = """
         MATCH (d:EmailDraft {id: $draft_id})
         SET d.status = 'approved', d.approved_at = datetime()
         """
         await session.run(update_query, {"draft_id": draft_id})
 
-        logger.info("Email draft approved", draft_id=draft_id)
+        logger.info("Email draft approved (direct)", draft_id=draft_id)
 
         return HTMLResponse(f'''
             <div class="draft-card" style="background: #d1fae5; border-color: #065f46;">
                 <p><strong>Approved!</strong> Email will be sent to {draft["to"]}</p>
+                <p style="font-size: 0.8rem; color: #666;">(Direct approval - learning skipped)</p>
             </div>
         ''')
 

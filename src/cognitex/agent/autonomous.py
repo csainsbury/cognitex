@@ -290,17 +290,19 @@ class AutonomousAgent:
         else:
             samples_text = "(No writing samples available yet)"
 
-        # Format pending emails needing response
+        # Format pending emails needing response (Hard limit 5, truncate to protect token budget)
         pending_emails = context.get('pending_emails', [])[:5]
         if pending_emails:
             email_lines = []
             for e in pending_emails:
                 urgency = str(e.get('urgency', 'normal')).upper()
                 sender = e.get('sender_name') or e.get('sender_email') or 'Unknown'
-                snippet = str(e.get('snippet', '') or '')[:150]
+                # Truncate snippet and subject to protect token budget
+                snippet = str(e.get('snippet', '') or '')[:300]
+                subject = str(e.get('subject', 'No subject') or 'No subject')[:100]
                 email_lines.append(
                     f"  - [{urgency}] From: {sender}\n"
-                    f"    Subject: {e.get('subject', 'No subject')}\n"
+                    f"    Subject: {subject}\n"
                     f"    ID: {e.get('id')}\n"
                     f"    Snippet: {snippet}..."
                 )

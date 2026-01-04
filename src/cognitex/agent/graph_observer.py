@@ -28,6 +28,7 @@ class GraphObserver:
     async def get_full_context(self) -> dict:
         """Gather comprehensive context about the graph state."""
         # Execute independent queries in parallel for performance
+        # Use return_exceptions=True so one failure doesn't kill the whole cycle
         (
             inbox_items,
             recent_changes,
@@ -56,28 +57,36 @@ class GraphObserver:
             self.get_actionable_emails(),
             self.get_pending_calendar_blocks(),
             self.get_projects_with_recent_blocks(),
+            return_exceptions=True,
         )
+
+        # Helper to safely unpack results or return empty defaults
+        def unwrap(res, default):
+            if isinstance(res, Exception):
+                logger.error("Graph observer query failed", error=str(res))
+                return default
+            return res
 
         context = {
             "timestamp": datetime.now().isoformat(),
             "summary": {},
             # Graph health metrics
-            "recent_changes": recent_changes,
-            "stale_items": stale_items,
-            "orphaned_nodes": orphaned_nodes,
-            "goal_health": goal_health,
-            "project_health": project_health,
-            "pending_tasks": pending_tasks,
-            "recent_documents": recent_documents,
-            "connection_opportunities": connection_opportunities,
+            "recent_changes": unwrap(recent_changes, []),
+            "stale_items": unwrap(stale_items, []),
+            "orphaned_nodes": unwrap(orphaned_nodes, []),
+            "goal_health": unwrap(goal_health, []),
+            "project_health": unwrap(project_health, []),
+            "pending_tasks": unwrap(pending_tasks, []),
+            "recent_documents": unwrap(recent_documents, []),
+            "connection_opportunities": unwrap(connection_opportunities, []),
             # Digital twin perception
-            "writing_samples": writing_samples,
-            "pending_emails": pending_emails,
-            "upcoming_calendar": upcoming_calendar,
+            "writing_samples": unwrap(writing_samples, []),
+            "pending_emails": unwrap(pending_emails, []),
+            "upcoming_calendar": unwrap(upcoming_calendar, []),
             # Already-actioned items (to prevent re-suggesting)
-            "projects_with_recent_blocks": projects_with_recent_blocks,
+            "projects_with_recent_blocks": unwrap(projects_with_recent_blocks, set()),
             # Firewall inbox - captured items needing triage
-            "inbox_items": inbox_items,
+            "inbox_items": unwrap(inbox_items, []),
         }
 
         # Build summary
