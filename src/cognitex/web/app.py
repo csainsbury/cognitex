@@ -347,7 +347,6 @@ async def google_login(request: Request, next: str = "/"):
 
     authorization_url, _ = flow.authorization_url(
         access_type="offline",
-        include_granted_scopes="true",
         prompt="select_account",
         state=state,
     )
@@ -366,9 +365,6 @@ async def google_callback(
     error: str | None = None
 ):
     """Handle Google OAuth callback."""
-    from google.oauth2 import id_token
-    from google.auth.transport import requests as google_requests
-
     if error:
         auth_logger.warning("OAuth error from Google", error=error)
         return RedirectResponse(url=f"/auth/login?error={error}", status_code=303)
@@ -382,25 +378,47 @@ async def google_callback(
         auth_logger.warning("Invalid OAuth state")
         return RedirectResponse(url="/auth/login?error=Invalid+state", status_code=303)
 
-    # Exchange code for tokens
+    # Exchange code for tokens using direct HTTP (avoids scope mismatch issues)
+    import httpx
+
     settings = get_settings()
     base_url = str(request.base_url).rstrip("/")
     redirect_uri = f"{base_url}/auth/callback"
 
     try:
-        flow = create_oauth_flow(redirect_uri)
-        flow.fetch_token(code=code)
-        credentials = flow.credentials
+        # Exchange authorization code for tokens
+        async with httpx.AsyncClient() as client:
+            token_response = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "code": code,
+                    "client_id": settings.google_client_id,
+                    "client_secret": settings.google_client_secret.get_secret_value(),
+                    "redirect_uri": redirect_uri,
+                    "grant_type": "authorization_code",
+                },
+            )
 
-        # Get user info from ID token
-        id_info = id_token.verify_oauth2_token(
-            credentials.id_token,
-            google_requests.Request(),
-            settings.google_client_id
-        )
+            if token_response.status_code != 200:
+                auth_logger.error("Token exchange failed", status=token_response.status_code)
+                return RedirectResponse(url="/auth/login?error=Token+exchange+failed", status_code=303)
 
-        user_email = id_info.get("email", "").lower()
-        user_name = id_info.get("name")
+            tokens = token_response.json()
+
+            # Get user info from userinfo endpoint
+            userinfo_response = await client.get(
+                "https://www.googleapis.com/oauth2/v2/userinfo",
+                headers={"Authorization": f"Bearer {tokens['access_token']}"},
+            )
+
+            if userinfo_response.status_code != 200:
+                auth_logger.error("Userinfo fetch failed", status=userinfo_response.status_code)
+                return RedirectResponse(url="/auth/login?error=Failed+to+get+user+info", status_code=303)
+
+            userinfo = userinfo_response.json()
+
+        user_email = userinfo.get("email", "").lower()
+        user_name = userinfo.get("name")
 
     except Exception as e:
         auth_logger.error("OAuth callback failed", error=str(e))
