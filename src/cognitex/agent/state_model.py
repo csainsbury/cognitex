@@ -285,16 +285,33 @@ class StateEstimator:
         # Calculate time to next commitment and interruption pressure
         if calendar_events:
             now = datetime.now()
+
+            def parse_event_time(event: dict) -> datetime | None:
+                """Extract datetime from calendar event start/end."""
+                start = event.get("start")
+                if not start:
+                    return None
+                # Handle dict format from Google Calendar API
+                if isinstance(start, dict):
+                    time_str = start.get("dateTime") or start.get("date")
+                else:
+                    time_str = start
+                if not time_str:
+                    return None
+                try:
+                    # Clean timezone suffixes for fromisoformat
+                    time_str = str(time_str).replace("Z", "").replace("+00:00", "")
+                    return datetime.fromisoformat(time_str)
+                except (ValueError, TypeError):
+                    return None
+
             upcoming = [
                 e for e in calendar_events
-                if e.get("start") and datetime.fromisoformat(e["start"].replace("Z", "+00:00").replace("+00:00", "")) > now
+                if parse_event_time(e) and parse_event_time(e) > now
             ]
             if upcoming:
-                next_event = min(
-                    upcoming,
-                    key=lambda e: datetime.fromisoformat(e["start"].replace("Z", "+00:00").replace("+00:00", ""))
-                )
-                delta = datetime.fromisoformat(next_event["start"].replace("Z", "+00:00").replace("+00:00", "")) - now
+                next_event = min(upcoming, key=lambda e: parse_event_time(e))
+                delta = parse_event_time(next_event) - now
                 minutes_to_next = int(delta.total_seconds() / 60)
                 signals.time_to_next_commitment_minutes = minutes_to_next
                 signals.available_block_minutes = minutes_to_next
@@ -348,6 +365,14 @@ class StateEstimator:
             if deferral_count >= 3:
                 return OperatingMode.AVOIDANT
 
+        # At low energy times (< 0.5), skip deep focus entirely
+        # This prevents selecting DEEP_FOCUS during afternoon/evening energy dip
+        if baseline_energy < 0.5:
+            if baseline_energy < 0.4:
+                return OperatingMode.FRAGMENTED
+            # Between 0.4-0.5: allow TRANSITION but not deep focus
+            return OperatingMode.TRANSITION
+
         # At peak energy times (0.85+), favor deep focus if time allows
         if baseline_energy >= 0.85:
             if (
@@ -357,7 +382,7 @@ class StateEstimator:
             ):
                 return OperatingMode.DEEP_FOCUS
 
-        # Standard deep focus check
+        # Standard deep focus check (only reached if energy >= 0.5)
         if (
             signals.available_block_minutes
             and signals.available_block_minutes >= 60
@@ -365,10 +390,6 @@ class StateEstimator:
             and (signals.focus_score is None or signals.focus_score > 0.6)
         ):
             return OperatingMode.DEEP_FOCUS
-
-        # At low energy times (< 0.4), default to fragmented
-        if baseline_energy < 0.4:
-            return OperatingMode.FRAGMENTED
 
         # Check for fragmented state (short time blocks)
         if (
