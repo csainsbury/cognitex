@@ -208,6 +208,16 @@ class TriggerSystem:
             replace_existing=True,
         )
 
+        # Hourly state re-evaluation based on diurnal energy curve
+        # Automatically transitions modes as energy naturally shifts through the day
+        self.scheduler.add_job(
+            self._hourly_state_update,
+            CronTrigger(minute=0),  # Every hour on the hour
+            id="hourly_state_update",
+            name="Hourly State Update",
+            replace_existing=True,
+        )
+
         # Memory consolidation ("Dreaming") at 4am
         # Summarizes daily events, extracts patterns, archives old memories
         self.scheduler.add_job(
@@ -1161,6 +1171,88 @@ class TriggerSystem:
         except Exception as e:
             logger.warning("Failed to get low energy tasks", error=str(e))
             return []
+
+    async def _hourly_state_update(self) -> None:
+        """Re-evaluate operating state based on diurnal energy and context.
+
+        Updates state automatically as energy naturally shifts through the day:
+        - Morning: Favor DEEP_FOCUS if calendar is clear
+        - Afternoon: Transition toward FRAGMENTED as energy dips
+        - Evening: Low-energy modes only
+
+        Respects explicit overrides (clinical recovery, manual state changes).
+        """
+        logger.info("Running hourly state update")
+        from cognitex.agent.action_log import log_action
+
+        try:
+            from cognitex.agent.state_model import get_state_estimator, get_temporal_model
+            from cognitex.services.calendar import CalendarService
+            from cognitex.db.redis import get_redis
+            from datetime import timedelta
+
+            redis = get_redis()
+
+            # Skip if in clinical recovery mode (rest-of-day override)
+            clinical_recovery = await redis.get("cognitex:clinical_recovery_until")
+            if clinical_recovery:
+                logger.debug("Skipping state update - in clinical recovery mode")
+                return
+
+            # Get current calendar events for context
+            cal = CalendarService()
+            now = datetime.now()
+            events_result = cal.list_events(
+                time_min=now,
+                time_max=now + timedelta(hours=4),
+            )
+            calendar_events = events_result.get("items", [])
+
+            # Get current state before update
+            state_estimator = get_state_estimator()
+            old_state = await state_estimator.get_current_state()
+            old_mode = old_state.mode
+
+            # Infer new state based on diurnal curve + calendar
+            new_state = await state_estimator.infer_state(
+                calendar_events=calendar_events,
+            )
+
+            # Only record if mode changed
+            if new_state.mode != old_mode:
+                await state_estimator.record_state(new_state)
+
+                temporal_model = get_temporal_model()
+                current_energy = temporal_model.get_expected_energy(now.hour)
+
+                logger.info(
+                    "State auto-transitioned",
+                    from_mode=old_mode.value,
+                    to_mode=new_state.mode.value,
+                    hour=now.hour,
+                    energy=current_energy,
+                )
+
+                await log_action(
+                    "state_transition",
+                    "trigger",
+                    summary=f"Auto-transition: {old_mode.value} → {new_state.mode.value} (energy: {current_energy:.0%})",
+                    details={
+                        "from_mode": old_mode.value,
+                        "to_mode": new_state.mode.value,
+                        "hour": now.hour,
+                        "energy_level": current_energy,
+                        "upcoming_events": len(calendar_events),
+                    }
+                )
+            else:
+                logger.debug(
+                    "State unchanged after hourly check",
+                    mode=new_state.mode.value,
+                )
+
+        except Exception as e:
+            logger.error("Hourly state update failed", error=str(e))
 
     # =========================================================================
     # Event trigger handlers
