@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+
+{% block title %}{{ project.title }} - Cognitex{% endblock %}
+
+{% block content %}
+<div style="margin-bottom: 1rem;">
+    <a href="/projects" class="link">&larr; Back to Projects</a>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h1>{{ project.title }}</h1>
+        <div>
+            <span class="badge badge-{{ project.status }}">{{ project.status }}</span>
+            {% if project.local_path %}
+            <span class="badge" style="background: #444;">{{ project.local_path }}</span>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if project.description %}
+    <p style="color: #666; margin-bottom: 1rem;">{{ project.description }}</p>
+    {% endif %}
+
+    {% if project.target_date %}
+    <p style="font-size: 0.9rem; color: #888;">Target: {{ project.target_date }}</p>
+    {% endif %}
+</div>
+
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+    <div class="card">
+        <div class="card-header">
+            <h2>Tasks ({{ tasks|length }})</h2>
+            <a href="/tasks" class="link">View all</a>
+        </div>
+
+        {% if tasks %}
+        <table>
+            <tr>
+                <th>Task</th>
+                <th>Priority</th>
+                <th>Status</th>
+            </tr>
+            {% for task in tasks %}
+            <tr>
+                <td>{{ task.title }}</td>
+                <td><span class="priority-{{ task.priority }}">{{ task.priority }}</span></td>
+                <td><span class="badge badge-{{ task.status }}">{{ task.status }}</span></td>
+            </tr>
+            {% endfor %}
+        </table>
+        {% else %}
+        <p class="empty">No tasks in this project</p>
+        {% endif %}
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <h2>Development Context ({{ sessions|length }})</h2>
+        </div>
+
+        {% if sessions %}
+        <div style="max-height: 400px; overflow-y: auto;">
+            {% for session in sessions %}
+            <div style="padding: 0.75rem; border-bottom: 1px solid #333; {% if loop.last %}border-bottom: none;{% endif %}">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+                    <span style="font-weight: 600; color: #fff;">{{ session.slug or session.session_id[:12] }}</span>
+                    <span style="font-size: 0.8rem; color: #888;">{{ session.git_branch or 'unknown branch' }}</span>
+                </div>
+
+                {% if session.summary %}
+                <p style="margin: 0.5rem 0; font-size: 0.9rem;">{{ session.summary }}</p>
+                {% endif %}
+
+                {% if session.decisions %}
+                <details style="margin-top: 0.5rem;">
+                    <summary style="cursor: pointer; color: #888; font-size: 0.85rem;">Decisions ({{ session.decisions|length }})</summary>
+                    <ul style="margin: 0.5rem 0 0 1rem; padding: 0; font-size: 0.85rem; color: #aaa;">
+                        {% for decision in session.decisions[:5] %}
+                        <li style="margin-bottom: 0.25rem;">{{ decision }}</li>
+                        {% endfor %}
+                    </ul>
+                </details>
+                {% endif %}
+
+                {% if session.next_steps %}
+                <details style="margin-top: 0.5rem;">
+                    <summary style="cursor: pointer; color: #888; font-size: 0.85rem;">Next Steps ({{ session.next_steps|length }})</summary>
+                    <ul style="margin: 0.5rem 0 0 1rem; padding: 0; font-size: 0.85rem; color: #aaa;">
+                        {% for step in session.next_steps[:5] %}
+                        <li style="margin-bottom: 0.25rem;">{{ step }}</li>
+                        {% endfor %}
+                    </ul>
+                </details>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="empty">No coding sessions found for this project</p>
+        <p style="font-size: 0.85rem; color: #666;">Run <code>cognitex sessions-sync</code> to import coding sessions.</p>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

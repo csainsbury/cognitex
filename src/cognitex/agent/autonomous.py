@@ -1299,75 +1299,38 @@ class AutonomousAgent:
     async def _draft_email(self, session, params: dict, reason: str) -> dict | None:
         """
         Draft an email reply in the user's voice.
-
-        The draft is stored in the graph for user review before sending.
+        Delegates to DraftEmailTool to ensure consistent storage (Graph + Redis).
         """
-        import uuid
+        from cognitex.agent.tools import DraftEmailTool
 
         email_id = params.get("email_id")
-        to = params.get("to")
-        subject = params.get("subject", "")
-        body = params.get("body", "")
-        original_subject = params.get("original_subject", "")
-
-        if not email_id or not body:
+        if not email_id or not params.get("body"):
             logger.warning("DRAFT_EMAIL missing required fields", params=params)
             return None
 
-        draft_id = f"draft_{uuid.uuid4().hex[:12]}"
+        tool = DraftEmailTool()
+        result = await tool.execute(
+            to=params.get("to", ""),
+            subject=params.get("subject", ""),
+            body=params.get("body", ""),
+            reply_to_id=email_id,
+            reasoning=reason,
+        )
 
-        # Store the draft in the graph, linked to the original email
-        query = """
-        MATCH (original:Email {gmail_id: $email_id})
-        CREATE (draft:EmailDraft {
-            id: $draft_id,
-            to: $to,
-            subject: $subject,
-            body: $body,
-            status: 'pending_review',
-            created_at: datetime(),
-            created_by: 'autonomous_agent',
-            reason: $reason
-        })
-        CREATE (draft)-[:REPLY_TO]->(original)
-        RETURN draft.id as id, original.subject as original_subject
-        """
-        try:
-            result = await session.run(query, {
-                "email_id": email_id,
-                "draft_id": draft_id,
-                "to": to or "",
-                "subject": subject,
-                "body": body,
-                "reason": reason
-            })
-            data = await result.single()
+        if result.success:
+            # Add to local action log (tool already handles graph/redis/notification)
+            await log_action(
+                "draft_email",
+                "agent",
+                summary=f"Drafted reply to {params.get('to')}",
+                details={
+                    **params,
+                    "draft_id": result.data.get("draft_id"),
+                    "reason": reason,
+                },
+            )
+            return {"drafted": True, "draft_id": result.data.get("draft_id")}
 
-            if data:
-                await log_action(
-                    "draft_email",
-                    "agent",
-                    summary=f"Drafted reply to '{original_subject or data.get('original_subject', 'email')}'",
-                    details={
-                        "draft_id": draft_id,
-                        "email_id": email_id,
-                        "to": to,
-                        "subject": subject,
-                        "body_preview": body[:200] + "..." if len(body) > 200 else body,
-                        "reason": reason
-                    }
-                )
-
-                # Notify user about the draft
-                await self._send_draft_notification(
-                    original_subject or data.get('original_subject', 'email'),
-                    to,
-                    body[:300]
-                )
-
-                return {"drafted": True, "draft_id": draft_id, "email_id": email_id}
-        except Exception as e:
-            logger.warning("Failed to draft email", error=str(e))
         return None
 
     async def _send_draft_notification(

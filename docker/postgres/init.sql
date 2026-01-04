@@ -207,3 +207,23 @@ CREATE INDEX IF NOT EXISTS idx_document_chunks_hash ON document_chunks(content_h
 CREATE INDEX IF NOT EXISTS idx_document_chunks_fts ON document_chunks USING gin(to_tsvector('english', content));
 
 COMMENT ON TABLE document_chunks IS 'Stores document chunks for semantic search with overlap';
+
+-- Drive metadata cache
+CREATE TABLE IF NOT EXISTS drive_files (
+    id VARCHAR(255) PRIMARY KEY,
+    name VARCHAR(500) NOT NULL,
+    mime_type VARCHAR(100),
+    folder_path TEXT,
+    parent_id VARCHAR(255),
+    created_time TIMESTAMP,
+    modified_time TIMESTAMP,
+    size_bytes BIGINT,
+    owner_email VARCHAR(255),
+    is_priority BOOLEAN DEFAULT FALSE,
+    indexed_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_drive_files_priority ON drive_files(is_priority);
+CREATE INDEX IF NOT EXISTS idx_drive_files_folder_path ON drive_files(folder_path);
+
+COMMENT ON TABLE drive_files IS 'Cache of Drive file metadata for quick lookups';

@@ -810,6 +810,34 @@ async def project_update(
     )
 
 
+@app.get("/projects/{project_id}", response_class=HTMLResponse)
+async def project_detail(request: Request, project_id: str):
+    """Deep dive project page with development context."""
+    from cognitex.services.coding_sessions import get_session_ingester
+
+    project_service = get_project_service()
+    project = await project_service.get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Get coding sessions
+    ingester = get_session_ingester()
+    sessions = await ingester.get_project_development_context(project["title"], limit=10)
+
+    # Get tasks
+    tasks = await project_service.get_tasks(project_id)
+
+    return templates.TemplateResponse(
+        "project_detail.html",
+        {
+            "request": request,
+            "project": project,
+            "sessions": sessions,
+            "tasks": tasks,
+        },
+    )
+
+
 @app.delete("/projects/{project_id}", response_class=HTMLResponse)
 async def project_delete(project_id: str):
     """Delete a project."""

@@ -3638,6 +3638,69 @@ def sessions_sync(
     asyncio.run(run_sync())
 
 
+@app.command("sessions-search")
+def sessions_search(
+    query: str = typer.Argument(..., help="Keyword or semantic search for coding sessions"),
+    project: str = typer.Option(None, "--project", "-p", help="Filter by project"),
+    limit: int = typer.Option(10, "--limit", "-l", help="Number of sessions"),
+) -> None:
+    """Search coding sessions for specific decisions or topics."""
+
+    async def run_search():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
+
+        await init_neo4j()
+
+        try:
+            async for session in get_neo4j_session():
+                # Neo4j simple string matching on summary, decisions, and topics
+                cypher = """
+                MATCH (cs:CodingSession)
+                WHERE toLower(cs.summary) CONTAINS toLower($query)
+                   OR any(d IN cs.decisions WHERE toLower(d) CONTAINS toLower($query))
+                   OR any(t IN cs.topics WHERE toLower(t) CONTAINS toLower($query))
+                """
+                if project:
+                    cypher += " AND cs.project_path CONTAINS $project"
+
+                cypher += """
+                RETURN cs.session_id as id, cs.summary as summary,
+                       cs.project_path as path, cs.ended_at as date,
+                       cs.decisions as decisions
+                ORDER BY cs.ended_at DESC
+                LIMIT $limit
+                """
+
+                result = await session.run(
+                    cypher, query=query, project=project or "", limit=limit
+                )
+                records = await result.data()
+
+                if not records:
+                    console.print("[yellow]No sessions found matching query.[/yellow]")
+                    return
+
+                console.print(f"\n[bold]Found {len(records)} sessions:[/bold]\n")
+
+                for r in records:
+                    date_str = str(r["date"])[:16] if r["date"] else "unknown"
+                    project_name = r["path"].split("/")[-1] if r["path"] else "unknown"
+                    session_id = r["id"][:8] if r["id"] else "?"
+                    console.print(
+                        f"[cyan]{date_str}[/cyan] [green]{project_name}[/green] [dim]({session_id})[/dim]"
+                    )
+                    if r["summary"]:
+                        console.print(f"  {r['summary']}")
+                    if r["decisions"]:
+                        console.print(f"  [dim]Decisions: {r['decisions'][0]}[/dim]")
+                    console.print("")
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(run_search())
+
+
 @app.command("sessions-context")
 def sessions_context(
     project: str = typer.Argument(..., help="Project name to get context for"),

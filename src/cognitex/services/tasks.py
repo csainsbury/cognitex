@@ -109,10 +109,23 @@ class TaskService:
     ) -> dict | None:
         """
         Update task properties.
+        Handles automatic timing recording for learning system.
 
         Returns:
             Updated task dict or None if not found
         """
+        from cognitex.db.postgres import get_session
+        from sqlalchemy import text
+
+        # 1. Capture previous state for timing logic
+        prev_task = await self.get(task_id)
+        if not prev_task:
+            return None
+
+        prev_status = prev_task.get("status")
+
+        # 2. Update Graph
+        task = None
         async for session in get_neo4j_session():
             task = await gs.update_task(
                 session,
@@ -126,9 +139,54 @@ class TaskService:
                 energy_cost=energy_cost,
             )
 
-            if task:
-                logger.info("Updated task", task_id=task_id)
-            return task
+        if not task:
+            return None
+
+        # 3. Handle Timing Logic (PostgreSQL) for status transitions
+        if status and status != prev_status:
+            async for pg_session in get_session():
+                # Start Timer: pending -> in_progress
+                if status == "in_progress" and prev_status != "in_progress":
+                    await pg_session.execute(
+                        text("""
+                            UPDATE tasks
+                            SET started_at = NOW()
+                            WHERE id = :id AND started_at IS NULL
+                        """),
+                        {"id": task_id},
+                    )
+                    await pg_session.commit()
+
+                # Stop Timer: in_progress -> done
+                elif status == "done" and prev_status != "done":
+                    # Record completion time
+                    await pg_session.execute(
+                        text("""
+                            UPDATE tasks
+                            SET completed_at = NOW()
+                            WHERE id = :id
+                        """),
+                        {"id": task_id},
+                    )
+                    await pg_session.commit()
+
+                    # Calculate duration if we have a start time
+                    if prev_task.get("started_at"):
+                        from datetime import datetime as dt
+
+                        start_time = prev_task["started_at"]
+                        if isinstance(start_time, str):
+                            start_time = dt.fromisoformat(start_time.replace("Z", "+00:00"))
+
+                        await record_task_timing(
+                            task_id=task_id,
+                            started_at=start_time,
+                            completed_at=dt.now(),
+                            estimated_minutes=int(prev_task.get("effort_estimate") or 30),
+                        )
+
+        logger.info("Updated task", task_id=task_id, status=status)
+        return task
 
     async def get(self, task_id: str) -> dict | None:
         """Get a task by ID with all relationships."""
