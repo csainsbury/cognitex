@@ -128,6 +128,12 @@ class Settings(BaseSettings):
         description="API key for remote session sync (cognitex-sync clients)",
     )
 
+    # Web authentication
+    web_allowed_emails: str = Field(
+        default="",
+        description="Comma-separated list of emails allowed to access web dashboard (invite-only)",
+    )
+
     # Push notifications
     webhook_base_url: str = Field(
         default="",

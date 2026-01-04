@@ -595,6 +595,10 @@
         <a href="/agent-log" {% if "/agent-log" in request.url.path %}class="active"{% endif %}>Agent Log</a>
         <a href="/twin" {% if "/twin" in request.url.path %}class="active"{% endif %}>Twin</a>
         <a href="/settings" {% if "/settings" in request.url.path %}class="active"{% endif %} style="margin-left: auto;">Settings</a>
+        {% if request.state.user %}
+        <span style="color: #64748b; font-size: 0.85rem; padding: 0 0.5rem;">{{ request.state.user.email }}</span>
+        <a href="/auth/logout" style="color: #ef4444; font-size: 0.85rem;">Logout</a>
+        {% endif %}
     </nav>
 
     <div class="container">

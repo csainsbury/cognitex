@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Form, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -260,6 +260,192 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+# -------------------------------------------------------------------
+# Authentication
+# -------------------------------------------------------------------
+
+from cognitex.web.auth import (
+    SESSION_COOKIE_NAME,
+    SESSION_MAX_AGE,
+    create_oauth_flow,
+    create_session,
+    verify_session,
+    destroy_session,
+    get_allowed_emails,
+    store_oauth_state,
+    verify_oauth_state,
+)
+from cognitex.config import get_settings
+from cognitex.db.redis import get_redis
+import structlog
+
+auth_logger = structlog.get_logger("auth")
+
+
+async def get_current_user(request: Request) -> dict:
+    """Get current authenticated user or redirect to login."""
+    session_cookie = request.cookies.get(SESSION_COOKIE_NAME)
+
+    if not session_cookie:
+        next_url = request.url.path
+        if request.url.query:
+            next_url += f"?{request.url.query}"
+        raise HTTPException(
+            status_code=303,
+            headers={"Location": f"/auth/login?next={next_url}"}
+        )
+
+    user = await verify_session(session_cookie)
+    if not user:
+        raise HTTPException(
+            status_code=303,
+            headers={"Location": f"/auth/login?next={request.url.path}"}
+        )
+
+    return user
+
+
+async def get_optional_user(request: Request) -> dict | None:
+    """Get current user if logged in, or None."""
+    session_cookie = request.cookies.get(SESSION_COOKIE_NAME)
+    if not session_cookie:
+        return None
+    return await verify_session(session_cookie)
+
+
+@app.get("/auth/login", response_class=HTMLResponse)
+async def login_page(request: Request, error: str | None = None, next: str = "/"):
+    """Show login page."""
+    # If already logged in, redirect to home
+    user = await get_optional_user(request)
+    if user:
+        return RedirectResponse(url="/", status_code=303)
+
+    return templates.TemplateResponse(
+        "login.html",
+        {"request": request, "error": error, "next": next, "user": None}
+    )
+
+
+@app.get("/auth/google")
+async def google_login(request: Request, next: str = "/"):
+    """Initiate Google OAuth flow."""
+    import secrets
+
+    # Determine redirect URI based on request
+    base_url = str(request.base_url).rstrip("/")
+    redirect_uri = f"{base_url}/auth/callback"
+
+    try:
+        flow = create_oauth_flow(redirect_uri)
+    except ValueError as e:
+        auth_logger.error("OAuth flow creation failed", error=str(e))
+        return RedirectResponse(url="/auth/login?error=OAuth+not+configured", status_code=303)
+
+    # Generate state for CSRF protection
+    state = secrets.token_urlsafe(32)
+
+    authorization_url, _ = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="select_account",
+        state=state,
+    )
+
+    # Store state and next URL in Redis
+    await store_oauth_state(state, next)
+
+    return RedirectResponse(url=authorization_url, status_code=303)
+
+
+@app.get("/auth/callback")
+async def google_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None
+):
+    """Handle Google OAuth callback."""
+    from google.oauth2 import id_token
+    from google.auth.transport import requests as google_requests
+
+    if error:
+        auth_logger.warning("OAuth error from Google", error=error)
+        return RedirectResponse(url=f"/auth/login?error={error}", status_code=303)
+
+    if not code or not state:
+        return RedirectResponse(url="/auth/login?error=Missing+authorization+code", status_code=303)
+
+    # Verify state
+    next_url = await verify_oauth_state(state)
+    if not next_url:
+        auth_logger.warning("Invalid OAuth state")
+        return RedirectResponse(url="/auth/login?error=Invalid+state", status_code=303)
+
+    # Exchange code for tokens
+    settings = get_settings()
+    base_url = str(request.base_url).rstrip("/")
+    redirect_uri = f"{base_url}/auth/callback"
+
+    try:
+        flow = create_oauth_flow(redirect_uri)
+        flow.fetch_token(code=code)
+        credentials = flow.credentials
+
+        # Get user info from ID token
+        id_info = id_token.verify_oauth2_token(
+            credentials.id_token,
+            google_requests.Request(),
+            settings.google_client_id
+        )
+
+        user_email = id_info.get("email", "").lower()
+        user_name = id_info.get("name")
+
+    except Exception as e:
+        auth_logger.error("OAuth callback failed", error=str(e))
+        return RedirectResponse(url="/auth/login?error=Authentication+failed", status_code=303)
+
+    # Check if email is allowed
+    allowed_emails = get_allowed_emails()
+    if allowed_emails and user_email not in allowed_emails:
+        auth_logger.warning("Unauthorized login attempt", email=user_email)
+        return RedirectResponse(
+            url="/auth/login?error=Access+not+authorized.+Contact+administrator.",
+            status_code=303
+        )
+
+    # Create session
+    signed_session = await create_session(user_email, user_name)
+
+    auth_logger.info("User logged in", email=user_email)
+
+    # Set cookie and redirect
+    response = RedirectResponse(url=next_url or "/", status_code=303)
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=signed_session,
+        max_age=SESSION_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=settings.is_production,
+    )
+    return response
+
+
+@app.get("/auth/logout")
+async def logout(request: Request):
+    """Log out and destroy session."""
+    session_cookie = request.cookies.get(SESSION_COOKIE_NAME)
+    if session_cookie:
+        await destroy_session(session_cookie)
+        auth_logger.info("User logged out")
+
+    response = RedirectResponse(url="/auth/login", status_code=303)
+    response.delete_cookie(SESSION_COOKIE_NAME)
+    return response
+
+
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     """Serve favicon."""
@@ -267,6 +453,58 @@ async def favicon():
     if favicon_path.exists():
         return FileResponse(favicon_path)
     raise HTTPException(status_code=404, detail="Favicon not found")
+
+
+# -------------------------------------------------------------------
+# Authentication Middleware
+# -------------------------------------------------------------------
+
+# Public paths that don't require authentication
+PUBLIC_PATHS = {
+    "/auth/login",
+    "/auth/google",
+    "/auth/callback",
+    "/auth/logout",
+    "/favicon.ico",
+    "/api/sync/sessions",
+    "/api/sync/status",
+    "/downloads/cognitex-sync-install.sh",
+    "/downloads/cognitex-sync.tar.gz",
+}
+
+PUBLIC_PREFIXES = (
+    "/static/",
+    "/auth/",
+)
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    """Require authentication for all routes except public ones."""
+    path = request.url.path
+
+    # Skip auth for public paths
+    if path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES):
+        return await call_next(request)
+
+    # Check for valid session
+    session_cookie = request.cookies.get(SESSION_COOKIE_NAME)
+    if session_cookie:
+        user = await verify_session(session_cookie)
+        if user:
+            # Store user in request state for templates
+            request.state.user = user
+            return await call_next(request)
+
+    # Not authenticated - redirect to login
+    next_url = path
+    if request.url.query:
+        next_url += f"?{request.url.query}"
+
+    return RedirectResponse(
+        url=f"/auth/login?next={next_url}",
+        status_code=303
+    )
 
 
 # -------------------------------------------------------------------
