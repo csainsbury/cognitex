@@ -1,5 +1,6 @@
 """Google Calendar API service for fetching and syncing events."""
 
+import asyncio
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
@@ -434,7 +435,7 @@ async def fetch_upcoming_events(
     days_ahead: int = 7,
 ) -> list[dict]:
     """
-    Fetch events for the upcoming N days.
+    Fetch events for the upcoming N days (non-blocking).
 
     Args:
         calendar: CalendarService instance
@@ -450,7 +451,9 @@ async def fetch_upcoming_events(
     page_token = None
 
     while True:
-        result = calendar.list_events(
+        # Wrap blocking call in thread
+        result = await asyncio.to_thread(
+            calendar.list_events,
             time_min=time_min,
             time_max=time_max,
             max_results=250,
@@ -459,9 +462,7 @@ async def fetch_upcoming_events(
 
         events = result.get("items", [])
         for event in events:
-            # Skip cancelled events (deleted instances of recurring events)
             if event.get("status") == "cancelled":
-                logger.debug("Skipping cancelled event", event_id=event.get("id"))
                 continue
             all_events.append(extract_event_metadata(event))
 
@@ -478,7 +479,7 @@ async def fetch_historical_events(
     months_back: int = 1,
 ) -> list[dict]:
     """
-    Fetch historical events from the past N months.
+    Fetch historical events from the past N months (non-blocking).
 
     Args:
         calendar: CalendarService instance
@@ -494,7 +495,9 @@ async def fetch_historical_events(
     page_token = None
 
     while True:
-        result = calendar.list_events(
+        # Wrap blocking call in thread
+        result = await asyncio.to_thread(
+            calendar.list_events,
             time_min=time_min,
             time_max=time_max,
             max_results=250,
@@ -503,9 +506,7 @@ async def fetch_historical_events(
 
         events = result.get("items", [])
         for event in events:
-            # Skip cancelled events (deleted instances of recurring events)
             if event.get("status") == "cancelled":
-                logger.debug("Skipping cancelled event", event_id=event.get("id"))
                 continue
             all_events.append(extract_event_metadata(event))
 

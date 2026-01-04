@@ -848,8 +848,8 @@ async def run_drive_metadata_sync(cleanup_deleted: bool = True) -> dict:
 
     drive = get_drive_service()
 
-    # Collect all files
-    files = list(drive.list_all_files())
+    # Collect all files (blocking generator, wrap in thread)
+    files = await asyncio.to_thread(lambda: list(drive.list_all_files()))
     drive_ids = {f["id"] for f in files}
     logger.info("Fetched Drive files", count=len(files))
 

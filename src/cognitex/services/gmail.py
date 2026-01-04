@@ -1,5 +1,6 @@
 """Gmail API service for fetching and syncing emails."""
 
+import asyncio
 import base64
 import email
 from datetime import datetime, timedelta
@@ -450,6 +451,7 @@ async def fetch_all_messages(
 ) -> list[dict]:
     """
     Fetch all messages matching a query, handling pagination.
+    Wraps blocking calls in threads to prevent event loop blocking.
 
     Args:
         gmail: GmailService instance
@@ -463,7 +465,9 @@ async def fetch_all_messages(
     page_token = None
 
     while len(all_messages) < max_messages:
-        result = gmail.list_messages(
+        # Run blocking list_messages in thread
+        result = await asyncio.to_thread(
+            gmail.list_messages,
             query=query,
             max_results=min(500, max_messages - len(all_messages)),
             page_token=page_token,
@@ -473,9 +477,13 @@ async def fetch_all_messages(
         if not messages:
             break
 
-        # Get full metadata for these messages
+        # Get full metadata (also blocking, so wrap it)
         message_ids = [m["id"] for m in messages]
-        full_messages = gmail.get_message_batch(message_ids, format="metadata")
+        full_messages = await asyncio.to_thread(
+            gmail.get_message_batch,
+            message_ids,
+            format="metadata",
+        )
 
         for msg in full_messages:
             all_messages.append(extract_email_metadata(msg))
