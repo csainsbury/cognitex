@@ -4390,48 +4390,16 @@ def verify_sync_api_key(authorization: str = Header(None)) -> bool:
 
 # NOTE: This endpoint is also available in api/routes/sync.py for the API server (port 8000).
 # This duplicate exists so cognitex-sync clients can hit either port (8080 web or 8000 API).
-@app.post("/api/sync/sessions")
-async def api_sync_sessions(
-    request: Request,
-    _auth: bool = Depends(verify_sync_api_key),
-):
-    """
-    Ingest coding sessions from remote machines.
 
-    Accepts JSON with session data:
-    {
-        "machine_id": "laptop-chris",
-        "cli_type": "claude",
-        "sessions": [
-            {
-                "session_id": "abc123",
-                "project_path": "/Users/chris/projects/myapp",
-                "git_branch": "main",
-                "started_at": "2025-01-03T10:00:00Z",
-                "ended_at": "2025-01-03T11:30:00Z",
-                "messages": [...],  # Optional: raw messages for LLM extraction
-                "summary": "...",   # Optional: pre-extracted summary
-                "decisions": [...],
-                "next_steps": [...],
-                "topics": [...],
-            }
-        ]
-    }
-    """
+
+async def _process_sync_batch_web(
+    machine_id: str,
+    cli_type: str,
+    sessions: list[dict],
+) -> None:
+    """Process session sync in background to avoid HTTP timeouts."""
     from cognitex.services.coding_sessions import get_session_ingester
     from cognitex.db.neo4j import get_driver
-
-    try:
-        data = await request.json()
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
-
-    machine_id = data.get("machine_id", "unknown")
-    cli_type = data.get("cli_type", "claude")
-    sessions = data.get("sessions", [])
-
-    if not sessions:
-        return {"status": "ok", "message": "No sessions to ingest", "ingested": 0}
 
     ingester = get_session_ingester()
     driver = get_driver()
@@ -4495,12 +4463,78 @@ async def api_sync_sessions(
                 "session_id": session_data.get("session_id"),
                 "error": str(e),
             })
+            logger.error(
+                "Session sync failed",
+                session_id=session_data.get("session_id"),
+                error=str(e),
+            )
+
+    logger.info(
+        "Session sync batch completed",
+        machine_id=machine_id,
+        ingested=ingested,
+        errors=len(errors),
+    )
+
+
+@app.post("/api/sync/sessions")
+async def api_sync_sessions(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    _auth: bool = Depends(verify_sync_api_key),
+):
+    """
+    Ingest coding sessions from remote machines.
+
+    Processing happens in background to avoid HTTP timeouts on large batches.
+    Returns immediately with 'accepted' status.
+
+    Accepts JSON with session data:
+    {
+        "machine_id": "laptop-chris",
+        "cli_type": "claude",
+        "sessions": [
+            {
+                "session_id": "abc123",
+                "project_path": "/Users/chris/projects/myapp",
+                "git_branch": "main",
+                "started_at": "2025-01-03T10:00:00Z",
+                "ended_at": "2025-01-03T11:30:00Z",
+                "messages": [...],  # Optional: raw messages for LLM extraction
+                "summary": "...",   # Optional: pre-extracted summary
+                "decisions": [...],
+                "next_steps": [...],
+                "topics": [...],
+            }
+        ]
+    }
+    """
+    try:
+        data = await request.json()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
+
+    machine_id = data.get("machine_id", "unknown")
+    cli_type = data.get("cli_type", "claude")
+    sessions = data.get("sessions", [])
+
+    if not sessions:
+        return {"status": "ok", "message": "No sessions to ingest", "queued": 0}
+
+    # Offload processing to background task to prevent HTTP timeout
+    background_tasks.add_task(_process_sync_batch_web, machine_id, cli_type, sessions)
+
+    logger.info(
+        "Session sync accepted",
+        machine_id=machine_id,
+        session_count=len(sessions),
+    )
 
     return {
-        "status": "ok",
+        "status": "accepted",
+        "message": "Processing started in background",
         "machine_id": machine_id,
-        "ingested": ingested,
-        "errors": errors if errors else None,
+        "queued": len(sessions),
     }
 
 

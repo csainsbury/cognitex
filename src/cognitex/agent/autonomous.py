@@ -667,14 +667,15 @@ class AutonomousAgent:
             start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00").replace("+00:00", ""))
             end_dt = start_dt + timedelta(minutes=duration_minutes)
 
-            # Check existing events
+            # Check existing events (wrap blocking API call in thread)
             cal = CalendarService()
-            events = cal.list_events(
+            events_result = await asyncio.to_thread(
+                cal.list_events,
                 time_min=start_dt - timedelta(hours=1),
                 time_max=end_dt + timedelta(hours=1),
             )
 
-            for event in events.get("items", []):
+            for event in events_result.get("items", []):
                 event_start = event.get("start", {}).get("dateTime")
                 event_end = event.get("end", {}).get("dateTime")
 

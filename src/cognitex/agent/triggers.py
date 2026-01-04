@@ -208,6 +208,16 @@ class TriggerSystem:
             replace_existing=True,
         )
 
+        # Memory consolidation ("Dreaming") at 4am
+        # Summarizes daily events, extracts patterns, archives old memories
+        self.scheduler.add_job(
+            self._run_consolidation,
+            CronTrigger(hour=4, minute=0),
+            id="memory_consolidation",
+            name="Memory Consolidation",
+            replace_existing=True,
+        )
+
         logger.info("Scheduled triggers configured")
 
     async def _start_event_listeners(self) -> None:
@@ -570,6 +580,50 @@ class TriggerSystem:
                 "trigger",
                 status="failed",
                 error=str(e)
+            )
+
+    async def _run_consolidation(self) -> None:
+        """Run nightly memory consolidation ("Dreaming").
+
+        Consolidates yesterday's memories into a daily summary,
+        extracts behavioral patterns, and archives old logs.
+        """
+        logger.info("Starting nightly memory consolidation")
+        from cognitex.agent.action_log import log_action
+
+        try:
+            from cognitex.agent.consolidation import MemoryConsolidator
+
+            consolidator = MemoryConsolidator()
+
+            # Consolidate yesterday
+            result = await consolidator.run_nightly_consolidation()
+
+            # Prune old logs (keep 30 days)
+            prune_result = await consolidator.archive_old_memories(older_than_days=30)
+
+            logger.info(
+                "Memory consolidation completed",
+                summary_id=result.get("summary_id"),
+                event_count=result.get("event_count", 0),
+                archived_count=prune_result.get("archived_count", 0),
+            )
+
+            await log_action(
+                "consolidation",
+                "trigger",
+                summary=f"Memory consolidation: {result.get('event_count', 0)} events summarized, "
+                        f"{prune_result.get('archived_count', 0)} old logs archived",
+                details={"consolidation": result, "pruning": prune_result}
+            )
+
+        except Exception as e:
+            logger.error("Memory consolidation failed", error=str(e))
+            await log_action(
+                "consolidation",
+                "trigger",
+                status="failed",
+                summary=f"Consolidation failed: {str(e)}"
             )
 
     async def _drive_poll(self) -> None:
