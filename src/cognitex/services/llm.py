@@ -88,46 +88,44 @@ class LLMService:
             logger.info("LLMService using Google Gemini", model=self.primary_model)
 
         elif self.provider == "anthropic":
-            from anthropic import Anthropic
+            from anthropic import AsyncAnthropic
             api_key = settings.anthropic_api_key.get_secret_value()
             if not api_key:
                 raise ValueError("ANTHROPIC_API_KEY not configured")
-            self.client = Anthropic(api_key=api_key)
+            self.client = AsyncAnthropic(api_key=api_key)
             self.primary_model = settings.anthropic_model_planner
             self.fast_model = settings.anthropic_model_executor
-            logger.info("LLMService using Anthropic Claude", model=self.primary_model)
+            logger.info("LLMService using Anthropic Claude (async)", model=self.primary_model)
 
         elif self.provider == "openai":
-            from openai import OpenAI
+            from openai import AsyncOpenAI
             api_key = settings.openai_api_key.get_secret_value()
             if not api_key:
                 raise ValueError("OPENAI_API_KEY not configured")
-            self.client = OpenAI(api_key=api_key)
+            self.client = AsyncOpenAI(api_key=api_key)
             self.primary_model = settings.openai_model_planner
             self.fast_model = settings.openai_model_executor
-            logger.info("LLMService using OpenAI", model=self.primary_model)
+            logger.info("LLMService using OpenAI (async)", model=self.primary_model)
 
         else:  # together (default)
+            from together import AsyncTogether
             api_key = settings.together_api_key.get_secret_value()
             if not api_key:
                 raise ValueError("TOGETHER_API_KEY not configured")
-            self.client = Together(api_key=api_key)
+            self.client = AsyncTogether(api_key=api_key)
             self.primary_model = settings.together_model_planner
             self.fast_model = settings.together_model_executor
             self.provider = "together"
-            logger.info("LLMService using Together.ai", model=self.primary_model)
+            logger.info("LLMService using Together.ai (async)", model=self.primary_model)
 
         # Embeddings always use Together.ai (Anthropic/Google don't have compatible embeddings)
-        # Initialize a separate Together client for embeddings if using a different provider
-        if self.provider != "together":
-            together_key = settings.together_api_key.get_secret_value()
-            if together_key:
-                self._together_client = Together(api_key=together_key)
-            else:
-                self._together_client = None
-                logger.warning("Together API key not set - embeddings will not work")
+        # Use sync client wrapped in asyncio.to_thread for embeddings
+        together_key = settings.together_api_key.get_secret_value()
+        if together_key:
+            self._embedding_client = Together(api_key=together_key)
         else:
-            self._together_client = self.client
+            self._embedding_client = None
+            logger.warning("Together API key not set - embeddings will not work")
         self.embedding_model = settings.together_model_embedding
 
     @with_retry(max_attempts=3, base_delay=1.0)
@@ -169,7 +167,7 @@ class LLMService:
             fallback_reason = None
 
             try:
-                response = genai_model.generate_content(
+                response = await genai_model.generate_content_async(
                     prompt,
                     generation_config={
                         "max_output_tokens": max_tokens,
@@ -218,9 +216,10 @@ class LLMService:
                 if hasattr(api_key, 'get_secret_value'):
                     api_key = api_key.get_secret_value()
                 if api_key:
-                    fallback_client = Together(api_key=api_key)
+                    from together import AsyncTogether
+                    fallback_client = AsyncTogether(api_key=api_key)
                     fallback_model = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
-                    response = fallback_client.chat.completions.create(
+                    response = await fallback_client.chat.completions.create(
                         model=fallback_model,
                         messages=[{"role": "user", "content": prompt}],
                         max_tokens=max_tokens,
@@ -231,8 +230,8 @@ class LLMService:
                     raise ValueError(f"Gemini failed ({fallback_reason}) and no fallback API key configured")
 
         elif self.provider == "anthropic":
-            # Anthropic API
-            response = self.client.messages.create(
+            # Anthropic API (async)
+            response = await self.client.messages.create(
                 model=model,
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}],
@@ -251,7 +250,7 @@ class LLMService:
             if response_format:
                 kwargs["response_format"] = response_format
 
-            response = self.client.chat.completions.create(**kwargs)
+            response = await self.client.chat.completions.create(**kwargs)
             return response.choices[0].message.content
 
     async def classify_email(self, email_data: dict) -> dict:
@@ -490,6 +489,7 @@ Return ONLY valid JSON, no other text. Use null for unknown fields."""
         Generate an embedding vector for the given text.
 
         Uses Together.ai for embeddings regardless of primary LLM provider.
+        Sync client is wrapped in asyncio.to_thread to avoid blocking.
 
         Args:
             text: Text to embed (max ~8k tokens for m2-bert)
@@ -497,10 +497,12 @@ Return ONLY valid JSON, no other text. Use null for unknown fields."""
         Returns:
             Embedding vector as list of floats
         """
-        if self._together_client is None:
+        if self._embedding_client is None:
             raise ValueError("Together.ai client not configured - embeddings unavailable")
 
-        response = self._together_client.embeddings.create(
+        # Wrap sync embedding call in thread to avoid blocking event loop
+        response = await asyncio.to_thread(
+            self._embedding_client.embeddings.create,
             model=self.embedding_model,
             input=text,
         )

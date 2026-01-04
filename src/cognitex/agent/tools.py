@@ -78,6 +78,16 @@ class GraphQueryTool(BaseTool):
     async def execute(self, query: str, params: dict | None = None) -> ToolResult:
         from cognitex.db.neo4j import get_neo4j_session
 
+        # Security check: block write operations (LLMs sometimes ignore instructions)
+        write_keywords = ["CREATE", "DELETE", "SET", "MERGE", "DETACH", "REMOVE", "DROP"]
+        upper_query = query.upper()
+        if any(kw in upper_query for kw in write_keywords):
+            logger.warning("Blocked write operation in GraphQueryTool", query=query[:100])
+            return ToolResult(
+                success=False,
+                error="GraphQueryTool is read-only. Write operations (CREATE, DELETE, SET, MERGE) are not allowed.",
+            )
+
         try:
             async for session in get_neo4j_session():
                 result = await session.run(query, params or {})

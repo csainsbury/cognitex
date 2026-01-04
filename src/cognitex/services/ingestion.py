@@ -1,5 +1,6 @@
 """Email, calendar, and Drive ingestion pipeline - processes data and stores in graph."""
 
+import asyncio
 import hashlib
 from datetime import datetime
 
@@ -112,7 +113,8 @@ async def get_user_email() -> str | None:
     """Get the authenticated user's email address."""
     try:
         gmail = GmailService()
-        profile = gmail.get_profile()
+        # Wrap sync Google API call to avoid blocking event loop
+        profile = await asyncio.to_thread(gmail.get_profile)
         return profile.get("emailAddress", "").lower()
     except Exception as e:
         logger.warning("Failed to get user email", error=str(e))
@@ -486,7 +488,9 @@ async def run_incremental_sync(history_id: str) -> dict:
     gmail = GmailService()
 
     try:
-        history = gmail.get_history(
+        # Wrap sync Google API call to avoid blocking event loop
+        history = await asyncio.to_thread(
+            gmail.get_history,
             start_history_id=last_history_id,
             history_types=["messageAdded"],
         )
@@ -516,8 +520,10 @@ async def run_incremental_sync(history_id: str) -> dict:
 
     logger.info("Found new messages", count=len(new_message_ids))
 
-    # Fetch full metadata for new messages
-    messages = gmail.get_message_batch(list(new_message_ids), format="metadata")
+    # Fetch full metadata for new messages (run in thread to avoid blocking)
+    messages = await asyncio.to_thread(
+        gmail.get_message_batch, list(new_message_ids), format="metadata"
+    )
     from cognitex.services.gmail import extract_email_metadata
     email_data = [extract_email_metadata(msg) for msg in messages]
 

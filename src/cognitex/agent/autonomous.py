@@ -510,17 +510,23 @@ class AutonomousAgent:
             # Log first part of response for debugging
             logger.debug("LLM raw response", response=response_text[:500])
 
-            if response_text.startswith("```"):
-                # Remove markdown code blocks
-                lines = response_text.split("\n")
-                response_text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+            # Robust JSON extraction using regex
+            import re
 
-            # Try to find JSON array in the response
-            if "[" in response_text:
-                start = response_text.find("[")
-                end = response_text.rfind("]") + 1
-                if end > start:
-                    response_text = response_text[start:end]
+            # 1. Try to find a code block marked as json
+            json_block = re.search(r"```json\s*(\[.*?\])\s*```", response_text, re.DOTALL)
+            if json_block:
+                response_text = json_block.group(1)
+            else:
+                # 2. Remove any markdown code block markers
+                if response_text.startswith("```"):
+                    lines = response_text.split("\n")
+                    response_text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+
+                # 3. Try to find any array-like structure
+                array_match = re.search(r"(\[.*\])", response_text, re.DOTALL)
+                if array_match:
+                    response_text = array_match.group(1)
 
             decisions = json.loads(response_text)
 
