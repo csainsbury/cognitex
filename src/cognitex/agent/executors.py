@@ -6,61 +6,21 @@ from typing import Any
 
 import structlog
 
-from cognitex.config import get_settings
 from cognitex.agent.tools import ToolResult, get_tool_registry
+from cognitex.services.llm import get_llm_service
 
 logger = structlog.get_logger()
 
 
 class BaseExecutor(ABC):
-    """Base class for all executors - supports multiple LLM providers."""
+    """Base class for all executors - uses LLMService singleton."""
 
     name: str
     description: str
 
     def __init__(self):
-        settings = get_settings()
-        self.provider = settings.llm_provider
+        self.llm_service = get_llm_service()
         self.registry = get_tool_registry()
-
-        # Initialize the appropriate client based on provider
-        if self.provider == "google":
-            import google.generativeai as genai
-            api_key = settings.google_ai_api_key.get_secret_value()
-            if not api_key:
-                raise ValueError("GOOGLE_AI_API_KEY not configured")
-            genai.configure(api_key=api_key)
-            self.client = genai
-            self.model = settings.google_model_executor
-            logger.debug("Executor using Google Gemini", model=self.model)
-
-        elif self.provider == "anthropic":
-            from anthropic import Anthropic
-            api_key = settings.anthropic_api_key.get_secret_value()
-            if not api_key:
-                raise ValueError("ANTHROPIC_API_KEY not configured")
-            self.client = Anthropic(api_key=api_key)
-            self.model = settings.anthropic_model_executor
-            logger.debug("Executor using Anthropic Claude", model=self.model)
-
-        elif self.provider == "openai":
-            from openai import OpenAI
-            api_key = settings.openai_api_key.get_secret_value()
-            if not api_key:
-                raise ValueError("OPENAI_API_KEY not configured")
-            self.client = OpenAI(api_key=api_key)
-            self.model = settings.openai_model_executor
-            logger.debug("Executor using OpenAI", model=self.model)
-
-        else:  # together (default)
-            from together import Together
-            api_key = settings.together_api_key.get_secret_value()
-            if not api_key:
-                raise ValueError("TOGETHER_API_KEY not configured")
-            self.client = Together(api_key=api_key)
-            self.model = settings.together_model_executor
-            self.provider = "together"
-            logger.debug("Executor using Together.ai", model=self.model)
 
     @abstractmethod
     async def execute(self, tool: str, args: dict, reasoning: str) -> ToolResult:
@@ -68,34 +28,14 @@ class BaseExecutor(ABC):
         pass
 
     async def _call_llm(self, prompt: str, max_tokens: int = 1024) -> str:
-        """Make an LLM call for content generation - routes to appropriate provider."""
-        if self.provider == "google":
-            model = self.client.GenerativeModel(self.model)
-            response = model.generate_content(
-                prompt,
-                generation_config={
-                    "max_output_tokens": max_tokens,
-                    "temperature": 0.4,
-                },
-            )
-            return response.text
-
-        elif self.provider == "anthropic":
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=max_tokens,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return response.content[0].text
-
-        else:  # openai/together
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=max_tokens,
-                temperature=0.4,
-            )
-            return response.choices[0].message.content
+        """Make an LLM call for content generation via LLMService."""
+        # Use the fast model for executor tasks (quicker responses)
+        return await self.llm_service.complete(
+            prompt,
+            model=self.llm_service.fast_model,
+            max_tokens=max_tokens,
+            temperature=0.4,
+        )
 
 
 class EmailExecutor(BaseExecutor):

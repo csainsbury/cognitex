@@ -17,7 +17,8 @@ CREATE TABLE tasks (
     project_id UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    completed_at TIMESTAMPTZ
+    started_at TIMESTAMPTZ,   -- Set when status changes to 'in_progress'
+    completed_at TIMESTAMPTZ  -- Set when status changes to 'done'
 );
 
 CREATE INDEX idx_tasks_status ON tasks(status);
