@@ -263,9 +263,16 @@ class StateEstimator:
             Inferred UserState
         """
         signals = ContinuousSignals()
-        mode = OperatingMode.FRAGMENTED  # Default
 
-        # Process explicit signals first
+        # Get temporal energy baseline from diurnal curve
+        temporal_model = get_temporal_model()
+        current_hour = datetime.now().hour
+        baseline_energy = temporal_model.get_expected_energy(current_hour)
+
+        # Set fatigue as inverse of baseline energy (high energy = low fatigue)
+        signals.fatigue_level = 1.0 - baseline_energy
+
+        # Process explicit signals (these override temporal baseline)
         if explicit_signals:
             if "fatigue" in explicit_signals:
                 signals.fatigue_level = explicit_signals["fatigue"]
@@ -289,9 +296,12 @@ class StateEstimator:
                 delta = datetime.fromisoformat(next_event["start"].replace("Z", "+00:00").replace("+00:00", "")) - now
                 signals.time_to_next_commitment_minutes = int(delta.total_seconds() / 60)
                 signals.available_block_minutes = signals.time_to_next_commitment_minutes
+        else:
+            # No calendar events - assume open block available
+            signals.available_block_minutes = 120  # Default 2 hours available
 
-        # Infer mode from signals
-        mode = self._infer_mode(signals, recent_tasks)
+        # Infer mode from signals (now includes temporal energy)
+        mode = self._infer_mode(signals, recent_tasks, baseline_energy)
 
         state = UserState(mode=mode, signals=signals)
         self._current_state = state
@@ -301,12 +311,14 @@ class StateEstimator:
         self,
         signals: ContinuousSignals,
         recent_tasks: list[dict] | None = None,
+        baseline_energy: float = 0.5,
     ) -> OperatingMode:
-        """Infer operating mode from signals.
+        """Infer operating mode from signals and temporal energy.
 
         Rules-based inference with clear thresholds.
+        Baseline energy from diurnal curve influences mode selection.
         """
-        # Check for overload
+        # Check for overload (high fatigue + high interruption)
         if signals.fatigue_level > 0.8 and signals.interruption_pressure > 0.7:
             return OperatingMode.OVERLOADED
 
@@ -319,7 +331,16 @@ class StateEstimator:
             if deferral_count >= 3:
                 return OperatingMode.AVOIDANT
 
-        # Check for deep focus potential
+        # At peak energy times (0.85+), favor deep focus if time allows
+        if baseline_energy >= 0.85:
+            if (
+                signals.available_block_minutes
+                and signals.available_block_minutes >= 45  # Slightly lower threshold at peak
+                and signals.interruption_pressure < 0.4
+            ):
+                return OperatingMode.DEEP_FOCUS
+
+        # Standard deep focus check
         if (
             signals.available_block_minutes
             and signals.available_block_minutes >= 60
@@ -328,14 +349,18 @@ class StateEstimator:
         ):
             return OperatingMode.DEEP_FOCUS
 
-        # Check for fragmented state
+        # At low energy times (< 0.4), default to fragmented
+        if baseline_energy < 0.4:
+            return OperatingMode.FRAGMENTED
+
+        # Check for fragmented state (short time blocks)
         if (
             signals.available_block_minutes
             and signals.available_block_minutes < 30
         ):
             return OperatingMode.FRAGMENTED
 
-        # Default to transition if uncertain
+        # Moderate energy with available time = transition
         return OperatingMode.TRANSITION
 
     def _snapshot_to_state(self, snapshot: dict) -> UserState:
