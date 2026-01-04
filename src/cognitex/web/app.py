@@ -2686,7 +2686,11 @@ async def dismiss_block(block_id: str):
 async def state_page(request: Request):
     """Operating state and mode management page."""
     estimator = get_state_estimator()
-    state = await estimator.get_current_state()
+
+    # Infer fresh state based on current time and conditions
+    # (uses temporal energy model for diurnal patterns)
+    calendar_events = await get_today_events()
+    state = await estimator.infer_state(calendar_events=calendar_events)
 
     if not state:
         state = UserState(

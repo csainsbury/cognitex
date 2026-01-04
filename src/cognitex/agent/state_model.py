@@ -281,7 +281,7 @@ class StateEstimator:
             if "interruption_pressure" in explicit_signals:
                 signals.interruption_pressure = explicit_signals["interruption_pressure"]
 
-        # Calculate time to next commitment
+        # Calculate time to next commitment and interruption pressure
         if calendar_events:
             now = datetime.now()
             upcoming = [
@@ -294,11 +294,27 @@ class StateEstimator:
                     key=lambda e: datetime.fromisoformat(e["start"].replace("Z", "+00:00").replace("+00:00", ""))
                 )
                 delta = datetime.fromisoformat(next_event["start"].replace("Z", "+00:00").replace("+00:00", "")) - now
-                signals.time_to_next_commitment_minutes = int(delta.total_seconds() / 60)
-                signals.available_block_minutes = signals.time_to_next_commitment_minutes
+                minutes_to_next = int(delta.total_seconds() / 60)
+                signals.time_to_next_commitment_minutes = minutes_to_next
+                signals.available_block_minutes = minutes_to_next
+
+                # Interruption pressure based on time to next event
+                if minutes_to_next >= 120:
+                    signals.interruption_pressure = 0.1  # Very low - plenty of time
+                elif minutes_to_next >= 60:
+                    signals.interruption_pressure = 0.2  # Low
+                elif minutes_to_next >= 30:
+                    signals.interruption_pressure = 0.4  # Moderate
+                else:
+                    signals.interruption_pressure = 0.7  # High - event soon
+            else:
+                # Events today but none upcoming - low pressure
+                signals.available_block_minutes = 120
+                signals.interruption_pressure = 0.15
         else:
-            # No calendar events - assume open block available
-            signals.available_block_minutes = 120  # Default 2 hours available
+            # No calendar events - assume open block with low interruption
+            signals.available_block_minutes = 120
+            signals.interruption_pressure = 0.1
 
         # Infer mode from signals (now includes temporal energy)
         mode = self._infer_mode(signals, recent_tasks, baseline_energy)
