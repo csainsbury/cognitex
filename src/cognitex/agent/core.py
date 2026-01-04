@@ -1,5 +1,6 @@
 """Agent Core - ReAct-style agent with iterative reasoning and tool use."""
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -1146,16 +1147,21 @@ Your response:"""
         )
 
 
-# Singleton
+# Singleton with async lock to prevent race conditions
 _agent: Agent | None = None
+_agent_lock = asyncio.Lock()
 
 
 async def get_agent() -> Agent:
-    """Get or create the agent singleton."""
+    """Get or create the agent singleton (thread-safe)."""
     global _agent
-    if _agent is None:
-        _agent = Agent()
-        await _agent.initialize()
+    if _agent is not None:
+        return _agent
+    async with _agent_lock:
+        # Double-check after acquiring lock
+        if _agent is None:
+            _agent = Agent()
+            await _agent.initialize()
     return _agent
 
 

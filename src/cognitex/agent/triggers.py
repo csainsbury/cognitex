@@ -936,7 +936,7 @@ class TriggerSystem:
                         # Set OVERLOADED mode for rest of day
                         await state_estimator.update_state(
                             mode=OperatingMode.OVERLOADED,
-                            fatigue=0.95,
+                            fatigue_level=0.95,  # High fatigue after clinical session
                             notes=f"Post-clinical recovery (rest of day): {summary}"
                         )
 
@@ -1137,15 +1137,16 @@ class TriggerSystem:
             from cognitex.services.ingestion import run_incremental_sync
 
             # Deduplicate: Skip if we've already processed this history_id recently
+            # Use atomic SET NX to prevent race condition between check and set
             if history_id:
                 redis = get_redis()
                 dedup_key = f"cognitex:email:processed:{history_id}"
-                already_processed = await redis.get(dedup_key)
-                if already_processed:
+                # Atomic set-if-not-exists with 5-minute TTL
+                was_set = await redis.set(dedup_key, "1", ex=300, nx=True)
+                if not was_set:
+                    # Key already existed - another process is handling this
                     logger.debug("Skipping duplicate email notification", history_id=history_id)
                     return
-                # Mark as processed with 5-minute TTL (Google may send duplicates within seconds)
-                await redis.set(dedup_key, "1", ex=300)
 
             if history_id:
                 logger.info("Syncing emails from history", history_id=history_id)

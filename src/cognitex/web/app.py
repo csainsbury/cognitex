@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
@@ -1923,9 +1924,10 @@ async def approve_draft(draft_id: str):
             result = await agent.handle_approval(target_approval["id"], approved=True)
 
             if result.get("success"):
+                action_text = html.escape(str(result.get('action', 'Email queued for sending')))
                 return HTMLResponse(f'''
                     <div class="draft-card" style="background: #d1fae5; border-color: #065f46;">
-                        <p><strong>Approved!</strong> {result.get('action', 'Email queued for sending')}</p>
+                        <p><strong>Approved!</strong> {action_text}</p>
                     </div>
                 ''')
             else:
@@ -1959,7 +1961,7 @@ async def approve_draft(draft_id: str):
 
         return HTMLResponse(f'''
             <div class="draft-card" style="background: #d1fae5; border-color: #065f46;">
-                <p><strong>Approved!</strong> Email will be sent to {draft["to"]}</p>
+                <p><strong>Approved!</strong> Email will be sent to {html.escape(str(draft["to"]))}</p>
                 <p style="font-size: 0.8rem; color: #666;">(Direct approval - learning skipped)</p>
             </div>
         ''')
@@ -1984,13 +1986,18 @@ async def edit_draft_form(request: Request, draft_id: str):
         if not draft:
             raise HTTPException(status_code=404, detail="Draft not found")
 
+        # Escape all user-provided values for HTML safety
+        safe_to = html.escape(str(draft['to'] or ''))
+        safe_subject = html.escape(str(draft['subject'] or ''))
+        safe_body = html.escape(str(draft['body'] or ''))
+
         return HTMLResponse(f'''
             <form class="draft-edit-form" hx-put="/api/twin/drafts/{draft_id}" hx-target="#draft-{draft_id}" hx-swap="outerHTML">
                 <div class="draft-meta">
-                    <strong>To:</strong> <input type="text" name="to" value="{draft['to']}" style="width: 300px;"><br>
-                    <strong>Subject:</strong> <input type="text" name="subject" value="{draft['subject']}" style="width: 100%;">
+                    <strong>To:</strong> <input type="text" name="to" value="{safe_to}" style="width: 300px;"><br>
+                    <strong>Subject:</strong> <input type="text" name="subject" value="{safe_subject}" style="width: 100%;">
                 </div>
-                <textarea name="body" class="draft-body" style="min-height: 200px; width: 100%;">{draft['body']}</textarea>
+                <textarea name="body" class="draft-body" style="min-height: 200px; width: 100%;">{safe_body}</textarea>
                 <div class="draft-actions" style="margin-top: 0.5rem;">
                     <button type="submit" class="btn btn-success">Save & Send</button>
                     <button type="button" class="btn btn-secondary" hx-get="/twin" hx-target="body">Cancel</button>
@@ -2031,7 +2038,7 @@ async def update_draft(
 
         return HTMLResponse(f'''
             <div class="draft-card" style="background: #d1fae5; border-color: #065f46;">
-                <p><strong>Updated & Approved!</strong> Email will be sent to {to}</p>
+                <p><strong>Updated & Approved!</strong> Email will be sent to {html.escape(to)}</p>
             </div>
         ''')
 
@@ -2733,7 +2740,7 @@ async def approve_block(block_id: str):
             logger.error("Failed to create calendar event", error=str(e), block_id=block_id)
             return HTMLResponse(f'''
                 <tr style="background: #fee2e2;">
-                    <td colspan="6"><strong>Error:</strong> Failed to create calendar event: {str(e)[:100]}</td>
+                    <td colspan="6"><strong>Error:</strong> Failed to create calendar event: {html.escape(str(e)[:100])}</td>
                 </tr>
             ''')
 
@@ -2748,7 +2755,7 @@ async def approve_block(block_id: str):
 
         return HTMLResponse(f'''
             <tr style="background: #d1fae5;">
-                <td colspan="6"><strong>Added to calendar:</strong> {block["title"]} ({duration_hours}h) on {start_date.strftime("%A %d %b at %H:%M")}</td>
+                <td colspan="6"><strong>Added to calendar:</strong> {html.escape(block["title"])} ({duration_hours}h) on {start_date.strftime("%A %d %b at %H:%M")}</td>
             </tr>
         ''')
 
@@ -3053,7 +3060,15 @@ async def api_generate_briefing(request: Request):
     agent = CognitexAgent()
     briefing = await agent.morning_briefing()
 
-    return HTMLResponse(f'<div class="briefing-content">{briefing}</div>')
+    # Convert markdown to HTML safely
+    try:
+        import markdown
+        briefing_html = markdown.markdown(briefing, extensions=['tables', 'fenced_code'])
+    except ImportError:
+        # Fallback: escape and wrap in pre tag
+        briefing_html = f"<pre style='white-space: pre-wrap;'>{html.escape(briefing)}</pre>"
+
+    return HTMLResponse(f'<div class="briefing-content">{briefing_html}</div>')
 
 
 # -------------------------------------------------------------------
@@ -4064,6 +4079,7 @@ async def api_settings_models_preset(request: Request, preset: str):
 
 def verify_sync_api_key(authorization: str = Header(None)) -> bool:
     """Verify the sync API key from Authorization header."""
+    import hmac
     from cognitex.config import get_settings
 
     settings = get_settings()
@@ -4088,7 +4104,8 @@ def verify_sync_api_key(authorization: str = Header(None)) -> bool:
         )
 
     provided_key = authorization[7:]  # Remove "Bearer " prefix
-    if provided_key != expected_key:
+    # Use timing-safe comparison to prevent timing attacks
+    if not hmac.compare_digest(provided_key, expected_key):
         raise HTTPException(status_code=403, detail="Invalid API key")
 
     return True

@@ -11,6 +11,8 @@ router = APIRouter()
 
 def verify_sync_api_key(authorization: str = Header(None)) -> bool:
     """Verify the sync API key from Authorization header."""
+    import hmac
+
     settings = get_settings()
     expected_key = settings.sync_api_key.get_secret_value()
 
@@ -33,7 +35,8 @@ def verify_sync_api_key(authorization: str = Header(None)) -> bool:
         )
 
     provided_key = authorization[7:]  # Remove "Bearer " prefix
-    if provided_key != expected_key:
+    # Use timing-safe comparison to prevent timing attacks
+    if not hmac.compare_digest(provided_key, expected_key):
         raise HTTPException(status_code=403, detail="Invalid API key")
 
     return True

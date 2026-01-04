@@ -287,22 +287,37 @@ def extract_event_metadata(event: dict) -> dict:
     Returns:
         Dict with extracted metadata
     """
-    # Parse start/end times
+    # Parse start/end times with error handling
     start = event.get("start", {})
     end = event.get("end", {})
 
     # Handle all-day events (date) vs timed events (dateTime)
-    if "dateTime" in start:
-        start_time = datetime.fromisoformat(start["dateTime"].replace("Z", "+00:00"))
-        is_all_day = False
-    else:
-        start_time = datetime.fromisoformat(start.get("date", ""))
-        is_all_day = True
+    try:
+        if "dateTime" in start:
+            start_time = datetime.fromisoformat(start["dateTime"].replace("Z", "+00:00"))
+            is_all_day = False
+        elif start.get("date"):
+            start_time = datetime.fromisoformat(start["date"])
+            is_all_day = True
+        else:
+            # Fallback to current time if no valid date
+            start_time = datetime.now()
+            is_all_day = False
 
-    if "dateTime" in end:
-        end_time = datetime.fromisoformat(end["dateTime"].replace("Z", "+00:00"))
-    else:
-        end_time = datetime.fromisoformat(end.get("date", ""))
+        if "dateTime" in end:
+            end_time = datetime.fromisoformat(end["dateTime"].replace("Z", "+00:00"))
+        elif end.get("date"):
+            end_time = datetime.fromisoformat(end["date"])
+        else:
+            # Fallback: 1 hour after start
+            end_time = start_time + timedelta(hours=1)
+    except (ValueError, TypeError) as e:
+        # Handle malformed dates gracefully
+        import structlog
+        structlog.get_logger().warning("Failed to parse event dates", event_id=event.get("id"), error=str(e))
+        start_time = datetime.now()
+        end_time = start_time + timedelta(hours=1)
+        is_all_day = False
 
     # Calculate duration in minutes
     duration_minutes = int((end_time - start_time).total_seconds() / 60)

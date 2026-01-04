@@ -9,6 +9,7 @@ Implements the user operating state model from Phase 3 blueprint:
 
 from __future__ import annotations
 
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -433,6 +434,7 @@ class StateEstimator:
         self,
         mode: OperatingMode | None = None,
         fatigue_delta: float | None = None,
+        fatigue_level: float | None = None,
         focus_score: float | None = None,
         notes: str | None = None,
     ) -> UserState:
@@ -440,7 +442,8 @@ class StateEstimator:
 
         Args:
             mode: New operating mode
-            fatigue_delta: Change in fatigue (-1 to 1)
+            fatigue_delta: Change in fatigue (-1 to 1), added to current level
+            fatigue_level: Absolute fatigue level (0 to 1), overrides current level
             focus_score: Updated focus score
             notes: Context notes
 
@@ -451,7 +454,12 @@ class StateEstimator:
 
         if mode:
             current.mode = mode
-        if fatigue_delta is not None:
+        if fatigue_level is not None:
+            # Absolute fatigue level (used for post-clinical recovery, etc.)
+            current.signals.fatigue_level = max(0.0, min(1.0, fatigue_level))
+            current.signals.fatigue_slope = 0.0
+        elif fatigue_delta is not None:
+            # Relative change to fatigue
             current.signals.fatigue_level = max(
                 0.0, min(1.0, current.signals.fatigue_level + fatigue_delta)
             )
@@ -466,15 +474,20 @@ class StateEstimator:
         return current
 
 
-# Singleton instance
+# Singleton instance with lock for thread safety
 _state_estimator: StateEstimator | None = None
+_state_estimator_lock = threading.Lock()
 
 
 def get_state_estimator() -> StateEstimator:
-    """Get the state estimator singleton."""
+    """Get the state estimator singleton (thread-safe)."""
     global _state_estimator
-    if _state_estimator is None:
-        _state_estimator = StateEstimator()
+    if _state_estimator is not None:
+        return _state_estimator
+    with _state_estimator_lock:
+        # Double-check after acquiring lock
+        if _state_estimator is None:
+            _state_estimator = StateEstimator()
     return _state_estimator
 
 

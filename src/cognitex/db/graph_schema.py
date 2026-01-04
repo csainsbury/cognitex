@@ -440,18 +440,29 @@ async def get_daily_energy_forecast(session: AsyncSession, date_str: str | None 
 
     Returns dict with total_energy_cost, event_count, and breakdown by type.
     """
-    date_filter = f"date(ev.start) = date('{date_str}')" if date_str else "date(ev.start) = date()"
-
-    query = f"""
-    MATCH (ev:Event)
-    WHERE {date_filter}
-    RETURN
-        sum(ev.energy_impact) as total_energy_cost,
-        count(ev) as event_count,
-        sum(ev.duration_minutes) as total_minutes,
-        collect({{type: ev.event_type, energy: ev.energy_impact, title: ev.title}}) as events
-    """
-    result = await session.run(query)
+    # Use parameterized query to prevent Cypher injection
+    if date_str:
+        query = """
+        MATCH (ev:Event)
+        WHERE date(ev.start) = date($date_str)
+        RETURN
+            sum(ev.energy_impact) as total_energy_cost,
+            count(ev) as event_count,
+            sum(ev.duration_minutes) as total_minutes,
+            collect({type: ev.event_type, energy: ev.energy_impact, title: ev.title}) as events
+        """
+        result = await session.run(query, date_str=date_str)
+    else:
+        query = """
+        MATCH (ev:Event)
+        WHERE date(ev.start) = date()
+        RETURN
+            sum(ev.energy_impact) as total_energy_cost,
+            count(ev) as event_count,
+            sum(ev.duration_minutes) as total_minutes,
+            collect({type: ev.event_type, energy: ev.energy_impact, title: ev.title}) as events
+        """
+        result = await session.run(query)
     record = await result.single()
 
     if record:
@@ -1244,9 +1255,13 @@ async def get_documents(
     limit: int = 50,
 ) -> list[dict]:
     """Get documents, optionally filtered by folder or indexed status."""
+    # Build parameterized query to prevent Cypher injection
+    params = {"limit": limit}
     filters = []
+
     if folder_path:
-        filters.append(f"d.folder_path STARTS WITH '{folder_path}'")
+        filters.append("d.folder_path STARTS WITH $folder_path")
+        params["folder_path"] = folder_path
     if indexed_only:
         filters.append("d.indexed = true")
 
@@ -1260,7 +1275,7 @@ async def get_documents(
     ORDER BY d.modified_at DESC
     LIMIT $limit
     """
-    result = await session.run(query, limit=limit)
+    result = await session.run(query, **params)
     records = await result.data()
     return [
         {
@@ -1299,18 +1314,16 @@ async def get_unindexed_documents_in_folders(
     limit: int = 100,
 ) -> list[dict]:
     """Get documents in priority folders that haven't been indexed yet."""
-    # Build OR conditions for folder paths
-    path_conditions = " OR ".join([f"d.folder_path STARTS WITH '{fp}'" for fp in folder_prefixes])
-
-    query = f"""
+    # Use parameterized query with list unwind to prevent Cypher injection
+    query = """
     MATCH (d:Document)
     WHERE (d.indexed IS NULL OR d.indexed = false)
-      AND ({path_conditions})
+      AND any(prefix IN $folder_prefixes WHERE d.folder_path STARTS WITH prefix)
     RETURN d
     ORDER BY d.modified_at DESC
     LIMIT $limit
     """
-    result = await session.run(query, limit=limit)
+    result = await session.run(query, folder_prefixes=folder_prefixes, limit=limit)
     records = await result.data()
     return [dict(r["d"]) for r in records]
 
