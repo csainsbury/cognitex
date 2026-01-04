@@ -4000,6 +4000,8 @@ def verify_sync_api_key(authorization: str = Header(None)) -> bool:
     return True
 
 
+# NOTE: This endpoint is also available in api/routes/sync.py for the API server (port 8000).
+# This duplicate exists so cognitex-sync clients can hit either port (8080 web or 8000 API).
 @app.post("/api/sync/sessions")
 async def api_sync_sessions(
     request: Request,

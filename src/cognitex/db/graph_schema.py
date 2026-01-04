@@ -1360,6 +1360,7 @@ async def create_project(
     description: str | None = None,
     status: str = "active",
     target_date: str | None = None,
+    local_path: str | None = None,
 ) -> dict:
     """
     Create a Project node in the graph.
@@ -1370,6 +1371,7 @@ async def create_project(
         description: Detailed description
         status: active, paused, completed, archived
         target_date: Target completion date (ISO datetime string)
+        local_path: Local filesystem path for auto-linking coding sessions
     """
     query = """
     MERGE (p:Project {id: $project_id})
@@ -1378,6 +1380,7 @@ async def create_project(
         p.description = $description,
         p.status = $status,
         p.target_date = CASE WHEN $target_date IS NOT NULL THEN datetime($target_date) ELSE null END,
+        p.local_path = $local_path,
         p.created_at = datetime(),
         p.updated_at = datetime()
     ON MATCH SET
@@ -1385,6 +1388,7 @@ async def create_project(
         p.description = COALESCE($description, p.description),
         p.status = COALESCE($status, p.status),
         p.target_date = CASE WHEN $target_date IS NOT NULL THEN datetime($target_date) ELSE p.target_date END,
+        p.local_path = COALESCE($local_path, p.local_path),
         p.updated_at = datetime()
     RETURN p
     """
@@ -1395,6 +1399,7 @@ async def create_project(
         description=description,
         status=status,
         target_date=target_date,
+        local_path=local_path,
     )
     record = await result.single()
     return dict(record["p"]) if record else {}
@@ -1407,6 +1412,7 @@ async def update_project(
     description: str | None = None,
     status: str | None = None,
     target_date: str | None = None,
+    local_path: str | None = None,
 ) -> dict:
     """Update specific fields of a project."""
     set_parts = ["p.updated_at = datetime()"]
@@ -1424,6 +1430,9 @@ async def update_project(
     if target_date is not None:
         set_parts.append("p.target_date = datetime($target_date)")
         params["target_date"] = target_date
+    if local_path is not None:
+        set_parts.append("p.local_path = $local_path")
+        params["local_path"] = local_path
 
     query = f"""
     MATCH (p:Project {{id: $project_id}})

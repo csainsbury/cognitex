@@ -312,6 +312,7 @@ class ProjectService:
         owner_email: str | None = None,
         member_emails: list[str] | None = None,
         repository_ids: list[str] | None = None,
+        local_path: str | None = None,
     ) -> dict:
         """
         Create a new project with optional relationships.
@@ -325,6 +326,7 @@ class ProjectService:
             owner_email: Project owner's email
             member_emails: Team member emails
             repository_ids: Linked repository IDs
+            local_path: Local filesystem path for auto-linking coding sessions
 
         Returns:
             Created project dict
@@ -339,6 +341,7 @@ class ProjectService:
                 description=description,
                 status=status,
                 target_date=target_date,
+                local_path=local_path,
             )
 
             # Link to goal if specified
@@ -370,6 +373,7 @@ class ProjectService:
         status: str | None = None,
         target_date: str | None = None,
         goal_id: str | None = None,
+        local_path: str | None = None,
     ) -> dict | None:
         """Update project properties and goal link."""
         async for session in get_neo4j_session():
@@ -380,6 +384,7 @@ class ProjectService:
                 description=description,
                 status=status,
                 target_date=target_date,
+                local_path=local_path,
             )
 
             if project:

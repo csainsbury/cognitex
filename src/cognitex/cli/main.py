@@ -2708,6 +2708,7 @@ def projects(
             table = Table(title=f"Projects ({len(project_list)})")
             table.add_column("#", style="cyan", width=3)
             table.add_column("Title", style="white", width=32)
+            table.add_column("Path", style="dim", width=20)
             table.add_column("Status", style="green", width=10)
             table.add_column("Tasks", style="yellow", width=8)
             table.add_column("Target", style="magenta", width=12)
@@ -2720,9 +2721,14 @@ def projects(
                 target = project.get('target_date')
                 target_str = str(target)[:10] if target else "-"
 
+                local_path = project.get('local_path') or "-"
+                if len(local_path) > 20:
+                    local_path = "..." + local_path[-17:]
+
                 table.add_row(
                     str(i),
                     project['title'][:32],
+                    local_path,
                     project.get('status', 'active'),
                     task_str,
                     target_str,
@@ -3178,6 +3184,17 @@ def api(
     console.print(f"\n[dim]Press Ctrl+C to stop[/dim]\n")
 
     uvicorn.run("cognitex.api.main:app", host=host, port=port, reload=False)
+
+
+@app.command("generate-sync-key")
+def generate_sync_key() -> None:
+    """Generate a secure random key for SYNC_API_KEY."""
+    import secrets
+    key = secrets.token_urlsafe(32)
+    console.print(f"\n[bold green]Generated Sync API Key:[/bold green]")
+    console.print(f"{key}\n")
+    console.print("Add this to your .env file:")
+    console.print(f"[cyan]SYNC_API_KEY={key}[/cyan]\n")
 
 
 @app.command("agent-status")
