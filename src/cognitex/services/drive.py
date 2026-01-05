@@ -8,11 +8,23 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
 from cognitex.services.google_auth import get_google_credentials
+from cognitex.config import get_settings
 
 logger = structlog.get_logger()
 
+
+def get_priority_folders() -> list[str]:
+    """Get list of priority folders from config."""
+    settings = get_settings()
+    folders_str = settings.drive_priority_folders.strip()
+    if not folders_str:
+        return []
+    return [f.strip() for f in folders_str.split(",") if f.strip()]
+
+
 # Folders to fully index (text extraction + embeddings)
-PRIORITY_FOLDERS = ["dundee", "myWayDigitalHealth", "glucose.ai", "birmingham"]
+# Now loaded from config, but keep PRIORITY_FOLDERS for backward compatibility
+PRIORITY_FOLDERS = get_priority_folders()
 
 # MIME types we can extract text from
 EXPORTABLE_MIME_TYPES = {

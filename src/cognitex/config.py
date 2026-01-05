@@ -112,6 +112,12 @@ class Settings(BaseSettings):
         description="Path to store OAuth tokens",
     )
 
+    # Google Drive indexing
+    drive_priority_folders: str = Field(
+        default="dundee,myWayDigitalHealth,glucose.ai,birmingham",
+        description="Comma-separated list of Drive folder names to fully index (text extraction + embeddings)",
+    )
+
     # GitHub API
     github_token: SecretStr = Field(
         default=SecretStr(""),
