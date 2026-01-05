@@ -19,10 +19,21 @@ logger = structlog.get_logger()
 
 
 class GraphObserver:
-    """Observes and reports on the state of the knowledge graph."""
+    """Observes and reports on the state of the knowledge graph.
 
-    def __init__(self, session):
-        """Initialize with a Neo4j session."""
+    Note: This class uses session-independent queries for parallel execution.
+    The session parameter in __init__ is kept for backward compatibility but
+    is only used for write operations. Read queries use the run_query() helper
+    which obtains its own session from the connection pool.
+    """
+
+    def __init__(self, session=None):
+        """Initialize the observer.
+
+        Args:
+            session: Optional Neo4j session for write operations. Read queries
+                    use independent sessions for safe parallel execution.
+        """
         self.session = session
 
     async def get_full_context(self) -> dict:
@@ -135,6 +146,8 @@ class GraphObserver:
 
     async def get_recent_changes(self, hours: int = 24) -> list[dict]:
         """Get nodes that were created or updated recently."""
+        from cognitex.db.neo4j import run_query
+
         query = """
         MATCH (n)
         WHERE n.created_at > datetime() - duration({hours: $hours})
@@ -163,9 +176,7 @@ class GraphObserver:
         LIMIT 50
         """
         try:
-            result = await self.session.run(query, {"hours": hours})
-            data = await result.data()
-            return data
+            return await run_query(query, {"hours": hours})
         except Exception as e:
             logger.warning("Failed to get recent changes", error=str(e))
             return []
@@ -176,6 +187,8 @@ class GraphObserver:
         Limited to prevent flooding the LLM context window with too many items.
         Returns oldest items first (most stale).
         """
+        from cognitex.db.neo4j import run_query
+
         query = """
         // Stale pending tasks (limited to prevent token explosion)
         MATCH (t:Task)
@@ -210,12 +223,10 @@ class GraphObserver:
         LIMIT 10
         """
         try:
-            result = await self.session.run(query, {
+            return await run_query(query, {
                 "task_days": task_days,
                 "project_days": project_days
             })
-            data = await result.data()
-            return data
         except Exception as e:
             logger.warning("Failed to get stale items", error=str(e))
             return []
@@ -226,6 +237,7 @@ class GraphObserver:
         Excludes documents matching configured name patterns or MIME types.
         """
         from cognitex.config import get_settings
+        from cognitex.db.neo4j import run_query
 
         settings = get_settings()
 
@@ -272,15 +284,15 @@ class GraphObserver:
         LIMIT 20
         """
         try:
-            result = await self.session.run(query)
-            data = await result.data()
-            return data
+            return await run_query(query)
         except Exception as e:
             logger.warning("Failed to get orphaned nodes", error=str(e))
             return []
 
     async def get_goal_health(self) -> list[dict]:
         """Assess health of each active goal."""
+        from cognitex.db.neo4j import run_query
+
         query = """
         MATCH (g:Goal)
         WHERE g.status = 'active'
@@ -317,15 +329,15 @@ class GraphObserver:
         ORDER BY needs_attention DESC, g.created_at DESC
         """
         try:
-            result = await self.session.run(query)
-            data = await result.data()
-            return data
+            return await run_query(query)
         except Exception as e:
             logger.warning("Failed to get goal health", error=str(e))
             return []
 
     async def get_project_health(self) -> list[dict]:
         """Assess health of each active project."""
+        from cognitex.db.neo4j import run_query
+
         query = """
         MATCH (p:Project)
         WHERE p.status = 'active'
@@ -369,15 +381,15 @@ class GraphObserver:
         ORDER BY needs_attention DESC, overdue_count DESC
         """
         try:
-            result = await self.session.run(query)
-            data = await result.data()
-            return data
+            return await run_query(query)
         except Exception as e:
             logger.warning("Failed to get project health", error=str(e))
             return []
 
     async def get_pending_tasks(self, limit: int = 30) -> list[dict]:
         """Get pending tasks with context."""
+        from cognitex.db.neo4j import run_query
+
         query = """
         MATCH (t:Task)
         WHERE t.status IN ['pending', 'in_progress']
@@ -406,15 +418,15 @@ class GraphObserver:
         LIMIT $limit
         """
         try:
-            result = await self.session.run(query, {"limit": limit})
-            data = await result.data()
-            return data
+            return await run_query(query, {"limit": limit})
         except Exception as e:
             logger.warning("Failed to get pending tasks", error=str(e))
             return []
 
     async def get_recent_documents(self, days: int = 7, limit: int = 20) -> list[dict]:
         """Get recently added/modified documents."""
+        from cognitex.db.neo4j import run_query
+
         query = """
         MATCH (d:Document)
         WHERE d.indexed_at > datetime() - duration({days: $days})
@@ -439,15 +451,15 @@ class GraphObserver:
         LIMIT $limit
         """
         try:
-            result = await self.session.run(query, {"days": days, "limit": limit})
-            data = await result.data()
-            return data
+            return await run_query(query, {"days": days, "limit": limit})
         except Exception as e:
             logger.warning("Failed to get recent documents", error=str(e))
             return []
 
     async def get_connection_opportunities(self) -> list[dict]:
         """Find opportunities to create new connections based on names, topics, and content."""
+        from cognitex.db.neo4j import run_query
+
         opportunities = []
 
         # 1. Documents with names matching project titles (min 4 chars for the matching term)
@@ -559,13 +571,17 @@ class GraphObserver:
 
         queries = [query1, query2, query3, query4, query5]
 
-        for query in queries:
+        # Run all queries in parallel - each uses its own session
+        async def run_opp_query(query: str) -> list[dict]:
             try:
-                result = await self.session.run(query)
-                data = await result.data()
-                opportunities.extend(data)
+                return await run_query(query)
             except Exception as e:
                 logger.warning("Connection opportunity query failed", error=str(e))
+                return []
+
+        results = await asyncio.gather(*[run_opp_query(q) for q in queries])
+        for data in results:
+            opportunities.extend(data)
 
         # Sort by relevance and deduplicate
         opportunities.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
@@ -573,6 +589,8 @@ class GraphObserver:
 
     async def get_graph_stats(self) -> dict:
         """Get overall graph statistics."""
+        from cognitex.db.neo4j import run_query
+
         query = """
         MATCH (n)
         WITH labels(n)[0] as label, count(*) as count
@@ -580,8 +598,7 @@ class GraphObserver:
         ORDER BY count DESC
         """
         try:
-            result = await self.session.run(query)
-            data = await result.data()
+            data = await run_query(query)
             return {row["label"]: row["count"] for row in data}
         except Exception as e:
             logger.warning("Failed to get graph stats", error=str(e))
@@ -598,8 +615,10 @@ class GraphObserver:
         These samples allow the agent to mimic the user's voice when drafting
         emails or other communications. Uses snippet as fallback if body is not stored.
         """
-        # Get user email for fallback matching
+        from cognitex.db.neo4j import run_query
         from cognitex.services.ingestion import get_user_email
+
+        # Get user email for fallback matching
         user_email = await get_user_email()
 
         query = """
@@ -612,8 +631,7 @@ class GraphObserver:
         LIMIT $limit
         """
         try:
-            result = await self.session.run(query, {"limit": limit, "user_email": user_email})
-            data = await result.data()
+            data = await run_query(query, {"limit": limit, "user_email": user_email})
             samples = [row["body"] for row in data if row.get("body")]
 
             if not samples:
@@ -637,6 +655,8 @@ class GraphObserver:
         - Excludes emails already replied to or with drafts
         - Excludes emails sent by the user
         """
+        from cognitex.db.neo4j import run_query
+
         query = """
         MATCH (e:Email)
         WHERE e.classification IN ['actionable', 'urgent']
@@ -667,9 +687,7 @@ class GraphObserver:
         LIMIT $limit
         """
         try:
-            result = await self.session.run(query, {"limit": limit, "days_back": days_back})
-            data = await result.data()
-            return data
+            return await run_query(query, {"limit": limit, "days_back": days_back})
         except Exception as e:
             logger.warning("Failed to get actionable emails", error=str(e))
             return []
@@ -682,6 +700,8 @@ class GraphObserver:
         those without attached materials or context. Excludes events that
         already have a context pack prepared (regardless of pack status).
         """
+        from cognitex.db.neo4j import run_query
+
         query = """
         MATCH (c:CalendarEvent)
         WHERE c.start_time > datetime()
@@ -708,9 +728,7 @@ class GraphObserver:
         LIMIT 20
         """
         try:
-            result = await self.session.run(query, {"days_ahead": days_ahead})
-            data = await result.data()
-            return data
+            return await run_query(query, {"days_ahead": days_ahead})
         except Exception as e:
             logger.warning("Failed to get pending calendar blocks", error=str(e))
             return []
@@ -722,14 +740,15 @@ class GraphObserver:
         Used to prevent the agent from repeatedly suggesting blocks for
         the same projects.
         """
+        from cognitex.db.neo4j import run_query
+
         query = """
         MATCH (sb:SuggestedBlock)-[:FOR_PROJECT]->(p:Project)
         WHERE sb.created_at > datetime() - duration({days: $days})
         RETURN DISTINCT p.id as project_id
         """
         try:
-            result = await self.session.run(query, {"days": days})
-            data = await result.data()
+            data = await run_query(query, {"days": days})
             return {row["project_id"] for row in data if row.get("project_id")}
         except Exception as e:
             logger.warning("Failed to get projects with recent blocks", error=str(e))
@@ -742,6 +761,8 @@ class GraphObserver:
         Finds all relevant documents, emails, and tasks related to a topic
         to help compile a decision pack.
         """
+        from cognitex.db.neo4j import run_query
+
         if not topic:
             # Get topics from recent high-priority items
             query = """
@@ -777,9 +798,7 @@ class GraphObserver:
             """
         try:
             params = {"topic": topic} if topic else {}
-            result = await self.session.run(query, params)
-            data = await result.data()
-            return data
+            return await run_query(query, params)
         except Exception as e:
             logger.warning("Failed to get decision context", error=str(e))
             return []
@@ -801,6 +820,8 @@ class GraphObserver:
         Returns:
             Dict with full context for email response drafting
         """
+        from cognitex.db.neo4j import run_query, run_query_single
+
         context = {
             "gmail_id": gmail_id,
             "full_body": None,
@@ -829,14 +850,12 @@ class GraphObserver:
                 sender.org as sender_org,
                 sender.role as sender_role
             """
-            result = await self.session.run(email_query, {"gmail_id": gmail_id})
-            email_data = await result.single()
+            email_dict = await run_query_single(email_query, {"gmail_id": gmail_id})
 
-            if not email_data:
+            if not email_dict:
                 logger.warning("Email not found in graph", gmail_id=gmail_id)
                 return context
 
-            email_dict = dict(email_data)
             context["subject"] = email_dict.get("subject")
             context["sender_email"] = email_dict.get("sender_email")
             context["sender_name"] = email_dict.get("sender_name")
@@ -873,11 +892,9 @@ class GraphObserver:
                 ORDER BY e.date ASC
                 LIMIT 10
                 """
-                thread_result = await self.session.run(
+                context["thread_history"] = await run_query(
                     thread_query, {"thread_id": thread_id, "gmail_id": gmail_id}
                 )
-                thread_data = await thread_result.data()
-                context["thread_history"] = thread_data
 
             # 4. Semantic search for related Drive documents
             search_text = f"{email_dict.get('subject', '')} {context['full_body'][:500] if context['full_body'] else ''}"
@@ -899,11 +916,10 @@ class GraphObserver:
                             RETURN d.name as name, d.drive_id as drive_id,
                                    d.summary as summary, d.mime_type as mime_type
                             """
-                            doc_result = await self.session.run(doc_query, {"drive_id": drive_id})
-                            doc_data = await doc_result.single()
+                            doc_data = await run_query_single(doc_query, {"drive_id": drive_id})
                             if doc_data:
                                 context["related_documents"].append({
-                                    **dict(doc_data),
+                                    **doc_data,
                                     "relevance": chunk.get("similarity", 0.5),
                                     "matched_content": chunk.get("content", "")[:200],
                                 })
@@ -938,13 +954,11 @@ class GraphObserver:
                     (w for w in subject.split() if len(w) > 4 and w.lower() not in ["about", "follow", "update"]),
                     subject[:20]
                 )
-                task_result = await self.session.run(task_query, {
+                context["related_tasks"] = await run_query(task_query, {
                     "gmail_id": gmail_id,
                     "sender_email": sender_email,
                     "subject_keyword": subject_keyword,
                 })
-                task_data = await task_result.data()
-                context["related_tasks"] = task_data
 
             # 6. Get sender relationship context
             if sender_email:
@@ -965,10 +979,9 @@ class GraphObserver:
                     meeting_count,
                     count(t) as shared_task_count
                 """
-                sender_result = await self.session.run(sender_query, {"email": sender_email})
-                sender_data = await sender_result.single()
+                sender_data = await run_query_single(sender_query, {"email": sender_email})
                 if sender_data:
-                    context["sender_context"] = dict(sender_data)
+                    context["sender_context"] = sender_data
 
             # 7. Extract action items from the email body using simple pattern matching
             if context["full_body"]:
@@ -1017,6 +1030,8 @@ class GraphObserver:
         Returns:
             Dict with timing distribution and project-level patterns
         """
+        from cognitex.db.neo4j import run_query
+
         patterns = {
             "timing_distribution": {},
             "by_project": {},
@@ -1051,8 +1066,7 @@ class GraphObserver:
                     WHEN 'early' THEN 6
                 END
             """
-            result = await self.session.run(query)
-            data = await result.data()
+            data = await run_query(query)
 
             total = sum(row["count"] for row in data)
             for row in data:
@@ -1083,8 +1097,7 @@ class GraphObserver:
             ORDER BY on_time_rate ASC
             LIMIT 10
             """
-            result = await self.session.run(project_query)
-            project_data = await result.data()
+            project_data = await run_query(project_query)
 
             for row in project_data:
                 patterns["by_project"][row["project_id"]] = {

@@ -246,8 +246,8 @@ class AutonomousAgent:
             # Add mode-specific guidance
             lines.append("")
             lines.append(f"**Mode rules for {state.mode.value}:**")
-            lines.append(f"- Max friction: {rules.max_task_friction}/5")
-            lines.append(f"- Allowed task types: {', '.join(rules.allowed_task_types)}")
+            lines.append(f"- Max friction: {rules['max_task_friction']}/5")
+            lines.append(f"- Allowed task types: {', '.join(rules['allowed_task_types'])}")
             if state.signals.fatigue_level > 0.7:
                 lines.append("- HIGH FATIGUE: Avoid high-energy tasks")
 

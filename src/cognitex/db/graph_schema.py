@@ -60,6 +60,11 @@ SCHEMA_STATEMENTS = [
     "CREATE INDEX task_status_priority IF NOT EXISTS FOR (t:Task) ON (t.status, t.priority)",
     "CREATE INDEX task_status_due IF NOT EXISTS FOR (t:Task) ON (t.status, t.due_date)",
     "CREATE INDEX event_date_type IF NOT EXISTS FOR (ev:Event) ON (ev.start, ev.event_type)",
+    # Idea node (scratch pad for quick capture)
+    "CREATE CONSTRAINT idea_id IF NOT EXISTS FOR (i:Idea) REQUIRE i.id IS UNIQUE",
+    "CREATE INDEX idea_status IF NOT EXISTS FOR (i:Idea) ON (i.status)",
+    "CREATE INDEX idea_source IF NOT EXISTS FOR (i:Idea) ON (i.source)",
+    "CREATE INDEX idea_created IF NOT EXISTS FOR (i:Idea) ON (i.created_at)",
 ]
 
 

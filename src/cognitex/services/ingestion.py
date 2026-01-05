@@ -415,6 +415,75 @@ async def get_sync_state(pg_session: AsyncSession, sync_id: str) -> dict | None:
     return None
 
 
+async def capture_ideas_from_emails(emails: list[dict], user_email: str | None = None) -> dict:
+    """
+    Check emails for "idea:" subject prefix and create Ideas from them.
+
+    When an email has a subject starting with "idea:" (case-insensitive),
+    the content after the prefix is captured as a new Idea with source='email'.
+
+    Args:
+        emails: List of email metadata dicts
+        user_email: The authenticated user's email (to only capture user's sent ideas)
+
+    Returns:
+        Dict with capture stats
+    """
+    from cognitex.services.ideas import create_idea
+
+    stats = {
+        "ideas_captured": 0,
+        "idea_ids": [],
+    }
+
+    for email_data in emails:
+        subject = email_data.get("subject", "")
+
+        # Check for "idea:" prefix (case-insensitive)
+        if not subject.lower().startswith("idea:"):
+            continue
+
+        # Only capture ideas from the user's sent emails
+        sender = email_data.get("sender_email", "").lower()
+        if user_email and sender != user_email.lower():
+            continue
+
+        # Extract the idea text (everything after "idea:")
+        idea_text = subject[5:].strip()  # Remove "idea:" prefix
+
+        # If there's a snippet (email body preview), append it for more context
+        snippet = email_data.get("snippet", "")
+        if snippet and snippet.strip():
+            idea_text = f"{idea_text}\n\n{snippet}"
+
+        if not idea_text:
+            continue
+
+        try:
+            idea = await create_idea(
+                text=idea_text,
+                source="email",
+                source_ref=email_data.get("gmail_id"),
+            )
+
+            if idea:
+                stats["ideas_captured"] += 1
+                stats["idea_ids"].append(idea.get("id"))
+                logger.info(
+                    "Captured idea from email",
+                    idea_id=idea.get("id"),
+                    subject=subject[:50],
+                )
+        except Exception as e:
+            logger.warning(
+                "Failed to capture idea from email",
+                subject=subject[:50],
+                error=str(e),
+            )
+
+    return stats
+
+
 async def run_historical_sync(months: int = 6, inbox_only: bool = True) -> dict:
     """
     Run a historical sync of emails.
@@ -540,6 +609,12 @@ async def run_incremental_sync(history_id: str) -> dict:
         stats["sent_email_stats"] = sent_stats
         if sent_stats["tasks_completed"]:
             stats["auto_completed_tasks"] = sent_stats["tasks_completed"]
+
+        # Capture ideas from emails with "idea:" subject prefix
+        idea_stats = await capture_ideas_from_emails(email_data, user_email)
+        if idea_stats["ideas_captured"] > 0:
+            stats["ideas_captured"] = idea_stats["ideas_captured"]
+            stats["idea_ids"] = idea_stats["idea_ids"]
 
     logger.info("Incremental sync complete", **{k: v for k, v in stats.items() if k not in ["emails", "sent_email_stats"]})
 

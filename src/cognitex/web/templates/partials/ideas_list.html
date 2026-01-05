@@ -1,0 +1,119 @@
+{% if flash_message %}
+<div style="padding: 0.75rem 1rem; background: var(--success-bg); border: 1px solid var(--success); border-radius: 6px; margin-bottom: 1rem;">
+    {{ flash_message }}
+</div>
+{% endif %}
+
+{% if ideas %}
+<div class="ideas-grid">
+    {% for idea in ideas %}
+    <div class="card idea-card" id="idea-{{ idea.id }}" style="position: relative;">
+        <!-- Status Badge -->
+        <div style="position: absolute; top: 0.75rem; right: 0.75rem;">
+            <span class="badge badge-{{ idea.status }}">{{ idea.status }}</span>
+        </div>
+
+        <!-- Idea Text -->
+        <div style="padding-right: 80px; margin-bottom: 0.75rem;">
+            <p style="margin: 0; white-space: pre-wrap; line-height: 1.5;">{{ idea.text }}</p>
+        </div>
+
+        <!-- Meta info -->
+        <div style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.75rem;">
+            <span>{{ idea.source }}</span>
+            <span style="margin: 0 0.5rem;">•</span>
+            <span>{{ idea.created_at[:16] if idea.created_at else '' }}</span>
+            {% if idea.converted_to %}
+            <span style="margin: 0 0.5rem;">•</span>
+            <span style="color: var(--success);">→ Task: {{ idea.converted_to.title[:30] }}{% if idea.converted_to.title|length > 30 %}...{% endif %}</span>
+            {% endif %}
+            {% if idea.linked_to %}
+            <span style="margin: 0 0.5rem;">•</span>
+            <span style="color: var(--primary);">→ {{ idea.linked_to.title }}</span>
+            {% endif %}
+        </div>
+
+        <!-- Actions (only for pending ideas) -->
+        {% if idea.status == 'pending' %}
+        <div class="idea-actions" style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
+            <!-- Convert to Task Form -->
+            <form hx-post="/ideas/{{ idea.id }}/convert"
+                  hx-target="#ideas-list"
+                  hx-swap="innerHTML"
+                  style="display: flex; gap: 0.25rem; align-items: center;">
+                <select name="project_id" style="padding: 0.25rem 0.5rem; font-size: 0.8rem; width: auto;">
+                    <option value="">No project</option>
+                    {% for proj in projects %}
+                    <option value="{{ proj.id }}">{{ proj.title[:25] }}{% if proj.title|length > 25 %}...{% endif %}</option>
+                    {% endfor %}
+                </select>
+                <select name="priority" style="padding: 0.25rem 0.5rem; font-size: 0.8rem; width: auto;">
+                    <option value="low">Low</option>
+                    <option value="medium" selected>Medium</option>
+                    <option value="high">High</option>
+                </select>
+                <button type="submit" class="btn btn-primary btn-sm">→ Task</button>
+            </form>
+
+            <!-- Dismiss -->
+            <button class="btn btn-secondary btn-sm"
+                    hx-post="/ideas/{{ idea.id }}/dismiss"
+                    hx-target="#ideas-list"
+                    hx-swap="innerHTML"
+                    title="Dismiss this idea">
+                Dismiss
+            </button>
+
+            <!-- Delete -->
+            <button class="btn btn-danger btn-sm"
+                    hx-delete="/ideas/{{ idea.id }}"
+                    hx-target="#ideas-list"
+                    hx-swap="innerHTML"
+                    hx-confirm="Permanently delete this idea?"
+                    title="Delete permanently">
+                ×
+            </button>
+        </div>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+
+<style>
+.ideas-grid {
+    display: grid;
+    gap: 1rem;
+}
+
+.idea-card {
+    transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.idea-card:hover {
+    transform: translateY(-2px);
+}
+
+.idea-actions select {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: #fff;
+}
+
+@media (max-width: 768px) {
+    .idea-actions {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    .idea-actions form {
+        flex-direction: column;
+    }
+    .idea-actions select {
+        width: 100% !important;
+    }
+}
+</style>
+{% else %}
+<div class="empty">
+    <p>No ideas yet. Capture your first thought above!</p>
+</div>
+{% endif %}

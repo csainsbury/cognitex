@@ -89,3 +89,48 @@ def get_driver() -> AsyncDriver:
     if _driver is None:
         raise RuntimeError("Neo4j not initialized. Call init_neo4j() first.")
     return _driver
+
+
+async def run_query(query: str, params: dict | None = None) -> list[dict]:
+    """
+    Run a Neo4j query with its own session.
+
+    This is safe for concurrent use - each call gets its own session from the pool.
+    Use this for parallel queries instead of sharing a session across coroutines.
+
+    Args:
+        query: Cypher query string
+        params: Optional query parameters
+
+    Returns:
+        List of result records as dictionaries
+    """
+    async for session in get_neo4j_session(access_mode="READ"):
+        try:
+            result = await session.run(query, params or {})
+            data = await result.data()
+            return data
+        except Exception as e:
+            logger.warning("Query failed", error=str(e), query=query[:100])
+            raise
+
+
+async def run_query_single(query: str, params: dict | None = None) -> dict | None:
+    """
+    Run a Neo4j query and return a single record.
+
+    Args:
+        query: Cypher query string
+        params: Optional query parameters
+
+    Returns:
+        Single result record as dict, or None if no results
+    """
+    async for session in get_neo4j_session(access_mode="READ"):
+        try:
+            result = await session.run(query, params or {})
+            record = await result.single()
+            return dict(record) if record else None
+        except Exception as e:
+            logger.warning("Query failed", error=str(e), query=query[:100])
+            raise

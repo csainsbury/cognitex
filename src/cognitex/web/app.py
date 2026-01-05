@@ -5279,6 +5279,196 @@ async def api_sessions_skip(session_id: Annotated[str, Form()]):
     return HTMLResponse('<span class="badge">Skipped</span>')
 
 
+# -------------------------------------------------------------------
+# Ideas (Scratch Pad)
+# -------------------------------------------------------------------
+
+
+@app.get("/ideas", response_class=HTMLResponse)
+async def ideas_page(request: Request, status: str | None = None):
+    """Ideas scratch pad page."""
+    from cognitex.services.ideas import list_ideas, get_idea_stats
+
+    # Default to showing pending ideas
+    filter_status = status if status else None
+    ideas = await list_ideas(status=filter_status)
+    stats = await get_idea_stats()
+
+    # Get projects for the convert-to-task dropdown
+    project_service = get_project_service()
+    projects = await project_service.list(limit=100)
+
+    return templates.TemplateResponse(
+        "ideas.html",
+        {
+            "request": request,
+            "ideas": ideas,
+            "stats": stats,
+            "projects": projects,
+            "current_status": status,
+        },
+    )
+
+
+@app.post("/ideas", response_class=HTMLResponse)
+async def create_idea_web(
+    request: Request,
+    text: Annotated[str, Form()],
+):
+    """Create a new idea from web form."""
+    from cognitex.services.ideas import create_idea, list_ideas, get_idea_stats
+
+    await create_idea(text=text, source="web")
+
+    # Return updated list
+    ideas = await list_ideas()
+    stats = await get_idea_stats()
+    project_service = get_project_service()
+    projects = await project_service.list(limit=100)
+
+    return templates.TemplateResponse(
+        "partials/ideas_list.html",
+        {
+            "request": request,
+            "ideas": ideas,
+            "stats": stats,
+            "projects": projects,
+        },
+    )
+
+
+@app.post("/api/ideas", response_class=JSONResponse)
+async def create_idea_api(request: Request):
+    """Create a new idea via API (for mobile shortcuts, etc.)."""
+    from cognitex.services.ideas import create_idea
+
+    data = await request.json()
+    text = data.get("text", "").strip()
+
+    if not text:
+        return JSONResponse({"error": "Text is required"}, status_code=400)
+
+    idea = await create_idea(
+        text=text,
+        source="api",
+        tags=data.get("tags"),
+    )
+
+    return JSONResponse({"status": "ok", "idea": idea})
+
+
+@app.post("/ideas/{idea_id}/convert", response_class=HTMLResponse)
+async def convert_idea_to_task(
+    request: Request,
+    idea_id: str,
+    title: Annotated[str | None, Form()] = None,
+    project_id: Annotated[str | None, Form()] = None,
+    priority: Annotated[str, Form()] = "medium",
+):
+    """Convert an idea to a task."""
+    from cognitex.services.ideas import convert_to_task, list_ideas, get_idea_stats
+
+    task = await convert_to_task(
+        idea_id=idea_id,
+        title=title if title else None,
+        project_id=project_id if project_id else None,
+        priority=priority,
+    )
+
+    # Return updated list
+    ideas = await list_ideas()
+    stats = await get_idea_stats()
+    project_service = get_project_service()
+    projects = await project_service.list(limit=100)
+
+    return templates.TemplateResponse(
+        "partials/ideas_list.html",
+        {
+            "request": request,
+            "ideas": ideas,
+            "stats": stats,
+            "projects": projects,
+            "flash_message": f"Converted to task: {task['title']}" if task else "Conversion failed",
+        },
+    )
+
+
+@app.post("/ideas/{idea_id}/dismiss", response_class=HTMLResponse)
+async def dismiss_idea_route(request: Request, idea_id: str):
+    """Dismiss an idea."""
+    from cognitex.services.ideas import dismiss_idea, list_ideas, get_idea_stats
+
+    await dismiss_idea(idea_id)
+
+    # Return updated list
+    ideas = await list_ideas()
+    stats = await get_idea_stats()
+    project_service = get_project_service()
+    projects = await project_service.list(limit=100)
+
+    return templates.TemplateResponse(
+        "partials/ideas_list.html",
+        {
+            "request": request,
+            "ideas": ideas,
+            "stats": stats,
+            "projects": projects,
+        },
+    )
+
+
+@app.delete("/ideas/{idea_id}", response_class=HTMLResponse)
+async def delete_idea_route(request: Request, idea_id: str):
+    """Delete an idea permanently."""
+    from cognitex.services.ideas import delete_idea, list_ideas, get_idea_stats
+
+    await delete_idea(idea_id)
+
+    # Return updated list
+    ideas = await list_ideas()
+    stats = await get_idea_stats()
+    project_service = get_project_service()
+    projects = await project_service.list(limit=100)
+
+    return templates.TemplateResponse(
+        "partials/ideas_list.html",
+        {
+            "request": request,
+            "ideas": ideas,
+            "stats": stats,
+            "projects": projects,
+        },
+    )
+
+
+@app.post("/ideas/{idea_id}/link", response_class=HTMLResponse)
+async def link_idea_to_project(
+    request: Request,
+    idea_id: str,
+    project_id: Annotated[str, Form()],
+):
+    """Link an idea to a project."""
+    from cognitex.services.ideas import link_to_project, list_ideas, get_idea_stats
+
+    await link_to_project(idea_id, project_id)
+
+    # Return updated list
+    ideas = await list_ideas()
+    stats = await get_idea_stats()
+    project_service = get_project_service()
+    projects = await project_service.list(limit=100)
+
+    return templates.TemplateResponse(
+        "partials/ideas_list.html",
+        {
+            "request": request,
+            "ideas": ideas,
+            "stats": stats,
+            "projects": projects,
+        },
+    )
+
+
 def run_server(host: str = "127.0.0.1", port: int = 8080):
     """Run the web server."""
     import uvicorn
