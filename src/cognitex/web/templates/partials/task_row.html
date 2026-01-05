@@ -69,7 +69,8 @@
         <button class="btn btn-success btn-sm"
                 hx-post="/tasks/{{ task.id }}/complete"
                 hx-target="#task-{{ task.id }}"
-                hx-swap="outerHTML"
+                hx-swap="delete"
+                hx-on::after-request="document.getElementById('subtasks-{{ task.id }}')?.remove()"
                 title="Complete">&#10003;</button>
         {% endif %}
         <button class="btn btn-secondary btn-sm"
