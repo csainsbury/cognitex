@@ -307,7 +307,7 @@ async def convert_to_task(
     Returns:
         The created task dict, or None if failed
     """
-    from cognitex.services.tasks import create_task
+    from cognitex.services.tasks import get_task_service
 
     # Get the idea first
     idea = await get_idea(idea_id)
@@ -315,8 +315,9 @@ async def convert_to_task(
         return None
 
     # Create the task
+    task_service = get_task_service()
     task_title = title or idea["text"][:200]  # Truncate if needed
-    task = await create_task(
+    task = await task_service.create(
         title=task_title,
         description=f"Converted from idea: {idea['text']}" if title else None,
         priority=priority,
