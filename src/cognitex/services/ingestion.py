@@ -1021,6 +1021,19 @@ async def index_document_content(
     # Calculate content hash
     content_hash = hashlib.sha256(content.encode()).hexdigest()[:64]
 
+    # Check if already deep-indexed (in document_chunks) - skip basic indexing if so
+    # This prevents duplicate processing between basic and deep indexing
+    chunks_check = text("""
+        SELECT content_hash FROM document_chunks
+        WHERE drive_id = :drive_id AND chunk_index = 0
+    """)
+    chunks_result = await pg_session.execute(chunks_check, {"drive_id": drive_id})
+    chunks_row = chunks_result.fetchone()
+
+    if chunks_row and chunks_row.content_hash == content_hash:
+        logger.debug("Document already deep-indexed, skipping basic indexing", drive_id=drive_id)
+        return None
+
     # Check if content already indexed with same hash AND embedding exists
     check_query = text("""
         SELECT dc.content_hash, e.id as embedding_id
@@ -1237,7 +1250,25 @@ async def index_document_chunked(
     # Calculate content hash for the full document
     full_hash = compute_hash(content)
 
-    # Check if already indexed with same hash
+    # Check if already indexed in EITHER table (shared check)
+    # This prevents reprocessing when switching between basic and deep indexing
+    shared_check = text("""
+        SELECT 'chunks' as source, content_hash FROM document_chunks
+        WHERE drive_id = :drive_id AND chunk_index = 0
+        UNION ALL
+        SELECT 'content' as source, content_hash FROM document_content
+        WHERE drive_id = :drive_id
+    """)
+    shared_result = await pg_session.execute(shared_check, {"drive_id": drive_id})
+    existing_hashes = shared_result.fetchall()
+
+    for row in existing_hashes:
+        if row.content_hash == full_hash:
+            logger.debug("Document unchanged (found in %s), skipping", row.source, drive_id=drive_id)
+            stats["skipped"] = 1
+            return stats
+
+    # Check if already indexed with same hash in chunks table
     check_query = text("""
         SELECT COUNT(*) as chunk_count FROM document_chunks
         WHERE drive_id = :drive_id
