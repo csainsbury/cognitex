@@ -45,6 +45,31 @@ When agent drafts emails about a specific project, perform RAG search for "Proje
 
 ---
 
+## Learning System
+
+### Rejection Reason Capture
+**Priority:** Medium
+**Complexity:** Low
+
+When dismissing agent proposals in twin.html, show a modal asking "Why?" with options like:
+- "Wrong project"
+- "Not now / bad timing"
+- "Bad tone / style"
+- "Never suggest this again"
+
+This explicit signal helps the Learning System (Phase 4) differentiate between:
+- Bad timing (reschedule later)
+- Bad idea (never suggest again)
+- Style mismatch (adjust writing approach)
+
+**Implementation notes:**
+- Add modal to twin.html dismiss/discard buttons
+- Pass reason to `reject_proposal(..., reason=...)` in action_log.py
+- Store reason in learned_patterns table
+- Use reason to improve suppression logic in `should_suppress_proposal()`
+
+---
+
 ## Infrastructure
 
 ### LLM Config Hot Reload
