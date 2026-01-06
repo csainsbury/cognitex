@@ -75,8 +75,15 @@ def chunk_document(
     chunks = []
     current_pos = 0
     chunk_index = 0
+    prev_pos = -1  # Track previous position to detect infinite loops
 
     while current_pos < len(content):
+        # Infinite loop detection - if position hasn't changed, force advance
+        if current_pos == prev_pos:
+            current_pos += chunk_size // 2  # Force forward progress
+            continue
+        prev_pos = current_pos
+
         # Calculate end position for this chunk
         end_pos = min(current_pos + chunk_size, len(content))
 
@@ -114,11 +121,12 @@ def chunk_document(
             ))
             chunk_index += 1
 
-        # Move position, accounting for overlap
-        current_pos = end_pos - overlap
-        if current_pos <= chunks[-1].start_char if chunks else 0:
-            # Prevent infinite loop if overlap is too large
-            current_pos = end_pos
+        # Move position forward - ALWAYS ensure forward progress
+        new_pos = end_pos - overlap
+        # Ensure we move forward by at least 1 character
+        if new_pos <= current_pos:
+            new_pos = current_pos + 1
+        current_pos = new_pos
 
     logger.debug(
         "Chunked document",
