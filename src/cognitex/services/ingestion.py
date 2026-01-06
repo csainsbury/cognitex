@@ -1412,43 +1412,33 @@ async def index_document_chunked(
 
 async def run_deep_document_indexing(
     pg_session: AsyncSession,
-    folder_names: list[str] | None = None,
-    limit: int = 100,
-    max_file_size: int = 10_000_000,  # 10MB default
+    limit: int = 50,
+    max_file_size: int = 10_000_000,
 ) -> dict:
     """
-    Index documents with deep chunking for comprehensive understanding.
+    Index documents with deep chunking using database-driven queue.
 
-    Memory-efficient: processes one document at a time, uses streaming.
+    Architecture (Metadata-First Indexing):
+    1. Query DB for priority files that are either new or modified since last index.
+    2. Download and process only those files.
+
+    This avoids traversing the Drive folder structure repeatedly and prevents
+    blocking the event loop with synchronous Drive API calls.
 
     Args:
         pg_session: PostgreSQL async session
-        folder_names: Folders to index (defaults to PRIORITY_FOLDERS)
         limit: Maximum documents to process
         max_file_size: Skip files larger than this (bytes)
 
     Returns:
         Indexing stats
     """
-    from cognitex.services.drive import get_drive_service, PRIORITY_FOLDERS
+    from cognitex.services.drive import get_drive_service
 
-    folder_names = folder_names or PRIORITY_FOLDERS
-    logger.info("Starting deep document indexing", folders=folder_names, limit=limit)
-
-    drive = get_drive_service()
-
-    stats = {
-        "documents_processed": 0,
-        "chunks_total": 0,
-        "embeddings_total": 0,
-        "skipped_size": 0,
-        "skipped_type": 0,
-        "failed": 0,
-        "by_folder": {},
-    }
+    logger.info("Starting deep document indexing (database-driven)", limit=limit)
 
     # MIME types we can meaningfully index
-    indexable_types = {
+    indexable_types = (
         'application/vnd.google-apps.document',
         'application/vnd.google-apps.spreadsheet',
         'text/plain',
@@ -1458,88 +1448,112 @@ async def run_deep_document_indexing(
         'application/json',
         'text/x-python',
         'application/javascript',
+    )
+
+    # Query for stale priority files:
+    # - marked as priority in drive_files
+    # - MIME type is supported
+    # - size is within limits
+    # - AND (not in document_content OR drive_modified > content_updated)
+    mime_list = list(indexable_types)
+
+    query = text("""
+        SELECT
+            df.id, df.name, df.mime_type, df.size_bytes, df.folder_path
+        FROM drive_files df
+        LEFT JOIN document_content dc ON df.id = dc.drive_id
+        LEFT JOIN document_chunks dch ON df.id = dch.drive_id AND dch.chunk_index = 0
+        WHERE df.is_priority = true
+          AND (
+              df.mime_type = ANY(:mimes)
+              OR df.mime_type LIKE 'text/%'
+          )
+          AND (df.size_bytes IS NULL OR df.size_bytes <= :max_size)
+          AND (
+              (dc.drive_id IS NULL AND dch.drive_id IS NULL)
+              OR df.modified_time > COALESCE(dc.updated_at, dch.created_at, '1970-01-01')
+          )
+        ORDER BY df.modified_time DESC
+        LIMIT :limit
+    """)
+
+    result = await pg_session.execute(query, {
+        "mimes": mime_list,
+        "max_size": max_file_size,
+        "limit": limit
+    })
+
+    files_to_process = result.mappings().all()
+
+    if not files_to_process:
+        logger.info("No stale priority documents found - all up to date")
+        return {"documents_processed": 0, "chunks_total": 0, "failed": 0, "skipped": 0}
+
+    logger.info("Found stale documents to index", count=len(files_to_process))
+
+    drive = get_drive_service()
+    stats = {
+        "documents_processed": 0,
+        "chunks_total": 0,
+        "embeddings_total": 0,
+        "failed": 0,
+        "skipped": 0,
     }
 
-    for folder_name in folder_names:
-        folder_stats = {"docs": 0, "chunks": 0, "skipped": 0, "failed": 0}
+    for file_data in files_to_process:
+        file_id = file_data['id']
+        file_name = file_data['name']
+        mime_type = file_data['mime_type']
+        folder_path = file_data.get('folder_path', '')
 
-        folder_id = drive.get_folder_id_by_name(folder_name)
-        if not folder_id:
-            logger.warning("Priority folder not found", folder=folder_name)
-            continue
-
-        for file_data in drive.list_files_in_folder(folder_id, recursive=True):
-            if stats["documents_processed"] >= limit:
-                break
-
-            # Skip folders
-            if file_data["mimeType"] == "application/vnd.google-apps.folder":
-                continue
-
-            # Skip large files
-            file_size = int(file_data.get("size", 0))
-            if file_size > max_file_size:
-                logger.debug("Skipping large file", name=file_data["name"], size=file_size)
-                stats["skipped_size"] += 1
-                folder_stats["skipped"] += 1
-                continue
-
-            # Skip non-indexable types
-            mime_type = file_data["mimeType"]
-            if mime_type not in indexable_types and not mime_type.startswith('text/'):
-                stats["skipped_type"] += 1
-                folder_stats["skipped"] += 1
-                continue
-
+        try:
+            # Extract content with timeout to prevent hanging
             try:
-                # Extract content (run in thread to avoid blocking)
-                content = await asyncio.to_thread(
-                    drive.get_file_content,
-                    file_data["id"],
-                    mime_type
+                content = await asyncio.wait_for(
+                    asyncio.to_thread(drive.get_file_content, file_id, mime_type),
+                    timeout=60.0  # 60s timeout for download
                 )
-
-                if not content or len(content.strip()) < 100:
-                    folder_stats["skipped"] += 1
-                    continue
-
-                # Index with chunking
-                result = await index_document_chunked(
-                    pg_session,
-                    drive_id=file_data["id"],
-                    content=content,
-                    mime_type=mime_type,
-                )
-
-                # Only count as processed if new work was done (not skipped)
-                if result["chunks_created"] > 0:
-                    stats["documents_processed"] += 1
-                    stats["chunks_total"] += result["chunks_created"]
-                    stats["embeddings_total"] += result["embeddings_created"]
-                    folder_stats["docs"] += 1
-                    folder_stats["chunks"] += result["chunks_created"]
-                else:
-                    # Document was already indexed with same content
-                    folder_stats["skipped"] += 1
-
-                # Free memory
-                del content
-
-            except Exception as e:
-                folder_stats["failed"] += 1
+            except asyncio.TimeoutError:
+                logger.error("Download timed out", file=file_name)
                 stats["failed"] += 1
-                logger.warning(
-                    "Failed to index document",
-                    drive_id=file_data["id"],
-                    name=file_data["name"],
-                    error=str(e),
-                )
-                await pg_session.rollback()
+                continue
 
-        stats["by_folder"][folder_name] = folder_stats
+            if not content or len(content.strip()) < 100:
+                stats["skipped"] += 1
+                continue
+
+            # Index with chunking
+            result = await index_document_chunked(
+                pg_session,
+                drive_id=file_id,
+                content=content,
+                mime_type=mime_type,
+            )
+
+            stats["documents_processed"] += 1
+            stats["chunks_total"] += result["chunks_created"]
+            stats["embeddings_total"] += result.get("embeddings_created", 0)
+
+            # Explicit commit after each file to save progress
+            await pg_session.commit()
+
+            logger.info(
+                "Indexed document",
+                file=file_name,
+                folder=folder_path,
+                chunks=result["chunks_created"],
+            )
+
+            # Free memory
+            del content
+
+        except Exception as e:
+            stats["failed"] += 1
+            logger.error("Failed to index document", file=file_name, error=str(e))
+            # Rollback this transaction but continue loop
+            await pg_session.rollback()
 
     logger.info("Deep document indexing complete", **stats)
-
     return stats
 
 

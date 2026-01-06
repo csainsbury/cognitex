@@ -959,13 +959,14 @@ def drive_sync(
         from cognitex.services.ingestion import (
             run_drive_metadata_sync,
             run_drive_folder_sync,
-            run_priority_folder_indexing,
+            run_deep_document_indexing,
         )
 
         await init_neo4j()
         await init_graph_schema()
 
         try:
+            # Always ensure metadata is up to date first (unless explicitly skipped)
             if not skip_metadata:
                 if folder:
                     # Sync specific folder
@@ -976,33 +977,31 @@ def drive_sync(
                     console.print("[bold]Syncing Drive metadata...[/bold]")
                     result = await run_drive_metadata_sync()
 
-                console.print(f"\n[green]Sync complete![/green]")
+                console.print(f"\n[green]Metadata sync complete![/green]")
                 console.print(f"  Total files: {result.get('total', 0)}")
                 console.print(f"  Successfully synced: {result.get('success', 0)}")
                 if result.get('failed', 0) > 0:
                     console.print(f"  [yellow]Failed: {result.get('failed', 0)}[/yellow]")
 
-            # Index priority folders if requested
+            # Deep index priority folders if requested
+            # Uses database-driven queue instead of crawling Drive
             if index_priority:
-                console.print("\n[bold]Indexing priority folders...[/bold]")
+                console.print("\n[bold]Deep Indexing Priority Content...[/bold]")
+                console.print("[dim]Checking for new or modified files in priority folders...[/dim]")
                 await init_postgres()
 
                 try:
                     async for pg_session in get_session():
-                        index_result = await run_priority_folder_indexing(
+                        index_result = await run_deep_document_indexing(
                             pg_session,
                             limit=limit,
                         )
 
-                        console.print(f"\n[green]Indexing complete![/green]")
-                        console.print(f"  Documents processed: {index_result.get('total', 0)}")
-                        console.print(f"  Indexed: {index_result.get('indexed', 0)}")
+                        console.print(f"\n[green]Deep indexing complete![/green]")
+                        console.print(f"  Documents processed: {index_result.get('documents_processed', 0)}")
+                        console.print(f"  Total chunks: {index_result.get('chunks_total', 0)}")
                         console.print(f"  Skipped: {index_result.get('skipped', 0)}")
-
-                        if index_result.get('by_folder'):
-                            console.print("\n  By folder:")
-                            for folder_name, stats in index_result['by_folder'].items():
-                                console.print(f"    {folder_name}: {stats['indexed']} indexed, {stats['skipped']} skipped")
+                        console.print(f"  Failed: {index_result.get('failed', 0)}")
 
                 finally:
                     await close_postgres()
@@ -1179,7 +1178,8 @@ def deep_index(
 
     console.print(f"[bold]Starting deep document indexing...[/bold]")
     console.print(f"  Limit: {limit} documents")
-    console.print(f"  Max file size: {max_size}MB\n")
+    console.print(f"  Max file size: {max_size}MB")
+    console.print("[dim]Using database-driven queue (only indexes new/modified files)[/dim]\n")
 
     async def run_indexing():
         from cognitex.db.postgres import init_postgres, close_postgres, get_session
@@ -1196,17 +1196,11 @@ def deep_index(
                 )
 
                 console.print("\n[bold green]Deep indexing complete![/bold green]")
-                console.print(f"  Documents processed: {stats['documents_processed']}")
-                console.print(f"  Total chunks: {stats['chunks_total']}")
-                console.print(f"  Total embeddings: {stats['embeddings_total']}")
-                console.print(f"  Skipped (size): {stats['skipped_size']}")
-                console.print(f"  Skipped (type): {stats['skipped_type']}")
-                console.print(f"  Failed: {stats['failed']}")
-
-                if stats["by_folder"]:
-                    console.print("\n[bold]By folder:[/bold]")
-                    for folder, fs in stats["by_folder"].items():
-                        console.print(f"    {folder}: {fs['docs']} docs, {fs['chunks']} chunks")
+                console.print(f"  Documents processed: {stats.get('documents_processed', 0)}")
+                console.print(f"  Total chunks: {stats.get('chunks_total', 0)}")
+                console.print(f"  Total embeddings: {stats.get('embeddings_total', 0)}")
+                console.print(f"  Skipped: {stats.get('skipped', 0)}")
+                console.print(f"  Failed: {stats.get('failed', 0)}")
 
         finally:
             await close_postgres()

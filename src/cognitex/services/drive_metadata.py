@@ -95,13 +95,21 @@ class DriveMetadataIndexer:
         return path
 
     def _is_priority_path(self, folder_path: str) -> bool:
-        """Check if a folder path is under a priority folder."""
+        """Check if a folder path is under a priority folder.
+
+        Robustly matches paths like:
+        - /priority -> Match
+        - /priority/subdir/file.txt -> Match
+        - /priority_suffix -> NO match (prevents false positives)
+        """
         if not folder_path:
             return False
 
         path_lower = folder_path.lower()
         for priority in PRIORITY_FOLDERS:
-            if f"/{priority.lower()}" in path_lower or path_lower.startswith(priority.lower()):
+            clean_p = priority.lower().strip("/")
+            # Match exact folder or subpath, but not prefix-similar names
+            if path_lower == f"/{clean_p}" or path_lower.startswith(f"/{clean_p}/"):
                 return True
         return False
 

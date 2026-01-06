@@ -500,13 +500,20 @@ Return ONLY valid JSON, no other text. Use null for unknown fields."""
         if self._embedding_client is None:
             raise ValueError("Together.ai client not configured - embeddings unavailable")
 
-        # Wrap sync embedding call in thread to avoid blocking event loop
-        response = await asyncio.to_thread(
-            self._embedding_client.embeddings.create,
-            model=self.embedding_model,
-            input=text,
-        )
-        return response.data[0].embedding
+        # Wrap sync embedding call in thread with timeout to prevent freezing
+        try:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._embedding_client.embeddings.create,
+                    model=self.embedding_model,
+                    input=text,
+                ),
+                timeout=30.0  # 30s timeout per embedding
+            )
+            return response.data[0].embedding
+        except asyncio.TimeoutError:
+            logger.error("Embedding generation timed out", text_length=len(text))
+            raise
 
     async def extract_entities_from_chunk(
         self,
