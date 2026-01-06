@@ -127,6 +127,10 @@ class Settings(BaseSettings):
         default="csainsbury/cognitex,csainsbury/kre,csainsbury/ascend_v0.15,csainsbury/validact",
         description="Comma-separated list of repos to auto-sync daily (e.g., owner/repo,owner/repo2)",
     )
+    github_priority_repos: str = Field(
+        default="",
+        description="Comma-separated list of priority repos for deep indexing (e.g., owner/repo,owner/repo2)",
+    )
 
     # Sync API (for remote session ingestion)
     sync_api_key: SecretStr = Field(

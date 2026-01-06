@@ -1557,6 +1557,125 @@ async def run_deep_document_indexing(
     return stats
 
 
+async def run_deep_code_indexing(
+    pg_session: AsyncSession,
+    limit: int = 50,
+    max_file_size: int = 100_000,
+) -> dict:
+    """
+    Index code files from priority GitHub repos.
+
+    Architecture (mirrors Drive deep indexing):
+    1. Query github_files for priority files not yet indexed or changed
+    2. Download content for stale/new files only
+    3. Generate embeddings
+
+    Args:
+        pg_session: PostgreSQL async session
+        limit: Maximum files to process
+        max_file_size: Skip files larger than this (bytes)
+
+    Returns:
+        Indexing stats
+    """
+    from cognitex.services.github import GitHubService
+
+    logger.info("Starting deep code indexing from priority repos", limit=limit)
+
+    stats = {
+        "files_processed": 0,
+        "embeddings_created": 0,
+        "skipped": 0,
+        "failed": 0,
+    }
+
+    # Query for stale priority files
+    # Files where: is_priority=true AND (not in code_content OR sha changed)
+    query = text("""
+        SELECT
+            gf.id, gf.path, gf.name, gf.language, gf.repo_id,
+            gf.repo_full_name, gf.sha, gf.size_bytes
+        FROM github_files gf
+        LEFT JOIN code_content cc ON gf.id = cc.file_id
+        WHERE gf.is_priority = true
+          AND (gf.size_bytes IS NULL OR gf.size_bytes <= :max_size)
+          AND (cc.file_id IS NULL OR gf.sha != cc.content_hash)
+        ORDER BY gf.indexed_at DESC
+        LIMIT :limit
+    """)
+
+    result = await pg_session.execute(query, {
+        "max_size": max_file_size,
+        "limit": limit,
+    })
+    files_to_process = result.mappings().all()
+
+    if not files_to_process:
+        logger.info("No stale priority code files found - all up to date")
+        return stats
+
+    logger.info("Found stale code files to index", count=len(files_to_process))
+
+    github = GitHubService()
+
+    for file_data in files_to_process:
+        file_id = file_data['id']
+        file_path = file_data['path']
+        repo_name = file_data['repo_full_name']
+
+        try:
+            # Download file content with timeout
+            try:
+                content = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        github.get_file_content,
+                        repo_name,
+                        file_path,
+                    ),
+                    timeout=30.0  # 30s timeout for download
+                )
+            except asyncio.TimeoutError:
+                logger.error("Download timed out", file=file_path, repo=repo_name)
+                stats["failed"] += 1
+                continue
+
+            if not content or len(content.strip()) < 50:
+                stats["skipped"] += 1
+                continue
+
+            # Index with embedding
+            embedding_id = await index_code_content(
+                pg_session,
+                file_id=file_id,
+                path=file_path,
+                content=content,
+                repo_name=repo_name,
+                skip_embedding=False,
+            )
+
+            stats["files_processed"] += 1
+            if embedding_id:
+                stats["embeddings_created"] += 1
+
+            # Commit after each file
+            await pg_session.commit()
+
+            logger.info(
+                "Indexed code file",
+                file=file_path,
+                repo=repo_name,
+                has_embedding=embedding_id is not None,
+            )
+
+        except Exception as e:
+            stats["failed"] += 1
+            logger.error("Failed to index code file", file=file_path, error=str(e))
+            await pg_session.rollback()
+
+    logger.info("Deep code indexing complete", **stats)
+    return stats
+
+
 async def search_chunks_semantic(
     pg_session: AsyncSession,
     query: str,

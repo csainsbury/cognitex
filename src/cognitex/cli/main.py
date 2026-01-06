@@ -1162,12 +1162,18 @@ def doc_search(
 def deep_index(
     limit: int = typer.Option(100, "--limit", "-l", help="Max documents to index"),
     max_size: int = typer.Option(10, "--max-size", "-s", help="Max file size in MB"),
+    source: str = typer.Option("all", "--source", help="Source to index: drive, github, or all"),
 ) -> None:
     """
     Deep index documents with semantic chunking.
 
     Splits documents into overlapping chunks for comprehensive understanding.
     Each chunk gets its own embedding, enabling passage-level retrieval.
+
+    Use --source to choose which sources to index:
+    - drive: Only Google Drive priority folders
+    - github: Only GitHub priority repos
+    - all: Both Drive and GitHub (default)
     """
     from cognitex.config import get_settings
 
@@ -1176,31 +1182,59 @@ def deep_index(
         console.print("[red]TOGETHER_API_KEY not configured in .env[/red]")
         raise typer.Exit(1)
 
-    console.print(f"[bold]Starting deep document indexing...[/bold]")
+    source = source.lower()
+    if source not in ("drive", "github", "all"):
+        console.print(f"[red]Invalid source: {source}. Use: drive, github, or all[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold]Starting deep indexing...[/bold]")
+    console.print(f"  Source: {source}")
     console.print(f"  Limit: {limit} documents")
     console.print(f"  Max file size: {max_size}MB")
     console.print("[dim]Using database-driven queue (only indexes new/modified files)[/dim]\n")
 
     async def run_indexing():
         from cognitex.db.postgres import init_postgres, close_postgres, get_session
-        from cognitex.services.ingestion import run_deep_document_indexing
+        from cognitex.services.ingestion import run_deep_document_indexing, run_deep_code_indexing
 
         await init_postgres()
 
         try:
             async for pg_session in get_session():
-                stats = await run_deep_document_indexing(
-                    pg_session,
-                    limit=limit,
-                    max_file_size=max_size * 1_000_000,
-                )
+                # Index Drive documents
+                if source in ("drive", "all"):
+                    console.print("[cyan]Indexing Drive documents...[/cyan]")
+                    drive_stats = await run_deep_document_indexing(
+                        pg_session,
+                        limit=limit,
+                        max_file_size=max_size * 1_000_000,
+                    )
+
+                    console.print("\n[green]Drive indexing complete:[/green]")
+                    console.print(f"  Documents processed: {drive_stats.get('documents_processed', 0)}")
+                    console.print(f"  Total chunks: {drive_stats.get('chunks_total', 0)}")
+                    console.print(f"  Embeddings: {drive_stats.get('embeddings_total', 0)}")
+                    if drive_stats.get('failed', 0) > 0:
+                        console.print(f"  [yellow]Failed: {drive_stats.get('failed', 0)}[/yellow]")
+
+                # Index GitHub code
+                if source in ("github", "all"):
+                    console.print("\n[cyan]Indexing GitHub code...[/cyan]")
+                    github_stats = await run_deep_code_indexing(
+                        pg_session,
+                        limit=limit,
+                        max_file_size=max_size * 1_000_000,
+                    )
+
+                    console.print("\n[green]GitHub indexing complete:[/green]")
+                    console.print(f"  Files processed: {github_stats.get('files_processed', 0)}")
+                    console.print(f"  Embeddings: {github_stats.get('embeddings_created', 0)}")
+                    if github_stats.get('skipped', 0) > 0:
+                        console.print(f"  Skipped: {github_stats.get('skipped', 0)}")
+                    if github_stats.get('failed', 0) > 0:
+                        console.print(f"  [yellow]Failed: {github_stats.get('failed', 0)}[/yellow]")
 
                 console.print("\n[bold green]Deep indexing complete![/bold green]")
-                console.print(f"  Documents processed: {stats.get('documents_processed', 0)}")
-                console.print(f"  Total chunks: {stats.get('chunks_total', 0)}")
-                console.print(f"  Total embeddings: {stats.get('embeddings_total', 0)}")
-                console.print(f"  Skipped: {stats.get('skipped', 0)}")
-                console.print(f"  Failed: {stats.get('failed', 0)}")
 
         finally:
             await close_postgres()
@@ -5750,6 +5784,45 @@ def drive_metadata_cmd(
             console.print(f"  Priority folder files: {stats['priority']}")
             if stats['errors'] > 0:
                 console.print(f"  [yellow]Errors: {stats['errors']}[/yellow]")
+
+        finally:
+            await close_postgres()
+
+    asyncio.run(run())
+
+
+@app.command("github-metadata")
+def github_metadata_cmd(
+    limit: int = typer.Option(None, "--limit", "-l", help="Limit number of repos to index"),
+    include_files: bool = typer.Option(False, "--files", "-f", help="Also index file metadata for priority repos"),
+) -> None:
+    """Index all GitHub repos for metadata (name, language, etc.)."""
+    async def run():
+        from cognitex.db.postgres import init_postgres, close_postgres
+        from cognitex.services.github_metadata import GithubMetadataIndexer
+
+        await init_postgres()
+
+        try:
+            indexer = GithubMetadataIndexer()
+            console.print("[cyan]Indexing GitHub repository metadata...[/cyan]")
+
+            stats = await indexer.index_all_repos(limit=limit)
+
+            console.print("\n[green]✓ GitHub repo metadata indexing complete[/green]")
+            console.print(f"  Total repos: {stats['total']}")
+            console.print(f"  Priority repos: {stats['priority']}")
+            if stats['errors'] > 0:
+                console.print(f"  [yellow]Errors: {stats['errors']}[/yellow]")
+
+            # Optionally index files for priority repos
+            if include_files and stats['priority'] > 0:
+                console.print("\n[cyan]Indexing files for priority repos...[/cyan]")
+                file_stats = await indexer.index_priority_repo_files()
+                console.print(f"  Repos processed: {file_stats['repos_processed']}")
+                console.print(f"  Files indexed: {file_stats['files_indexed']}")
+                if file_stats['errors'] > 0:
+                    console.print(f"  [yellow]Errors: {file_stats['errors']}[/yellow]")
 
         finally:
             await close_postgres()

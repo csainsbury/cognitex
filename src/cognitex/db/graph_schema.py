@@ -2123,6 +2123,8 @@ async def create_codefile(
     language: str | None = None,
     summary: str | None = None,
     last_modified: str | None = None,
+    indexed: bool = False,
+    embedding_id: str | None = None,
 ) -> dict:
     """
     Create a CodeFile node in the graph.
@@ -2135,6 +2137,8 @@ async def create_codefile(
         language: Programming language
         summary: LLM-generated description
         last_modified: Last modification date
+        indexed: Whether embeddings have been generated
+        embedding_id: Reference to embedding in PostgreSQL
     """
     query = """
     MERGE (cf:CodeFile {id: $codefile_id})
@@ -2144,6 +2148,8 @@ async def create_codefile(
         cf.language = $language,
         cf.summary = $summary,
         cf.last_modified = CASE WHEN $last_modified IS NOT NULL THEN datetime($last_modified) ELSE null END,
+        cf.indexed = $indexed,
+        cf.embedding_id = $embedding_id,
         cf.created_at = datetime()
     ON MATCH SET
         cf.path = $path,
@@ -2151,6 +2157,8 @@ async def create_codefile(
         cf.language = COALESCE($language, cf.language),
         cf.summary = COALESCE($summary, cf.summary),
         cf.last_modified = CASE WHEN $last_modified IS NOT NULL THEN datetime($last_modified) ELSE cf.last_modified END,
+        cf.indexed = CASE WHEN $indexed THEN true ELSE cf.indexed END,
+        cf.embedding_id = COALESCE($embedding_id, cf.embedding_id),
         cf.updated_at = datetime()
     RETURN cf
     """
@@ -2162,6 +2170,8 @@ async def create_codefile(
         language=language,
         summary=summary,
         last_modified=last_modified,
+        indexed=indexed,
+        embedding_id=embedding_id,
     )
     record = await result.single()
 
