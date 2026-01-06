@@ -8,7 +8,11 @@ A personal cognitive assistant that manages your digital life through a semantic
 - **Gmail**: Syncs emails, classifies them (actionable/informational/urgent), extracts tasks, and tracks communication patterns
 - **Google Calendar**: Syncs events, identifies meetings needing preparation
 - **Google Drive**: Indexes documents with semantic embeddings, extracts topics and concepts
+  - **Metadata-first indexing**: Fast metadata sync followed by targeted content indexing
+  - **Priority folders**: Configure folders for deep semantic analysis
+  - **Differential sync**: Only processes new/modified files
 - **GitHub**: Syncs repositories and code files with semantic search
+- **Coding Sessions**: Syncs Claude Code session summaries for project context
 
 ### Autonomous Digital Twin Agent
 An LLM-powered agent that acts on your behalf when you're not available:
@@ -28,10 +32,14 @@ An LLM-powered agent that acts on your behalf when you're not available:
 
 ### Web Dashboard
 - Task, Project, and Goal management with inline editing
+- **Task subtasks**: Expandable checklist steps with drag-and-drop reordering
+- **Ideas scratch pad**: Quick capture of thoughts, convert to tasks when ready
 - Document search with semantic similarity
 - Agent log with action history
 - Digital Twin review page for approving drafts and suggestions
 - Real-time state and mode visualization
+- **Settings page**: Runtime configuration of LLM providers and preferences
+- **Semantic graph visualization**: Interactive knowledge graph explorer
 
 ## Architecture
 
@@ -104,8 +112,16 @@ cognitex init-phase3  # Initialize schema
 Key environment variables in `.env`:
 
 ```bash
-# LLM Provider
-TOGETHER_API_KEY=your_key_here
+# LLM Providers (multi-provider support)
+LLM_PROVIDER=anthropic                   # anthropic, openai, together, google
+ANTHROPIC_API_KEY=your_key_here          # For Claude models
+OPENAI_API_KEY=your_key_here             # For GPT models
+TOGETHER_API_KEY=your_key_here           # For open-source models
+GOOGLE_API_KEY=your_key_here             # For Gemini models
+
+# Embedding Provider
+EMBEDDING_PROVIDER=together              # together, openai
+EMBEDDING_MODEL=togethercomputer/m2-bert-80M-8k-retrieval
 
 # Neo4j
 NEO4J_URI=bolt://localhost:7687
@@ -120,6 +136,9 @@ REDIS_URL=redis://localhost:6379
 
 # Google APIs
 GOOGLE_PUBSUB_TOPIC=projects/your-project/topics/gmail-push
+
+# Drive Priority Folders (comma-separated, for deep indexing)
+PRIORITY_FOLDERS=projects,meeting_notes,important_docs
 
 # Discord (optional, for notifications)
 DISCORD_BOT_TOKEN=your_token
@@ -142,13 +161,17 @@ cognitex auth              # Authenticate with Google
 # Sync data
 cognitex sync              # Sync Gmail
 cognitex calendar          # Sync Calendar
-cognitex drive-sync        # Sync Drive
+cognitex drive-sync        # Sync Drive metadata
+cognitex drive-sync --index-priority  # Sync and deep-index priority folders
+cognitex deep-index        # Deep index priority folders (metadata-first)
 cognitex github-sync owner/repo  # Sync GitHub repo
+cognitex coding-sessions   # Sync Claude Code session summaries
 
 # Classify and process
 cognitex classify          # Classify emails with LLM
 cognitex infer-tasks       # Extract tasks from emails
 cognitex analyze-chunks    # Build semantic graph from documents
+cognitex link-project      # Auto-link documents to projects
 
 # Task management
 cognitex tasks             # List tasks
@@ -179,11 +202,15 @@ cognitex web
 Navigate to `http://localhost:8080`:
 - **Dashboard**: Overview of tasks, projects, goals
 - **Today**: Today's schedule and energy forecast
-- **Tasks/Projects/Goals**: CRUD management
-- **Documents**: Semantic search
+- **Tasks**: Task management with expandable subtasks
+- **Projects/Goals**: Project and goal management
+- **Ideas**: Scratch pad for quick idea capture, convert to tasks
+- **Documents**: Semantic search across indexed content
+- **Graph**: Interactive knowledge graph visualization
 - **Twin**: Review agent-drafted emails and suggestions
 - **Agent Log**: Action history
 - **State**: Current operating mode
+- **Settings**: Configure LLM providers and preferences
 
 ### Autonomous Agent
 
@@ -235,8 +262,12 @@ cognitex/
 │   │   ├── gmail.py
 │   │   ├── calendar.py
 │   │   ├── drive.py
+│   │   ├── drive_metadata.py  # Metadata-first Drive indexing
 │   │   ├── github.py
-│   │   └── llm.py
+│   │   ├── ideas.py           # Ideas scratch pad
+│   │   ├── ingestion.py       # Document chunking & embedding
+│   │   ├── linking.py         # Auto-linking documents to projects
+│   │   └── llm.py             # Multi-provider LLM service
 │   └── web/             # Web dashboard
 │       ├── app.py
 │       └── templates/
@@ -254,10 +285,13 @@ cognitex/
 | Task | Action items with priority and energy cost |
 | Project | Collections of related tasks |
 | Goal | High-level objectives |
+| Idea | Quick-capture thoughts (scratch pad) |
 | Document | Drive files with embeddings |
+| DocumentChunk | Chunked document sections for deep indexing |
 | CalendarEvent | Calendar entries |
 | Repository | GitHub repos |
 | CodeFile | Source code with embeddings |
+| CodingSession | Claude Code session summaries |
 | Topic | Extracted topics from documents |
 | Concept | Extracted concepts |
 | EmailDraft | Agent-drafted replies |
@@ -270,6 +304,7 @@ Implementation blueprints and status tracking:
 - `docs/cognitex_phase_3_blueprint.md` - Phase 3: Executive Function Layer
 - `docs/PHASE3_STATUS.md` - Phase 3 implementation status
 - `docs/PHASE4_MEMORY_BLUEPRINT.md` - Phase 4: Adaptive Memory & Learning System
+- `docs/ROADMAP.md` - Future development roadmap
 
 ## Development
 
@@ -290,7 +325,9 @@ MIT License - see LICENSE file for details.
 
 ## Acknowledgments
 
-- Built with Claude (Anthropic) for LLM capabilities
-- Uses Together.ai for embeddings
+- Multi-provider LLM support: Anthropic Claude, OpenAI GPT, Google Gemini, Together.ai
+- Embeddings via Together.ai or OpenAI
 - Neo4j for graph database
-- FastAPI for web framework
+- PostgreSQL with pgvector for vector search
+- FastAPI + HTMX for web framework
+- Jinja2 for server-side templates
