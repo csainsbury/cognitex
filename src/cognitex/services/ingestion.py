@@ -949,14 +949,45 @@ async def run_drive_metadata_sync(cleanup_deleted: bool = True) -> dict:
             to_delete = existing_ids - drive_ids
 
             if to_delete:
-                # Delete orphaned documents
+                ids_list = list(to_delete)
+
+                # Delete from Neo4j
                 await session.run("""
                     MATCH (d:Document)
                     WHERE d.drive_id IN $ids
                     DETACH DELETE d
-                """, {"ids": list(to_delete)})
-                deleted_count = len(to_delete)
-                logger.info("Deleted orphaned documents", count=deleted_count)
+                """, {"ids": ids_list})
+                deleted_count = len(ids_list)
+
+                # Also delete from Postgres (vector store) to prevent ghost results
+                from cognitex.db.postgres import get_session as get_pg_session
+
+                async for pg_session in get_pg_session():
+                    # Delete document chunks
+                    await pg_session.execute(
+                        text("DELETE FROM document_chunks WHERE drive_id = ANY(:ids)"),
+                        {"ids": ids_list}
+                    )
+                    # Delete document content
+                    await pg_session.execute(
+                        text("DELETE FROM document_content WHERE drive_id = ANY(:ids)"),
+                        {"ids": ids_list}
+                    )
+                    # Delete document embeddings
+                    await pg_session.execute(
+                        text("DELETE FROM embeddings WHERE entity_type = 'document' AND entity_id = ANY(:ids)"),
+                        {"ids": ids_list}
+                    )
+                    # Delete chunk embeddings (entity_id format: "drive_id:chunk_index")
+                    for drive_id in ids_list:
+                        await pg_session.execute(
+                            text("DELETE FROM embeddings WHERE entity_type = 'chunk' AND entity_id LIKE :pattern"),
+                            {"pattern": f"{drive_id}:%"}
+                        )
+                    await pg_session.commit()
+                    break
+
+                logger.info("Deleted orphaned documents and embeddings", count=deleted_count)
 
         stats["deleted"] = deleted_count
 
