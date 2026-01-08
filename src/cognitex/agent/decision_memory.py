@@ -364,6 +364,15 @@ class DecisionTraceMemory:
 
             if row:
                 logger.info("Recorded feedback", trace_id=trace_id, status=status, quality=quality_score)
+
+                # Real-time rule reinforcement
+                try:
+                    await self._reinforce_rules_from_feedback(
+                        session, trace_id, status, quality_score
+                    )
+                except Exception as e:
+                    logger.warning("Rule reinforcement failed", error=str(e))
+
                 return True
             return False
 
@@ -405,6 +414,99 @@ class DecisionTraceMemory:
             score = min(score + 0.1, 1.0)  # Quick approval = good
 
         return round(score, 2)
+
+    async def _reinforce_rules_from_feedback(
+        self,
+        session: AsyncSession,
+        trace_id: str,
+        status: str,
+        quality_score: float,
+    ) -> None:
+        """
+        Real-time rule reinforcement based on feedback.
+
+        When a decision is approved/rejected:
+        1. Find applicable preference rules from the trace context
+        2. Update rule success rates immediately
+        3. Promote/demote rules that cross thresholds
+        """
+        # Get the trace to find applicable rules
+        result = await session.execute(text("""
+            SELECT context, action_type
+            FROM decision_traces
+            WHERE id = :trace_id
+        """), {"trace_id": trace_id})
+        row = result.fetchone()
+
+        if not row or not row.context:
+            return
+
+        context = json.loads(row.context) if isinstance(row.context, str) else row.context
+        applicable_rules = context.get("applicable_rules", [])
+
+        if not applicable_rules:
+            return
+
+        # Update each applicable rule
+        for rule_info in applicable_rules:
+            rule_id = rule_info.get("rule_id") if isinstance(rule_info, dict) else rule_info
+
+            if not rule_id:
+                continue
+
+            # Update rule statistics
+            is_success = quality_score >= 0.7
+
+            await session.execute(text("""
+                UPDATE preference_rules
+                SET applications = applications + 1,
+                    successful_applications = successful_applications + CASE WHEN :is_success THEN 1 ELSE 0 END,
+                    success_rate = CAST(
+                        (successful_applications + CASE WHEN :is_success THEN 1 ELSE 0 END)
+                        AS FLOAT
+                    ) / NULLIF(applications + 1, 0),
+                    last_fired_at = NOW()
+                WHERE id = :rule_id
+            """), {"rule_id": rule_id, "is_success": is_success})
+
+            # Check for lifecycle promotion/demotion
+            rule_result = await session.execute(text("""
+                SELECT id, lifecycle, applications, success_rate
+                FROM preference_rules
+                WHERE id = :rule_id
+            """), {"rule_id": rule_id})
+            rule = rule_result.fetchone()
+
+            if rule:
+                new_lifecycle = rule.lifecycle
+
+                # Promotion: candidate -> active -> validated
+                if rule.applications >= 3 and rule.success_rate >= 0.5 and rule.lifecycle == "candidate":
+                    new_lifecycle = "active"
+                elif rule.applications >= 10 and rule.success_rate >= 0.7 and rule.lifecycle == "active":
+                    new_lifecycle = "validated"
+
+                # Demotion: low success rate
+                if rule.applications >= 5 and rule.success_rate < 0.3:
+                    new_lifecycle = "deprecated"
+
+                if new_lifecycle != rule.lifecycle:
+                    await session.execute(text("""
+                        UPDATE preference_rules
+                        SET lifecycle = :lifecycle
+                        WHERE id = :rule_id
+                    """), {"rule_id": rule_id, "lifecycle": new_lifecycle})
+
+                    logger.info(
+                        "Rule lifecycle updated",
+                        rule_id=rule_id,
+                        from_lifecycle=rule.lifecycle,
+                        to_lifecycle=new_lifecycle,
+                        applications=rule.applications,
+                        success_rate=rule.success_rate,
+                    )
+
+        await session.commit()
 
     async def find_similar_decisions(
         self,
@@ -1002,6 +1104,111 @@ class PreferenceRuleMemory:
                 "avg_success_rate": round(row.avg_success_rate * 100, 1) if row.avg_success_rate else None,
                 "total_applications": row.total_applications or 0,
             }
+
+    async def get_weighted_rules_for_prompt(self, limit: int = 10) -> list[dict]:
+        """
+        Get quality-weighted rules for injection into agent prompt.
+
+        Rules are ranked by: success_rate * log(applications + 1)
+        This balances proven reliability with evidence strength.
+
+        Args:
+            limit: Maximum number of rules to return
+
+        Returns:
+            List of rules formatted for prompt injection with:
+            - rule_name: Human-readable name
+            - guidance: Actionable instruction
+            - confidence: Combined score
+            - lifecycle: validation stage
+        """
+        async for session in self._get_session():
+            # Get active/validated rules ranked by weighted score
+            result = await session.execute(text("""
+                SELECT
+                    id, rule_name, rule_type, condition, preference,
+                    lifecycle, confidence, applications, success_rate,
+                    -- Weighted score: success_rate * log(evidence + 1)
+                    COALESCE(success_rate, 0.5) * LN(COALESCE(applications, 0) + 2) as weighted_score
+                FROM preference_rules
+                WHERE is_active = true
+                  AND lifecycle IN ('active', 'validated')
+                  AND COALESCE(applications, 0) >= 2
+                ORDER BY
+                    -- Validated rules first, then by weighted score
+                    CASE WHEN lifecycle = 'validated' THEN 0 ELSE 1 END,
+                    weighted_score DESC
+                LIMIT :limit
+            """), {"limit": limit})
+
+            rules = []
+            for row in result.fetchall():
+                # Format the rule as actionable guidance
+                condition = row.condition if isinstance(row.condition, dict) else json.loads(row.condition or "{}")
+                preference = row.preference if isinstance(row.preference, dict) else json.loads(row.preference or "{}")
+
+                # Build human-readable guidance
+                guidance = self._format_rule_as_guidance(
+                    row.rule_name, row.rule_type, condition, preference
+                )
+
+                rules.append({
+                    "rule_id": row.id,
+                    "rule_name": row.rule_name or f"Rule {row.id[:8]}",
+                    "guidance": guidance,
+                    "lifecycle": row.lifecycle,
+                    "success_rate": round(row.success_rate * 100, 0) if row.success_rate else None,
+                    "applications": row.applications or 0,
+                    "weighted_score": round(row.weighted_score, 2) if row.weighted_score else 0,
+                })
+
+            return rules
+
+    def _format_rule_as_guidance(
+        self,
+        rule_name: str | None,
+        rule_type: str,
+        condition: dict,
+        preference: dict,
+    ) -> str:
+        """Format a rule as actionable guidance for the agent prompt."""
+        # Start with the rule name if available
+        if rule_name:
+            parts = [rule_name]
+        else:
+            parts = []
+
+        # Describe the condition (when it applies)
+        condition_parts = []
+        if condition.get("trigger_type"):
+            condition_parts.append(f"for {condition['trigger_type']}s")
+        if condition.get("sender_relationship"):
+            condition_parts.append(f"from {condition['sender_relationship']}s")
+        if condition.get("time_of_day"):
+            condition_parts.append(f"during {condition['time_of_day']}")
+        if condition.get("is_urgent"):
+            condition_parts.append("when urgent")
+
+        if condition_parts:
+            parts.append(f"({', '.join(condition_parts)})")
+
+        # Describe the preference (what to do)
+        pref_parts = []
+        if preference.get("tone"):
+            pref_parts.append(f"use {preference['tone']} tone")
+        if preference.get("response_speed"):
+            pref_parts.append(f"respond {preference['response_speed']}")
+        if preference.get("action"):
+            pref_parts.append(preference["action"])
+        if preference.get("priority"):
+            pref_parts.append(f"set priority to {preference['priority']}")
+        if preference.get("avoid"):
+            pref_parts.append(f"avoid: {preference['avoid']}")
+
+        if pref_parts:
+            parts.append(": " + ", ".join(pref_parts))
+
+        return " ".join(parts) if parts else f"{rule_type} rule"
 
 
 # =============================================================================

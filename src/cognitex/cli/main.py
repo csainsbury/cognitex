@@ -3397,6 +3397,293 @@ def check_replies(
     asyncio.run(check_for_completions())
 
 
+@app.command("classify-emails")
+def classify_emails(
+    days: int = typer.Option(7, "--days", "-d", help="Number of days to look back"),
+    batch_size: int = typer.Option(20, "--batch-size", "-b", help="Process in batches of this size"),
+    limit: int = typer.Option(500, "--limit", "-l", help="Maximum emails to process (0 for no limit)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be classified without doing it"),
+    force: bool = typer.Option(False, "--force", "-f", help="Re-classify emails that already have classification"),
+) -> None:
+    """Classify existing emails using LLM.
+
+    Backfills email classification for emails that were ingested without
+    classification. This enables the autonomous agent to detect actionable
+    emails and draft responses.
+    """
+    async def run_classification():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j, run_query
+        from cognitex.services.llm import get_llm_service
+
+        await init_neo4j()
+
+        try:
+            # Query emails needing classification
+            limit_clause = f"LIMIT {limit}" if limit > 0 else ""
+            if force:
+                query = f"""
+                MATCH (e:Email)
+                WHERE e.date >= datetime() - duration({{days: $days}})
+                  AND NOT (e)-[:SENT_BY]->(:Person {{is_user: true}})
+                RETURN e.gmail_id as gmail_id, e.subject as subject, e.snippet as snippet,
+                       e.classification as current_classification
+                ORDER BY e.date DESC
+                {limit_clause}
+                """
+            else:
+                query = f"""
+                MATCH (e:Email)
+                WHERE e.date >= datetime() - duration({{days: $days}})
+                  AND e.classification IS NULL
+                  AND NOT (e)-[:SENT_BY]->(:Person {{is_user: true}})
+                RETURN e.gmail_id as gmail_id, e.subject as subject, e.snippet as snippet
+                ORDER BY e.date DESC
+                {limit_clause}
+                """
+
+            emails = await run_query(query, {"days": days})
+
+            if not emails:
+                console.print("[green]No emails need classification.[/green]")
+                return
+
+            console.print(f"Found [cyan]{len(emails)}[/cyan] emails to classify")
+
+            if dry_run:
+                console.print("[yellow]Dry run - showing first 10 emails:[/yellow]")
+                for e in emails[:10]:
+                    subj = (e.get("subject") or "(no subject)")[:60]
+                    current = e.get("current_classification", "none")
+                    console.print(f"  • {subj} [dim][{current}][/dim]")
+                return
+
+            # Process in batches
+            llm = get_llm_service()
+            classified = 0
+            errors = 0
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                console=console,
+            ) as progress:
+                task = progress.add_task("Classifying emails...", total=len(emails))
+
+                for i in range(0, len(emails), batch_size):
+                    batch = emails[i:i + batch_size]
+
+                    for email in batch:
+                        try:
+                            # Build email data for classification
+                            email_data = {
+                                "gmail_id": email["gmail_id"],
+                                "subject": email.get("subject", ""),
+                                "snippet": email.get("snippet", ""),
+                                "sender_email": "",  # Not available in query
+                                "sender_name": "",
+                            }
+
+                            # Classify
+                            result = await llm.classify_email(email_data)
+
+                            # Update Neo4j (need write session)
+                            from cognitex.db.neo4j import get_neo4j_session
+                            update_query = """
+                            MATCH (e:Email {gmail_id: $gmail_id})
+                            SET e.classification = $classification,
+                                e.urgency = $urgency,
+                                e.action_required = $action_required,
+                                e.sentiment = $sentiment
+                            """
+                            async for write_session in get_neo4j_session(access_mode="WRITE"):
+                                await write_session.run(update_query, {
+                                    "gmail_id": email["gmail_id"],
+                                    "classification": result.get("classification"),
+                                    "urgency": result.get("urgency"),
+                                    "action_required": result.get("action_required", False),
+                                    "sentiment": result.get("sentiment"),
+                                })
+                                break
+
+                            classified += 1
+                            progress.update(task, advance=1)
+
+                        except Exception as e:
+                            errors += 1
+                            progress.update(task, advance=1)
+                            logger.warning(
+                                "Failed to classify email",
+                                gmail_id=email.get("gmail_id"),
+                                error=str(e),
+                            )
+
+                    # Brief pause between batches to avoid rate limits
+                    await asyncio.sleep(0.5)
+
+            # Summary
+            console.print(f"\n[bold]Classification complete:[/bold]")
+            console.print(f"  Classified: [green]{classified}[/green]")
+            if errors:
+                console.print(f"  Errors: [red]{errors}[/red]")
+
+            # Show classification breakdown
+            stats_query = """
+            MATCH (e:Email)
+            WHERE e.date >= datetime() - duration({days: $days})
+              AND e.classification IS NOT NULL
+            RETURN e.classification as classification, COUNT(*) as count
+            ORDER BY count DESC
+            """
+            stats = await run_query(stats_query, {"days": days})
+
+            if stats:
+                console.print(f"\n[bold]Classification breakdown (last {days} days):[/bold]")
+                for s in stats:
+                    console.print(f"  {s['classification']}: {s['count']}")
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(run_classification())
+
+
+@app.command("backfill-labels")
+def backfill_labels(
+    limit: int = typer.Option(500, "--limit", "-l", help="Maximum emails to process"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be updated"),
+) -> None:
+    """Backfill Gmail labels for existing emails.
+
+    Fetches label information from Gmail API and updates Neo4j Email nodes
+    with labels and is_sent status. This enables filtering to inbox-only emails.
+    """
+    async def run_backfill():
+        from cognitex.db.neo4j import init_neo4j, close_neo4j, run_query, get_neo4j_session
+        from cognitex.services.gmail import GmailService
+
+        await init_neo4j()
+
+        try:
+            # Get emails without labels
+            query = f"""
+            MATCH (e:Email)
+            WHERE e.labels IS NULL OR e.labels = []
+            RETURN e.gmail_id as gmail_id, e.subject as subject
+            ORDER BY e.date DESC
+            LIMIT {limit}
+            """
+            emails = await run_query(query, {})
+
+            if not emails:
+                console.print("[green]All emails already have labels.[/green]")
+                return
+
+            console.print(f"Found [cyan]{len(emails)}[/cyan] emails needing label backfill")
+
+            if dry_run:
+                console.print("[yellow]Dry run - showing first 10:[/yellow]")
+                for e in emails[:10]:
+                    subj = (e.get("subject") or "(no subject)")[:60]
+                    console.print(f"  • {subj}")
+                return
+
+            # Initialize Gmail service
+            gmail = GmailService()
+            user_email = gmail.get_profile().get("emailAddress", "").lower()
+
+            updated = 0
+            errors = 0
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                console=console,
+            ) as progress:
+                task = progress.add_task("Fetching labels...", total=len(emails))
+
+                for email in emails:
+                    try:
+                        gmail_id = email["gmail_id"]
+
+                        # Fetch message from Gmail to get labels
+                        msg = gmail.get_message(gmail_id, format="metadata")
+                        if not msg:
+                            progress.update(task, advance=1)
+                            continue
+
+                        labels = msg.get("labelIds", [])
+
+                        # Determine is_sent from labels or sender
+                        headers = {h["name"].lower(): h["value"] for h in msg.get("payload", {}).get("headers", [])}
+                        from_header = headers.get("from", "")
+                        sender_email = ""
+                        if "<" in from_header:
+                            sender_email = from_header.split("<")[1].split(">")[0].lower()
+                        else:
+                            sender_email = from_header.lower()
+
+                        is_sent = "SENT" in labels or sender_email == user_email
+
+                        # Update Neo4j
+                        update_query = """
+                        MATCH (e:Email {gmail_id: $gmail_id})
+                        SET e.labels = $labels,
+                            e.is_sent = $is_sent
+                        """
+                        async for write_session in get_neo4j_session(access_mode="WRITE"):
+                            await write_session.run(update_query, {
+                                "gmail_id": gmail_id,
+                                "labels": labels,
+                                "is_sent": is_sent,
+                            })
+                            break
+
+                        updated += 1
+                        progress.update(task, advance=1)
+
+                        # Rate limit
+                        await asyncio.sleep(0.1)
+
+                    except Exception as e:
+                        errors += 1
+                        progress.update(task, advance=1)
+                        logger.warning(
+                            "Failed to fetch labels",
+                            gmail_id=email.get("gmail_id"),
+                            error=str(e),
+                        )
+
+            console.print(f"\n[bold]Label backfill complete:[/bold]")
+            console.print(f"  Updated: [green]{updated}[/green]")
+            if errors:
+                console.print(f"  Errors: [red]{errors}[/red]")
+
+            # Show label distribution
+            stats_query = """
+            MATCH (e:Email)
+            WHERE e.labels IS NOT NULL
+            UNWIND e.labels as label
+            RETURN label, COUNT(*) as count
+            ORDER BY count DESC
+            LIMIT 10
+            """
+            stats = await run_query(stats_query, {})
+
+            if stats:
+                console.print(f"\n[bold]Top 10 labels:[/bold]")
+                for s in stats:
+                    console.print(f"  {s['label']}: {s['count']}")
+
+        finally:
+            await close_neo4j()
+
+    asyncio.run(run_backfill())
+
+
 # ============================================================================
 # GitHub Integration
 # ============================================================================
@@ -5535,6 +5822,82 @@ def link_suggestions_cmd(
             console.print(table)
 
             console.print("\n[dim]Use --approve ID or --reject ID to manage suggestions[/dim]")
+
+        finally:
+            await close_postgres()
+            await close_neo4j()
+
+    asyncio.run(run())
+
+
+@app.command("sync-graph")
+def sync_graph_cmd(
+    limit: int = typer.Option(500, "--limit", "-l", help="Maximum files to sync"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be synced without doing it"),
+) -> None:
+    """Sync PostgreSQL drive_files to Neo4j Document nodes.
+
+    Ensures that all indexed Drive files have corresponding Document nodes
+    in the Neo4j graph. This fixes "document does not exist" errors when
+    the autonomous agent tries to link documents.
+    """
+    async def run():
+        from cognitex.db.postgres import init_postgres, close_postgres, get_session
+        from cognitex.db.neo4j import init_neo4j, close_neo4j, run_query
+        from cognitex.services.linking import sync_drive_to_neo4j
+        from sqlalchemy import text
+
+        await init_postgres()
+        await init_neo4j()
+
+        try:
+            if dry_run:
+                # Check what would be synced
+                async for session in get_session():
+                    # Query drive_files count
+                    result = await session.execute(text("""
+                        SELECT COUNT(*) as total,
+                               SUM(CASE WHEN is_indexed THEN 1 ELSE 0 END) as indexed
+                        FROM drive_files
+                    """))
+                    pg_stats = result.mappings().one()
+
+                    # Query Neo4j Document count
+                    neo_result = await run_query("MATCH (d:Document) RETURN COUNT(d) as count", {})
+                    neo_count = neo_result[0]["count"] if neo_result else 0
+
+                    console.print(f"\n[bold]Graph Sync Status:[/bold]")
+                    console.print(f"  PostgreSQL drive_files: {pg_stats['total']} total, {pg_stats['indexed']} indexed")
+                    console.print(f"  Neo4j Document nodes: {neo_count}")
+
+                    # Sample of files that would be synced
+                    sample_result = await session.execute(text("""
+                        SELECT df.drive_id, df.name
+                        FROM drive_files df
+                        WHERE df.is_indexed = true
+                        ORDER BY df.modified_time DESC
+                        LIMIT 10
+                    """))
+                    samples = sample_result.mappings().all()
+
+                    console.print(f"\n[yellow]Sample files that would be checked:[/yellow]")
+                    for f in samples:
+                        console.print(f"  • {f['name'][:50]} [dim]({f['drive_id'][:12]}...)[/dim]")
+
+                return
+
+            # Perform sync
+            console.print("Syncing Drive files to Neo4j graph...")
+
+            async for session in get_session():
+                stats = await sync_drive_to_neo4j(session, limit=limit)
+
+                console.print(f"\n[bold]Sync complete:[/bold]")
+                console.print(f"  Files checked: {stats['checked']}")
+                console.print(f"  Nodes created: [green]{stats['created']}[/green]")
+                console.print(f"  Already existed: {stats['already_exists']}")
+                if stats['errors']:
+                    console.print(f"  Errors: [red]{stats['errors']}[/red]")
 
         finally:
             await close_postgres()

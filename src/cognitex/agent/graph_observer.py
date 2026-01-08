@@ -666,7 +666,15 @@ class GraphObserver:
           AND NOT (e)<-[:REPLY_TO]-(:EmailDraft)
           AND NOT (e)<-[:DERIVED_FROM]-(:Task)
           AND NOT (e)-[:SENT_BY]->(:Person {is_user: true})
+          AND COALESCE(e.is_sent, false) = false
+          // Only process INBOX emails (not filtered/archived)
+          // Allow emails without labels (pre-backfill) OR with INBOX label
+          AND (e.labels IS NULL OR size(e.labels) = 0 OR 'INBOX' IN e.labels)
+          // Skip emails already flagged for review in the last 7 days
+          AND (e.flagged_at IS NULL OR e.flagged_at < datetime() - duration({days: 7}))
         OPTIONAL MATCH (e)-[:SENT_BY]->(sender:Person)
+        // Extra safety: exclude if sender matches user email
+        WHERE sender IS NULL OR sender.email <> 'chris@sainsbury.im'
         RETURN
             e.gmail_id as id,
             e.subject as subject,
@@ -1277,3 +1285,430 @@ class GraphObserver:
         summary["insights"] = insights
 
         return summary
+
+    # =========================================================================
+    # Phase 5.2: Intelligent Calendar Blocking
+    # =========================================================================
+
+    async def get_focus_block_suggestions(
+        self,
+        max_suggestions: int = 3,
+    ) -> list[dict]:
+        """
+        Analyze tasks and suggest optimal focus blocks for deep work.
+
+        Considers:
+        - Tasks that need focused time (high energy cost, complex)
+        - Upcoming deadlines that need attention
+        - User's temporal energy patterns (peak hours)
+        - Current calendar availability
+
+        Returns:
+            List of suggested focus blocks with timing, duration, and target task/project
+        """
+        from cognitex.db.neo4j import run_query
+        from datetime import datetime, timedelta
+
+        suggestions = []
+
+        try:
+            # 1. Get high-energy tasks that need focus time
+            focus_tasks_query = """
+            MATCH (t:Task)
+            WHERE t.status IN ['pending', 'in_progress']
+              AND (
+                  t.energy_cost >= 3 OR
+                  t.focus_required = true OR
+                  (t.due IS NOT NULL AND t.due <= date() + duration({days: 3}))
+              )
+            OPTIONAL MATCH (t)-[:BELONGS_TO]->(p:Project)
+            OPTIONAL MATCH (p)-[:PART_OF]->(g:Goal)
+            RETURN
+                t.id as task_id,
+                t.title as task_title,
+                t.status as status,
+                t.due as due_date,
+                t.energy_cost as energy_cost,
+                t.estimated_minutes as estimated_minutes,
+                p.id as project_id,
+                p.title as project_title,
+                g.title as goal_title,
+                CASE
+                    WHEN t.due IS NOT NULL AND t.due <= date() THEN 5
+                    WHEN t.due IS NOT NULL AND t.due <= date() + duration({days: 1}) THEN 4
+                    WHEN t.due IS NOT NULL AND t.due <= date() + duration({days: 3}) THEN 3
+                    WHEN t.energy_cost >= 4 THEN 2
+                    ELSE 1
+                END as urgency_score
+            ORDER BY urgency_score DESC, t.energy_cost DESC
+            LIMIT 10
+            """
+            focus_tasks = await run_query(focus_tasks_query, {})
+
+            if not focus_tasks:
+                return []
+
+            # 2. Get user's peak hours from temporal model
+            try:
+                from cognitex.agent.state_model import get_temporal_model
+                temporal = get_temporal_model()
+                peak_hours = temporal.get_peak_hours()
+            except Exception:
+                peak_hours = [9, 10, 11, 14, 15]  # Default peak hours
+
+            # 3. Check calendar for free slots
+            try:
+                from cognitex.services.calendar import CalendarService
+                import asyncio
+
+                cal = CalendarService()
+                now = datetime.now()
+                tomorrow = now + timedelta(days=1)
+
+                # Get events for next 3 days
+                events_result = await asyncio.to_thread(
+                    cal.list_events,
+                    time_min=now,
+                    time_max=now + timedelta(days=3),
+                )
+                busy_slots = []
+                for event in events_result.get("items", []):
+                    start = event.get("start", {}).get("dateTime")
+                    end = event.get("end", {}).get("dateTime")
+                    if start and end:
+                        busy_slots.append({
+                            "start": datetime.fromisoformat(start.replace("Z", "+00:00").replace("+00:00", "")),
+                            "end": datetime.fromisoformat(end.replace("Z", "+00:00").replace("+00:00", "")),
+                        })
+            except Exception as e:
+                logger.debug("Could not check calendar", error=str(e))
+                busy_slots = []
+
+            # 4. Generate suggestions for top tasks
+            for i, task in enumerate(focus_tasks[:max_suggestions]):
+                # Determine duration
+                est_minutes = task.get("estimated_minutes") or 90
+                duration_hours = min(max(est_minutes / 60, 1), 3)  # 1-3 hours
+
+                # Find best time slot
+                suggested_time = self._find_best_slot(
+                    peak_hours=peak_hours,
+                    busy_slots=busy_slots,
+                    duration_hours=duration_hours,
+                    days_ahead=i,  # Spread across days
+                )
+
+                suggestions.append({
+                    "task_id": task.get("task_id"),
+                    "task_title": task.get("task_title"),
+                    "project_id": task.get("project_id"),
+                    "project_title": task.get("project_title"),
+                    "goal_title": task.get("goal_title"),
+                    "suggested_time": suggested_time,
+                    "duration_hours": duration_hours,
+                    "urgency_score": task.get("urgency_score"),
+                    "reason": self._generate_block_reason(task),
+                })
+
+            return suggestions
+
+        except Exception as e:
+            logger.warning("Failed to get focus block suggestions", error=str(e))
+            return []
+
+    def _find_best_slot(
+        self,
+        peak_hours: list[int],
+        busy_slots: list[dict],
+        duration_hours: float,
+        days_ahead: int = 0,
+    ) -> str:
+        """Find the best available slot for a focus block."""
+        from datetime import datetime, timedelta
+
+        base_date = datetime.now().date() + timedelta(days=days_ahead + 1)
+
+        # Try peak hours first, then fall back to any free time
+        for hour in peak_hours + list(range(8, 18)):
+            candidate_start = datetime.combine(base_date, datetime.min.time().replace(hour=hour))
+            candidate_end = candidate_start + timedelta(hours=duration_hours)
+
+            # Check if this slot is free
+            is_free = True
+            for slot in busy_slots:
+                if (candidate_start < slot["end"] and candidate_end > slot["start"]):
+                    is_free = False
+                    break
+
+            if is_free:
+                return candidate_start.isoformat()
+
+        # Fallback to next day morning
+        fallback = datetime.combine(
+            base_date + timedelta(days=1),
+            datetime.min.time().replace(hour=9)
+        )
+        return fallback.isoformat()
+
+    def _generate_block_reason(self, task: dict) -> str:
+        """Generate a reason string for why this focus block is suggested."""
+        reasons = []
+
+        if task.get("due_date"):
+            reasons.append(f"deadline approaching ({task['due_date']})")
+        if task.get("energy_cost", 0) >= 4:
+            reasons.append("high complexity task")
+        if task.get("goal_title"):
+            reasons.append(f"contributes to goal: {task['goal_title']}")
+        if task.get("project_title"):
+            reasons.append(f"for project: {task['project_title']}")
+
+        return "; ".join(reasons) if reasons else "needs focused attention"
+
+    # =========================================================================
+    # Phase 5.3: Proactive Task Suggestions
+    # =========================================================================
+
+    async def get_proactive_task_insights(self) -> dict:
+        """
+        Analyze task/project state to generate proactive suggestions.
+
+        Identifies:
+        - Stalled projects (no activity 7+ days)
+        - Large tasks needing breakdown
+        - Tasks with dependencies that are blocking others
+        - Chronically deferred tasks
+
+        Returns:
+            Dict with categorized insights and suggested actions
+        """
+        from cognitex.db.neo4j import run_query
+        from datetime import datetime, timedelta
+
+        insights = {
+            "stalled_projects": [],
+            "large_tasks_needing_breakdown": [],
+            "blocking_tasks": [],
+            "chronic_deferrals": [],
+            "summary": {},
+        }
+
+        try:
+            # 1. Stalled projects (no task updates in 7+ days)
+            stalled_query = """
+            MATCH (p:Project)
+            WHERE p.status IN ['active', 'in_progress']
+            OPTIONAL MATCH (p)<-[:BELONGS_TO]-(t:Task)
+            WITH p, MAX(t.updated_at) as last_task_update, COUNT(t) as task_count
+            WHERE
+                last_task_update IS NULL OR
+                last_task_update < datetime() - duration({days: 7})
+            OPTIONAL MATCH (p)-[:PART_OF]->(g:Goal)
+            RETURN
+                p.id as id,
+                p.title as title,
+                p.status as status,
+                g.title as goal_title,
+                task_count,
+                last_task_update,
+                duration.between(COALESCE(last_task_update, p.created_at), datetime()).days as days_stalled
+            ORDER BY days_stalled DESC
+            LIMIT 5
+            """
+            insights["stalled_projects"] = await run_query(stalled_query, {})
+
+            # 2. Large tasks that might need breakdown
+            large_tasks_query = """
+            MATCH (t:Task)
+            WHERE t.status IN ['pending', 'in_progress']
+              AND (
+                  t.estimated_minutes > 180 OR
+                  t.energy_cost >= 4 OR
+                  t.complexity >= 4
+              )
+            OPTIONAL MATCH (t)-[:BELONGS_TO]->(p:Project)
+            OPTIONAL MATCH (t)<-[:SUBTASK_OF]-(subtask:Task)
+            WITH t, p, COUNT(subtask) as subtask_count
+            WHERE subtask_count = 0  // No existing subtasks
+            RETURN
+                t.id as id,
+                t.title as title,
+                t.estimated_minutes as estimated_minutes,
+                t.energy_cost as energy_cost,
+                t.complexity as complexity,
+                p.title as project_title,
+                CASE
+                    WHEN t.estimated_minutes > 180 THEN 'Duration > 3 hours'
+                    WHEN t.energy_cost >= 4 THEN 'High energy cost'
+                    ELSE 'High complexity'
+                END as breakdown_reason
+            ORDER BY
+                COALESCE(t.estimated_minutes, 0) +
+                COALESCE(t.energy_cost, 0) * 30 +
+                COALESCE(t.complexity, 0) * 30 DESC
+            LIMIT 5
+            """
+            insights["large_tasks_needing_breakdown"] = await run_query(large_tasks_query, {})
+
+            # 3. Tasks that are blocking others
+            blocking_query = """
+            MATCH (blocker:Task)-[:BLOCKS]->(blocked:Task)
+            WHERE blocker.status IN ['pending', 'in_progress']
+              AND blocked.status IN ['pending', 'blocked']
+            WITH blocker, COUNT(blocked) as blocks_count,
+                 COLLECT(blocked.title)[0..3] as blocked_tasks
+            WHERE blocks_count > 0
+            OPTIONAL MATCH (blocker)-[:BELONGS_TO]->(p:Project)
+            RETURN
+                blocker.id as id,
+                blocker.title as title,
+                blocker.status as status,
+                blocker.due as due_date,
+                blocks_count,
+                blocked_tasks,
+                p.title as project_title
+            ORDER BY blocks_count DESC
+            LIMIT 5
+            """
+            insights["blocking_tasks"] = await run_query(blocking_query, {})
+
+            # 4. Chronically deferred tasks (3+ deferrals)
+            deferred_query = """
+            MATCH (t:Task)
+            WHERE t.status IN ['pending', 'in_progress', 'deferred']
+              AND t.defer_count >= 3
+            OPTIONAL MATCH (t)-[:BELONGS_TO]->(p:Project)
+            RETURN
+                t.id as id,
+                t.title as title,
+                t.defer_count as defer_count,
+                t.last_deferred_at as last_deferred,
+                t.original_due as original_due,
+                p.title as project_title,
+                CASE
+                    WHEN t.defer_count >= 5 THEN 'Consider removing or redesigning'
+                    WHEN t.defer_count >= 3 THEN 'May need different approach'
+                    ELSE 'Monitor'
+                END as suggestion
+            ORDER BY t.defer_count DESC
+            LIMIT 5
+            """
+            insights["chronic_deferrals"] = await run_query(deferred_query, {})
+
+            # Build summary
+            insights["summary"] = {
+                "stalled_project_count": len(insights["stalled_projects"]),
+                "large_task_count": len(insights["large_tasks_needing_breakdown"]),
+                "blocking_task_count": len(insights["blocking_tasks"]),
+                "chronic_deferral_count": len(insights["chronic_deferrals"]),
+                "needs_attention": (
+                    len(insights["stalled_projects"]) > 0 or
+                    len(insights["blocking_tasks"]) > 0 or
+                    len(insights["chronic_deferrals"]) >= 3
+                ),
+            }
+
+            return insights
+
+        except Exception as e:
+            logger.warning("Failed to get proactive task insights", error=str(e))
+            return insights
+
+    async def extract_commitments_from_emails(
+        self,
+        days_back: int = 7,
+        limit: int = 10,
+    ) -> list[dict]:
+        """
+        Extract implied commitments from recent sent emails.
+
+        Looks for patterns like:
+        - "I'll send you X by Friday"
+        - "Let me get back to you on that"
+        - "I'll review and respond"
+
+        Returns:
+            List of potential commitments with source email and extracted commitment
+        """
+        from cognitex.db.neo4j import run_query
+        from cognitex.services.llm import get_llm_service
+
+        try:
+            # Get recent sent emails
+            sent_query = """
+            MATCH (e:Email)
+            WHERE e.is_sent = true
+              AND e.date > datetime() - duration({days: $days_back})
+            RETURN
+                e.gmail_id as gmail_id,
+                e.subject as subject,
+                coalesce(e.body, e.snippet) as body,
+                e.date as date,
+                e.to as recipient
+            ORDER BY e.date DESC
+            LIMIT $limit
+            """
+            sent_emails = await run_query(sent_query, {
+                "days_back": days_back,
+                "limit": limit
+            })
+
+            if not sent_emails:
+                return []
+
+            # Use LLM to extract commitments
+            llm = get_llm_service()
+            commitments = []
+
+            for email in sent_emails:
+                body = email.get("body", "")
+                if not body or len(body) < 50:
+                    continue
+
+                # Quick heuristic check for commitment language
+                commitment_keywords = [
+                    "i'll", "i will", "let me", "i can", "i should",
+                    "by tomorrow", "by friday", "by monday", "this week",
+                    "get back to you", "send you", "follow up"
+                ]
+                body_lower = body.lower()
+                if not any(kw in body_lower for kw in commitment_keywords):
+                    continue
+
+                # Extract commitments with LLM
+                extract_prompt = f"""Analyze this sent email and extract any commitments or promises made.
+
+EMAIL TO: {email.get('recipient', 'Unknown')}
+SUBJECT: {email.get('subject', 'No subject')}
+
+BODY:
+{body[:2000]}
+
+If commitments exist, return JSON:
+{{"commitments": [{{"action": "what was promised", "deadline": "when (if mentioned)", "recipient": "to whom"}}]}}
+
+If no commitments, return: {{"commitments": []}}
+
+Return ONLY the JSON, nothing else.
+"""
+                try:
+                    result = await llm.complete(extract_prompt, max_tokens=500)
+                    import json
+                    parsed = json.loads(result.strip())
+                    for commitment in parsed.get("commitments", []):
+                        commitments.append({
+                            "source_email_id": email.get("gmail_id"),
+                            "email_subject": email.get("subject"),
+                            "email_date": email.get("date"),
+                            "action": commitment.get("action"),
+                            "deadline": commitment.get("deadline"),
+                            "recipient": commitment.get("recipient") or email.get("recipient"),
+                        })
+                except Exception:
+                    continue
+
+            return commitments[:10]  # Limit results
+
+        except Exception as e:
+            logger.warning("Failed to extract commitments", error=str(e))
+            return []

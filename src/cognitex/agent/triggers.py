@@ -1251,6 +1251,21 @@ class TriggerSystem:
                     mode=new_state.mode.value,
                 )
 
+            # Sync Drive files to Neo4j (maintenance task)
+            try:
+                from cognitex.db.postgres import get_session
+                from cognitex.services.linking import sync_drive_to_neo4j
+
+                async for pg_session in get_session():
+                    sync_stats = await sync_drive_to_neo4j(pg_session, limit=50)
+                    if sync_stats.get("created", 0) > 0:
+                        logger.info(
+                            "Graph sync created new Document nodes",
+                            created=sync_stats["created"],
+                        )
+            except Exception as sync_error:
+                logger.warning("Graph sync failed", error=str(sync_error))
+
         except Exception as e:
             logger.error("Hourly state update failed", error=str(e))
 

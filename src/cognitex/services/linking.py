@@ -1337,6 +1337,120 @@ Rules:
             return []
 
 
+async def sync_drive_to_neo4j(
+    pg_session: AsyncSession,
+    limit: int = 100,
+) -> dict:
+    """
+    Ensure Neo4j Document nodes match PostgreSQL drive_files.
+
+    Finds files in drive_files that don't have corresponding Document nodes
+    in Neo4j and creates them. This fixes the "document does not exist" errors
+    when the autonomous agent tries to link documents.
+
+    Args:
+        pg_session: PostgreSQL async session
+        limit: Maximum files to sync per run
+
+    Returns:
+        Stats dict with counts
+    """
+    stats = {
+        "checked": 0,
+        "created": 0,
+        "already_exists": 0,
+        "errors": 0,
+    }
+
+    try:
+        # Query drive_files (all files are considered indexed if they exist in table)
+        query = text("""
+            SELECT
+                df.id as drive_id,
+                df.name,
+                df.mime_type,
+                df.modified_time,
+                df.folder_path,
+                df.size_bytes,
+                df.owner_email
+            FROM drive_files df
+            ORDER BY df.modified_time DESC NULLS LAST
+            LIMIT :limit
+        """)
+
+        result = await pg_session.execute(query, {"limit": limit})
+        files = result.mappings().all()
+
+        if not files:
+            logger.info("No indexed drive files to sync")
+            return stats
+
+        stats["checked"] = len(files)
+
+        async for neo_session in get_neo4j_session():
+            for file in files:
+                try:
+                    # Check if Document already exists in Neo4j
+                    check_query = """
+                    MATCH (d:Document {drive_id: $drive_id})
+                    RETURN d.drive_id as id
+                    """
+                    check_result = await neo_session.run(
+                        check_query,
+                        drive_id=file["drive_id"]
+                    )
+                    existing = await check_result.single()
+
+                    if existing:
+                        stats["already_exists"] += 1
+                        continue
+
+                    # Create Document node
+                    modified_time = file["modified_time"]
+                    if modified_time:
+                        modified_at = modified_time.isoformat() if hasattr(modified_time, 'isoformat') else str(modified_time)
+                    else:
+                        modified_at = datetime.now().isoformat()
+
+                    await gs.create_document(
+                        neo_session,
+                        drive_id=file["drive_id"],
+                        name=file["name"],
+                        mime_type=file["mime_type"] or "application/octet-stream",
+                        modified_at=modified_at,
+                        folder_path=file.get("folder_path"),
+                        size_bytes=file.get("size_bytes"),
+                        owner_email=file.get("owner_email"),
+                        indexed=True,
+                    )
+
+                    stats["created"] += 1
+                    logger.debug(
+                        "Created Document node",
+                        drive_id=file["drive_id"],
+                        name=file["name"],
+                    )
+
+                except Exception as e:
+                    stats["errors"] += 1
+                    logger.warning(
+                        "Failed to sync document",
+                        drive_id=file.get("drive_id"),
+                        error=str(e),
+                    )
+
+        logger.info(
+            "Drive to Neo4j sync complete",
+            **stats,
+        )
+
+    except Exception as e:
+        logger.error("Drive sync failed", error=str(e))
+        stats["errors"] += 1
+
+    return stats
+
+
 # Singleton
 _linking_service: LinkingService | None = None
 

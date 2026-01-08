@@ -1564,8 +1564,9 @@ async def goal_detail(request: Request, goal_id: str):
 
 
 async def get_today_events() -> list[dict]:
-    """Get calendar events for today."""
+    """Get calendar events for today with context packs."""
     from cognitex.db.neo4j import get_neo4j_session
+    from cognitex.db.phase3_schema import get_context_pack
 
     today = date.today()
     today_start = datetime.combine(today, datetime.min.time())
@@ -1598,8 +1599,24 @@ async def get_today_events() -> list[dict]:
                 end_dt = datetime.fromisoformat(end) if isinstance(end, str) else end
                 event["end_time"] = end_dt.strftime("%H:%M")
 
-            # Context pack will be added later via context pack compiler
-            event["context_pack"] = None
+            # Query context pack for this event
+            event_id = event.get("id")
+            if event_id:
+                pack = await get_context_pack(session, event_id=event_id)
+                if pack:
+                    # Extract key fields for display
+                    event["context_pack"] = {
+                        "objective": pack.get("objective"),
+                        "last_interaction": pack.get("last_touch_recap"),
+                        "artifacts": pack.get("artifact_links", [])[:3],  # Top 3 docs
+                        "readiness_score": pack.get("readiness_score"),
+                        "dont_forget": pack.get("dont_forget", []),
+                    }
+                else:
+                    event["context_pack"] = None
+            else:
+                event["context_pack"] = None
+
             events.append(event)
         break
     return events
@@ -2514,6 +2531,316 @@ async def delete_draft(draft_id: str):
     raise HTTPException(status_code=500, detail="Failed to delete draft")
 
 
+@app.get("/api/twin/drafts/{draft_id}/reject-form")
+async def get_draft_reject_form(draft_id: str):
+    """Get the rejection feedback form for a draft."""
+    # Quick-select rejection reasons
+    reasons = [
+        ("wrong_timing", "Wrong timing / not now"),
+        ("not_relevant", "Not relevant to what I'm doing"),
+        ("bad_suggestion", "Poor draft quality"),
+        ("wrong_recipient", "Wrong recipient or context"),
+        ("will_handle_manually", "I'll handle this myself"),
+        ("other", "Other reason"),
+    ]
+
+    reason_buttons = "\n".join([
+        f'''<button type="button" class="btn btn-outline-secondary btn-sm rejection-reason"
+            data-reason="{code}"
+            hx-post="/api/twin/drafts/{draft_id}/reject"
+            hx-vals='{{"reason": "{code}", "reason_text": "{label}"}}'
+            hx-target="#draft-{draft_id}"
+            hx-swap="outerHTML"
+            style="margin: 0.25rem;">{html.escape(label)}</button>'''
+        for code, label in reasons
+    ])
+
+    return HTMLResponse(f'''
+        <div class="rejection-form" style="background: #fef2f2; padding: 1rem; border-radius: 5px; margin-top: 0.5rem;">
+            <p style="margin-bottom: 0.5rem;"><strong>Why are you rejecting this draft?</strong></p>
+            <div class="rejection-reasons" style="display: flex; flex-wrap: wrap;">
+                {reason_buttons}
+            </div>
+            <button type="button" class="btn btn-link btn-sm"
+                hx-get="/api/twin/drafts/{draft_id}"
+                hx-target="#draft-{draft_id}"
+                hx-swap="outerHTML"
+                style="margin-top: 0.5rem;">Cancel</button>
+        </div>
+    ''')
+
+
+@app.post("/api/twin/drafts/{draft_id}/reject")
+async def reject_draft_with_feedback(
+    draft_id: str,
+    reason: Annotated[str, Form()],
+    reason_text: Annotated[str, Form()] = "",
+):
+    """Reject a draft with feedback reason for learning."""
+    from cognitex.db.neo4j import get_neo4j_session
+    from cognitex.agent.decision_memory import get_decision_memory
+
+    async for session in get_neo4j_session():
+        # Update draft status and store rejection reason
+        query = """
+        MATCH (d:EmailDraft {id: $draft_id})
+        SET d.status = 'rejected',
+            d.rejected_at = datetime(),
+            d.rejection_reason = $reason,
+            d.rejection_reason_text = $reason_text
+        RETURN d.id as id, d.reasoning as reasoning
+        """
+        result = await session.run(query, {
+            "draft_id": draft_id,
+            "reason": reason,
+            "reason_text": reason_text,
+        })
+        data = await result.single()
+
+        if not data:
+            raise HTTPException(status_code=404, detail="Draft not found")
+
+        # Record feedback in decision memory for learning
+        try:
+            dm = get_decision_memory()
+            # Create a trace for learning from this rejection
+            await dm.traces.create_trace(
+                trigger_type="email_draft_rejection",
+                action_type="draft_email",
+                proposed_action={"draft_id": draft_id},
+                trigger_id=draft_id,
+                trigger_summary=f"Draft rejected: {reason_text or reason}",
+                reasoning=data.get("reasoning", ""),
+                metadata={"rejection_reason": reason, "rejection_reason_text": reason_text},
+            )
+            # Record as rejected with low quality score
+            # This helps the learning system understand what not to do
+            logger.info(
+                "Draft rejection recorded for learning",
+                draft_id=draft_id,
+                reason=reason,
+            )
+        except Exception as e:
+            logger.warning("Failed to record rejection for learning", error=str(e))
+
+        return HTMLResponse(f'''
+            <div id="draft-{draft_id}" class="draft-card" style="background: #fef2f2; border-color: #b91c1c; opacity: 0.7;">
+                <p><strong>Draft rejected</strong> - {html.escape(reason_text or reason)}</p>
+                <p class="text-muted" style="font-size: 0.85rem;">This feedback helps improve future suggestions.</p>
+            </div>
+        ''')
+
+    raise HTTPException(status_code=500, detail="Failed to reject draft")
+
+
+# ========================================================================
+# Phase 5.1: Multi-turn Email Drafting
+# ========================================================================
+
+@app.get("/api/twin/drafts/{draft_id}/refine-form")
+async def get_draft_refine_form(draft_id: str):
+    """Get the refinement form for iterating on a draft."""
+    # Quick-select refinement suggestions
+    refinements = [
+        ("shorter", "Make it shorter"),
+        ("longer", "Add more detail"),
+        ("formal", "More formal tone"),
+        ("casual", "More casual tone"),
+        ("bullet_points", "Use bullet points"),
+        ("custom", "Custom request..."),
+    ]
+
+    refinement_buttons = "\n".join([
+        f'''<button type="button" class="btn btn-outline-primary btn-sm refinement-option"
+            data-refinement="{code}"
+            onclick="selectRefinement('{draft_id}', '{code}', '{label}')"
+            style="margin: 0.25rem;">{html.escape(label)}</button>'''
+        for code, label in refinements
+    ])
+
+    return HTMLResponse(f'''
+        <div class="refinement-form" style="background: #f0f9ff; padding: 1rem; border-radius: 5px; margin-top: 0.5rem;">
+            <p style="margin-bottom: 0.5rem;"><strong>How would you like to refine this draft?</strong></p>
+            <div class="refinement-options" style="display: flex; flex-wrap: wrap; margin-bottom: 0.5rem;">
+                {refinement_buttons}
+            </div>
+            <form id="refine-form-{draft_id}"
+                  hx-post="/api/twin/drafts/{draft_id}/refine"
+                  hx-target="#draft-{draft_id}"
+                  hx-swap="outerHTML"
+                  style="display: none;">
+                <input type="hidden" name="refinement_type" id="refinement-type-{draft_id}" value="">
+                <div id="custom-input-{draft_id}" style="display: none; margin-top: 0.5rem;">
+                    <input type="text" name="custom_request" placeholder="Enter your refinement request..."
+                           class="form-control" style="width: 100%;">
+                </div>
+                <button type="submit" class="btn btn-primary btn-sm" style="margin-top: 0.5rem;">
+                    Apply Refinement
+                </button>
+            </form>
+            <button type="button" class="btn btn-link btn-sm"
+                hx-get="/twin"
+                hx-target="body"
+                style="margin-top: 0.5rem;">Cancel</button>
+        </div>
+        <script>
+        function selectRefinement(draftId, type, label) {{
+            document.getElementById('refinement-type-' + draftId).value = type;
+            document.getElementById('refine-form-' + draftId).style.display = 'block';
+            if (type === 'custom') {{
+                document.getElementById('custom-input-' + draftId).style.display = 'block';
+            }} else {{
+                document.getElementById('custom-input-' + draftId).style.display = 'none';
+            }}
+            // Highlight selected button
+            document.querySelectorAll('.refinement-option').forEach(btn => btn.classList.remove('btn-primary'));
+            event.target.classList.add('btn-primary');
+            event.target.classList.remove('btn-outline-primary');
+        }}
+        </script>
+    ''')
+
+
+@app.post("/api/twin/drafts/{draft_id}/refine")
+async def refine_draft(
+    draft_id: str,
+    refinement_type: Annotated[str, Form()],
+    custom_request: Annotated[str, Form()] = "",
+):
+    """Refine a draft using LLM based on user feedback (Phase 5.1 multi-turn drafting)."""
+    from cognitex.db.neo4j import get_neo4j_session
+    from cognitex.services.llm import LLMService
+
+    async for session in get_neo4j_session():
+        # Get current draft
+        query = """
+        MATCH (d:EmailDraft {id: $draft_id})
+        OPTIONAL MATCH (d)-[:REPLY_TO]->(e:Email)
+        RETURN d.id as id, d.to as to, d.subject as subject, d.body as body,
+               d.revision_count as revision_count,
+               e.subject as original_subject, e.body as original_body
+        """
+        result = await session.run(query, {"draft_id": draft_id})
+        draft = await result.single()
+
+        if not draft:
+            raise HTTPException(status_code=404, detail="Draft not found")
+
+        current_body = draft["body"]
+        revision_count = (draft.get("revision_count") or 0) + 1
+
+        # Build refinement prompt
+        refinement_prompts = {
+            "shorter": "Make this email significantly shorter and more concise. Keep the key points but remove unnecessary words.",
+            "longer": "Expand this email with more detail. Add context, explanations, or relevant information.",
+            "formal": "Rewrite this email in a more formal, professional tone. Use proper business language.",
+            "casual": "Rewrite this email in a more casual, friendly tone. Keep it natural and approachable.",
+            "bullet_points": "Restructure this email using bullet points for clarity. Organize the main points.",
+        }
+
+        if refinement_type == "custom" and custom_request:
+            refinement_instruction = custom_request
+        elif refinement_type in refinement_prompts:
+            refinement_instruction = refinement_prompts[refinement_type]
+        else:
+            refinement_instruction = "Improve this email based on best practices."
+
+        # Use LLM to refine
+        llm = LLMService()
+        refine_prompt = f"""You are refining an email draft based on user feedback.
+
+CURRENT DRAFT:
+To: {draft['to']}
+Subject: {draft['subject']}
+
+{current_body}
+
+USER REQUEST: {refinement_instruction}
+
+Rewrite the email body ONLY (not the subject or recipient). Return ONLY the refined email body text, nothing else.
+Keep the same general message but apply the requested changes.
+"""
+        try:
+            refined_body = await llm.complete(refine_prompt, max_tokens=1500)
+            refined_body = refined_body.strip()
+
+            # Store the refinement and increment revision count
+            update_query = """
+            MATCH (d:EmailDraft {id: $draft_id})
+            SET d.body = $new_body,
+                d.revision_count = $revision_count,
+                d.last_refined_at = datetime(),
+                d.refinement_history = COALESCE(d.refinement_history, []) + [$refinement]
+            RETURN d.id as id, d.to as to, d.subject as subject, d.body as body,
+                   d.revision_count as revision_count
+            """
+            update_result = await session.run(update_query, {
+                "draft_id": draft_id,
+                "new_body": refined_body,
+                "revision_count": revision_count,
+                "refinement": f"[{refinement_type}] {refinement_instruction[:100]}",
+            })
+            updated = await update_result.single()
+
+            # Return updated draft card
+            safe_to = html.escape(str(updated['to'] or ''))
+            safe_subject = html.escape(str(updated['subject'] or ''))
+            safe_body = html.escape(str(updated['body'] or ''))
+            revision_badge = f'<span class="badge bg-info" style="margin-left: 0.5rem;">v{revision_count}</span>' if revision_count > 1 else ''
+
+            return HTMLResponse(f'''
+                <div id="draft-{draft_id}" class="draft-card" style="border: 2px solid #0ea5e9;">
+                    <div class="draft-meta">
+                        <strong>To:</strong> {safe_to} {revision_badge}<br>
+                        <strong>Subject:</strong> {safe_subject}
+                    </div>
+                    <div class="draft-body" style="background: #f0f9ff; padding: 0.75rem; border-radius: 4px; margin: 0.5rem 0;">
+                        <pre style="white-space: pre-wrap; margin: 0; font-family: inherit;">{safe_body}</pre>
+                    </div>
+                    <div class="draft-actions" style="margin-top: 0.5rem;">
+                        <button class="btn btn-success btn-sm"
+                            hx-post="/api/twin/drafts/{draft_id}/approve"
+                            hx-target="#draft-{draft_id}"
+                            hx-swap="outerHTML">
+                            Send Email
+                        </button>
+                        <button class="btn btn-outline-primary btn-sm"
+                            hx-get="/api/twin/drafts/{draft_id}/edit"
+                            hx-target="#draft-{draft_id}"
+                            hx-swap="innerHTML">
+                            Edit
+                        </button>
+                        <button class="btn btn-outline-secondary btn-sm"
+                            hx-get="/api/twin/drafts/{draft_id}/refine-form"
+                            hx-target="#draft-{draft_id}"
+                            hx-swap="beforeend">
+                            Refine Again
+                        </button>
+                        <button class="btn btn-outline-danger btn-sm"
+                            hx-get="/api/twin/drafts/{draft_id}/reject-form"
+                            hx-target="#draft-{draft_id}"
+                            hx-swap="beforeend">
+                            Reject
+                        </button>
+                    </div>
+                    <p class="text-success" style="font-size: 0.85rem; margin-top: 0.5rem;">
+                        Draft refined! ({refinement_type})
+                    </p>
+                </div>
+            ''')
+
+        except Exception as e:
+            logger.error("Draft refinement failed", error=str(e), draft_id=draft_id)
+            return HTMLResponse(f'''
+                <div id="draft-{draft_id}" class="draft-card" style="border: 2px solid #ef4444;">
+                    <p class="text-danger"><strong>Refinement failed:</strong> {html.escape(str(e))}</p>
+                    <button class="btn btn-link btn-sm" hx-get="/twin" hx-target="body">Reload</button>
+                </div>
+            ''')
+
+    raise HTTPException(status_code=500, detail="Failed to refine draft")
+
+
 @app.get("/api/twin/drafts/{draft_id}/context")
 async def get_draft_deep_context(draft_id: str):
     """Build a context pack for the email being replied to.
@@ -3126,6 +3453,142 @@ async def archive_pack(pack_id: str):
     raise HTTPException(status_code=500, detail="Failed to archive pack")
 
 
+# ========================================================================
+# Phase 5.2: Intelligent Calendar Blocking
+# ========================================================================
+
+@app.post("/api/twin/blocks/generate")
+async def generate_focus_blocks():
+    """Generate intelligent focus block suggestions based on tasks and calendar.
+
+    Uses GraphObserver to analyze:
+    - High-energy tasks needing focus time
+    - Upcoming deadlines
+    - User's energy patterns (peak hours)
+    - Calendar availability
+    """
+    from cognitex.db.neo4j import get_neo4j_session
+    from cognitex.agent.graph_observer import GraphObserver
+    import uuid
+
+    try:
+        async for session in get_neo4j_session():
+            observer = GraphObserver(session)
+            suggestions = await observer.get_focus_block_suggestions(max_suggestions=3)
+
+            if not suggestions:
+                return HTMLResponse('''
+                    <div class="alert alert-info" style="margin: 1rem 0;">
+                        No focus blocks needed right now. All tasks look manageable!
+                    </div>
+                ''')
+
+            # Create SuggestedBlock nodes for each suggestion
+            created_blocks = []
+            for suggestion in suggestions:
+                block_id = f"block_{uuid.uuid4().hex[:12]}"
+
+                # Parse suggested time to determine day
+                suggested_time = suggestion.get("suggested_time", "")
+                from datetime import datetime
+                try:
+                    dt = datetime.fromisoformat(suggested_time)
+                    today = datetime.now().date()
+                    if dt.date() == today:
+                        suggested_day = "today"
+                    elif (dt.date() - today).days == 1:
+                        suggested_day = "tomorrow"
+                    elif (dt.date() - today).days <= 7:
+                        suggested_day = dt.strftime("%A")  # Day name
+                    else:
+                        suggested_day = "next week"
+                except Exception:
+                    suggested_day = "tomorrow"
+
+                # Create the SuggestedBlock node
+                create_query = """
+                CREATE (sb:SuggestedBlock {
+                    id: $block_id,
+                    title: $title,
+                    duration_hours: $duration_hours,
+                    suggested_day: $suggested_day,
+                    suggested_time: $suggested_time,
+                    status: 'pending_approval',
+                    created_at: datetime(),
+                    created_by: 'intelligent_blocking',
+                    reason: $reason
+                })
+                WITH sb
+                OPTIONAL MATCH (p:Project {id: $project_id})
+                FOREACH (_ IN CASE WHEN p IS NOT NULL THEN [1] ELSE [] END |
+                    CREATE (sb)-[:FOR_PROJECT]->(p)
+                )
+                WITH sb
+                OPTIONAL MATCH (t:Task {id: $task_id})
+                FOREACH (_ IN CASE WHEN t IS NOT NULL THEN [1] ELSE [] END |
+                    CREATE (sb)-[:FOR_TASK]->(t)
+                )
+                RETURN sb.id as id
+                """
+                await session.run(create_query, {
+                    "block_id": block_id,
+                    "title": f"Focus: {suggestion.get('task_title', 'Deep work')[:40]}",
+                    "duration_hours": suggestion.get("duration_hours", 2),
+                    "suggested_day": suggested_day,
+                    "suggested_time": suggested_time,
+                    "reason": suggestion.get("reason", "Task needs focused attention"),
+                    "project_id": suggestion.get("project_id", ""),
+                    "task_id": suggestion.get("task_id", ""),
+                })
+                created_blocks.append({
+                    "id": block_id,
+                    **suggestion,
+                    "suggested_day": suggested_day,
+                })
+
+            # Return HTML for the new blocks
+            blocks_html = []
+            for block in created_blocks:
+                blocks_html.append(f'''
+                    <tr id="block-row-{block['id']}" style="background: #f0fdf4;">
+                        <td><strong>{html.escape(block.get('task_title', 'Focus Time')[:30])}</strong></td>
+                        <td>{block.get('duration_hours', 2)}h</td>
+                        <td>{html.escape(block.get('suggested_day', 'tomorrow'))}</td>
+                        <td>{html.escape(block.get('project_title', '-')[:25] if block.get('project_title') else '-')}</td>
+                        <td style="font-size: 0.85rem;">{html.escape(block.get('reason', '')[:50])}</td>
+                        <td>
+                            <button class="btn btn-success btn-sm"
+                                hx-post="/api/twin/blocks/{block['id']}/approve"
+                                hx-target="#block-row-{block['id']}"
+                                hx-swap="outerHTML">
+                                Add to Calendar
+                            </button>
+                            <button class="btn btn-outline-danger btn-sm"
+                                hx-get="/api/twin/blocks/{block['id']}/reject-form"
+                                hx-target="#block-row-{block['id']}"
+                                hx-swap="outerHTML">
+                                Dismiss
+                            </button>
+                        </td>
+                    </tr>
+                ''')
+
+            return HTMLResponse(f'''
+                <div class="alert alert-success" style="margin: 1rem 0;">
+                    Generated {len(created_blocks)} focus block suggestions based on your tasks and calendar.
+                </div>
+                {''.join(blocks_html)}
+            ''')
+
+    except Exception as e:
+        logger.error("Failed to generate focus blocks", error=str(e))
+        return HTMLResponse(f'''
+            <div class="alert alert-danger" style="margin: 1rem 0;">
+                Failed to generate suggestions: {html.escape(str(e))}
+            </div>
+        ''')
+
+
 @app.post("/api/twin/blocks/{block_id}/approve")
 async def approve_block(block_id: str):
     """Approve a suggested focus block (add to calendar)."""
@@ -3229,6 +3692,108 @@ async def dismiss_block(block_id: str):
         return HTMLResponse("")  # Empty to remove from DOM
 
     raise HTTPException(status_code=500, detail="Failed to dismiss block")
+
+
+@app.get("/api/twin/blocks/{block_id}/reject-form")
+async def get_block_reject_form(block_id: str):
+    """Get the rejection feedback form for a focus block."""
+    # Quick-select rejection reasons
+    reasons = [
+        ("wrong_timing", "Wrong timing / not this day"),
+        ("too_long", "Duration too long"),
+        ("too_short", "Duration too short"),
+        ("wrong_project", "Wrong project or focus area"),
+        ("not_needed", "Don't need focus time for this"),
+        ("other", "Other reason"),
+    ]
+
+    reason_buttons = "\n".join([
+        f'''<button type="button" class="btn btn-outline-secondary btn-sm rejection-reason"
+            data-reason="{code}"
+            hx-post="/api/twin/blocks/{block_id}/reject"
+            hx-vals='{{"reason": "{code}", "reason_text": "{label}"}}'
+            hx-target="#block-row-{block_id}"
+            hx-swap="outerHTML"
+            style="margin: 0.25rem;">{html.escape(label)}</button>'''
+        for code, label in reasons
+    ])
+
+    return HTMLResponse(f'''
+        <tr id="block-row-{block_id}">
+            <td colspan="6">
+                <div class="rejection-form" style="background: #fef2f2; padding: 1rem; border-radius: 5px;">
+                    <p style="margin-bottom: 0.5rem;"><strong>Why are you rejecting this suggestion?</strong></p>
+                    <div class="rejection-reasons" style="display: flex; flex-wrap: wrap;">
+                        {reason_buttons}
+                    </div>
+                    <button type="button" class="btn btn-link btn-sm"
+                        hx-get="/twin"
+                        hx-target="body"
+                        style="margin-top: 0.5rem;">Cancel</button>
+                </div>
+            </td>
+        </tr>
+    ''')
+
+
+@app.post("/api/twin/blocks/{block_id}/reject")
+async def reject_block_with_feedback(
+    block_id: str,
+    reason: Annotated[str, Form()],
+    reason_text: Annotated[str, Form()] = "",
+):
+    """Reject a focus block suggestion with feedback for learning."""
+    from cognitex.db.neo4j import get_neo4j_session
+    from cognitex.agent.decision_memory import get_decision_memory
+
+    async for session in get_neo4j_session():
+        # Update block status and store rejection reason
+        query = """
+        MATCH (sb:SuggestedBlock {id: $block_id})
+        SET sb.status = 'rejected',
+            sb.rejected_at = datetime(),
+            sb.rejection_reason = $reason,
+            sb.rejection_reason_text = $reason_text
+        RETURN sb.id as id, sb.title as title, sb.reason as reasoning
+        """
+        result = await session.run(query, {
+            "block_id": block_id,
+            "reason": reason,
+            "reason_text": reason_text,
+        })
+        data = await result.single()
+
+        if not data:
+            raise HTTPException(status_code=404, detail="Block not found")
+
+        # Record feedback in decision memory for learning
+        try:
+            dm = get_decision_memory()
+            await dm.traces.create_trace(
+                trigger_type="focus_block_rejection",
+                action_type="schedule_block",
+                proposed_action={"block_id": block_id, "title": data.get("title")},
+                trigger_id=block_id,
+                trigger_summary=f"Focus block rejected: {reason_text or reason}",
+                reasoning=data.get("reasoning", ""),
+                metadata={"rejection_reason": reason, "rejection_reason_text": reason_text},
+            )
+            logger.info(
+                "Block rejection recorded for learning",
+                block_id=block_id,
+                reason=reason,
+            )
+        except Exception as e:
+            logger.warning("Failed to record rejection for learning", error=str(e))
+
+        return HTMLResponse(f'''
+            <tr id="block-row-{block_id}" style="background: #fef2f2; opacity: 0.7;">
+                <td colspan="6">
+                    <strong>Suggestion rejected</strong> - {html.escape(reason_text or reason)}
+                    <span class="text-muted" style="font-size: 0.85rem; margin-left: 1rem;">Feedback recorded</span>
+                </td>
+            </tr>
+        ''')
 
 
 # -------------------------------------------------------------------
@@ -3780,6 +4345,496 @@ async def api_learning_run_update():
     except Exception as e:
         logger.error("Manual policy update failed", error=str(e))
         return {"status": "error", "message": str(e)}
+
+
+# ========================================================================
+# Phase 5.3: Proactive Task Suggestions
+# ========================================================================
+
+@app.get("/api/tasks/insights")
+async def get_task_insights():
+    """Get proactive task insights and suggestions.
+
+    Returns:
+    - Stalled projects (no activity 7+ days)
+    - Large tasks needing breakdown
+    - Tasks blocking others
+    - Chronically deferred tasks
+    - Commitments extracted from emails
+    """
+    from cognitex.db.neo4j import get_neo4j_session
+    from cognitex.agent.graph_observer import GraphObserver
+
+    async for session in get_neo4j_session():
+        observer = GraphObserver(session)
+        insights = await observer.get_proactive_task_insights()
+
+        # Optionally extract commitments (this can be slow)
+        # commitments = await observer.extract_commitments_from_emails(days_back=7)
+        # insights["commitments"] = commitments
+
+        return insights
+
+    return {"error": "Failed to get insights"}
+
+
+@app.get("/api/tasks/insights/html")
+async def get_task_insights_html():
+    """Get proactive task insights as HTML for dashboard embedding."""
+    from cognitex.db.neo4j import get_neo4j_session
+    from cognitex.agent.graph_observer import GraphObserver
+
+    async for session in get_neo4j_session():
+        observer = GraphObserver(session)
+        insights = await observer.get_proactive_task_insights()
+
+        html_parts = []
+
+        # Stalled projects
+        if insights.get("stalled_projects"):
+            html_parts.append('<div class="insight-section"><h5>Stalled Projects</h5><ul>')
+            for p in insights["stalled_projects"]:
+                days = p.get("days_stalled", "?")
+                html_parts.append(
+                    f'<li><strong>{html.escape(p.get("title", "Untitled"))}</strong> - '
+                    f'{days} days since last activity</li>'
+                )
+            html_parts.append('</ul></div>')
+
+        # Large tasks
+        if insights.get("large_tasks_needing_breakdown"):
+            html_parts.append('<div class="insight-section"><h5>Tasks Needing Breakdown</h5><ul>')
+            for t in insights["large_tasks_needing_breakdown"]:
+                html_parts.append(
+                    f'<li><strong>{html.escape(t.get("title", "Untitled")[:40])}</strong> - '
+                    f'{html.escape(t.get("breakdown_reason", "Complex"))}</li>'
+                )
+            html_parts.append('</ul></div>')
+
+        # Blocking tasks
+        if insights.get("blocking_tasks"):
+            html_parts.append('<div class="insight-section"><h5>Blocking Tasks (unblock these first!)</h5><ul>')
+            for t in insights["blocking_tasks"]:
+                count = t.get("blocks_count", 0)
+                html_parts.append(
+                    f'<li><strong>{html.escape(t.get("title", "Untitled")[:40])}</strong> - '
+                    f'blocking {count} other task(s)</li>'
+                )
+            html_parts.append('</ul></div>')
+
+        # Chronic deferrals
+        if insights.get("chronic_deferrals"):
+            html_parts.append('<div class="insight-section"><h5>Chronically Deferred</h5><ul>')
+            for t in insights["chronic_deferrals"]:
+                count = t.get("defer_count", 0)
+                html_parts.append(
+                    f'<li><strong>{html.escape(t.get("title", "Untitled")[:40])}</strong> - '
+                    f'deferred {count}x ({html.escape(t.get("suggestion", ""))})</li>'
+                )
+            html_parts.append('</ul></div>')
+
+        if not html_parts:
+            return HTMLResponse('''
+                <div class="alert alert-success">
+                    <strong>All clear!</strong> No urgent task issues detected.
+                </div>
+            ''')
+
+        return HTMLResponse(f'''
+            <style>
+                .insight-section {{ margin-bottom: 1rem; }}
+                .insight-section h5 {{ color: #b45309; margin-bottom: 0.5rem; }}
+                .insight-section ul {{ margin: 0; padding-left: 1.5rem; }}
+                .insight-section li {{ margin-bottom: 0.25rem; }}
+            </style>
+            {''.join(html_parts)}
+        ''')
+
+    return HTMLResponse('<div class="alert alert-warning">Failed to load insights</div>')
+
+
+@app.post("/api/tasks/extract-commitments")
+async def extract_email_commitments():
+    """Extract commitments from recent sent emails.
+
+    Analyzes sent emails from the past 7 days to find implied
+    commitments that should be tracked as tasks.
+    """
+    from cognitex.db.neo4j import get_neo4j_session
+    from cognitex.agent.graph_observer import GraphObserver
+
+    async for session in get_neo4j_session():
+        observer = GraphObserver(session)
+        commitments = await observer.extract_commitments_from_emails(days_back=7, limit=15)
+
+        if not commitments:
+            return HTMLResponse('''
+                <div class="alert alert-info">
+                    No commitments found in recent sent emails.
+                </div>
+            ''')
+
+        # Build HTML for commitments
+        commitment_rows = []
+        for c in commitments:
+            commitment_rows.append(f'''
+                <tr>
+                    <td>{html.escape(c.get('action', 'Unknown')[:50])}</td>
+                    <td>{html.escape(c.get('deadline', 'Not specified')[:20])}</td>
+                    <td>{html.escape(c.get('recipient', 'Unknown')[:30])}</td>
+                    <td>{html.escape(c.get('email_subject', '')[:30])}</td>
+                    <td>
+                        <button class="btn btn-sm btn-primary"
+                            hx-post="/api/tasks/create-from-commitment"
+                            hx-vals='{{"action": "{html.escape(c.get("action", "")[:100])}", "deadline": "{html.escape(c.get("deadline", "")[:30])}", "recipient": "{html.escape(c.get("recipient", "")[:50])}", "email_id": "{c.get("source_email_id", "")}"}}'
+                            hx-target="closest tr"
+                            hx-swap="outerHTML">
+                            Create Task
+                        </button>
+                    </td>
+                </tr>
+            ''')
+
+        return HTMLResponse(f'''
+            <div class="alert alert-info" style="margin-bottom: 1rem;">
+                Found {len(commitments)} potential commitments in recent emails.
+            </div>
+            <table class="table table-sm">
+                <thead>
+                    <tr>
+                        <th>Commitment</th>
+                        <th>Deadline</th>
+                        <th>To</th>
+                        <th>Email</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {''.join(commitment_rows)}
+                </tbody>
+            </table>
+        ''')
+
+    return HTMLResponse('<div class="alert alert-warning">Failed to extract commitments</div>')
+
+
+# ========================================================================
+# Phase 5.4: Daily Momentum System
+# ========================================================================
+
+@app.get("/api/momentum/today")
+async def get_todays_momentum():
+    """Get today's momentum status including must-do items."""
+    from cognitex.db.neo4j import get_neo4j_session
+    from datetime import datetime
+
+    today = datetime.now().date().isoformat()
+
+    async for session in get_neo4j_session():
+        # Get today's must-do items
+        query = """
+        MATCH (md:MustDo)
+        WHERE md.date = $today
+        OPTIONAL MATCH (md)-[:TARGETS]->(t:Task)
+        RETURN
+            md.id as id,
+            md.title as title,
+            md.completed as completed,
+            md.completed_at as completed_at,
+            md.priority as priority,
+            t.id as task_id,
+            t.title as task_title
+        ORDER BY md.priority ASC, md.created_at ASC
+        """
+        result = await session.run(query, {"today": today})
+        must_dos = await result.data()
+
+        # Calculate momentum stats
+        total = len(must_dos)
+        completed = sum(1 for m in must_dos if m.get("completed"))
+        momentum_pct = (completed / total * 100) if total > 0 else 0
+
+        # Get weekly stats
+        week_query = """
+        MATCH (md:MustDo)
+        WHERE md.date >= date() - duration({days: 7})
+        RETURN
+            md.date as date,
+            md.completed as completed
+        ORDER BY md.date ASC
+        """
+        week_result = await session.run(week_query, {})
+        week_data = await week_result.data()
+
+        # Calculate weekly completion by day
+        daily_stats = {}
+        for item in week_data:
+            day = item.get("date")
+            if day not in daily_stats:
+                daily_stats[day] = {"total": 0, "completed": 0}
+            daily_stats[day]["total"] += 1
+            if item.get("completed"):
+                daily_stats[day]["completed"] += 1
+
+        weekly_momentum = []
+        for day, stats in sorted(daily_stats.items()):
+            pct = (stats["completed"] / stats["total"] * 100) if stats["total"] > 0 else 0
+            weekly_momentum.append({
+                "date": day,
+                "total": stats["total"],
+                "completed": stats["completed"],
+                "percentage": pct,
+            })
+
+        return {
+            "date": today,
+            "must_dos": must_dos,
+            "today_stats": {
+                "total": total,
+                "completed": completed,
+                "percentage": momentum_pct,
+            },
+            "weekly_momentum": weekly_momentum,
+            "streak": calculate_streak(weekly_momentum),
+        }
+
+    return {"error": "Failed to get momentum data"}
+
+
+def calculate_streak(weekly_momentum: list) -> int:
+    """Calculate current streak of days with 100% completion."""
+    streak = 0
+    for day in reversed(weekly_momentum):
+        if day.get("percentage", 0) == 100:
+            streak += 1
+        else:
+            break
+    return streak
+
+
+@app.get("/api/momentum/today/html")
+async def get_momentum_html():
+    """Get today's momentum as HTML widget."""
+    data = await get_todays_momentum()
+
+    if "error" in data:
+        return HTMLResponse('<div class="alert alert-warning">Failed to load momentum</div>')
+
+    must_dos = data.get("must_dos", [])
+    stats = data.get("today_stats", {})
+    streak = data.get("streak", 0)
+
+    # Build must-do list
+    must_do_items = []
+    for md in must_dos:
+        checked = "checked" if md.get("completed") else ""
+        style = "text-decoration: line-through; opacity: 0.7;" if md.get("completed") else ""
+        must_do_items.append(f'''
+            <div class="must-do-item" style="display: flex; align-items: center; margin-bottom: 0.5rem; {style}">
+                <input type="checkbox" {checked}
+                    hx-post="/api/momentum/toggle/{md['id']}"
+                    hx-target="#momentum-widget"
+                    hx-swap="innerHTML"
+                    style="margin-right: 0.75rem; width: 1.2rem; height: 1.2rem;">
+                <span>{html.escape(md.get('title', 'Untitled')[:50])}</span>
+            </div>
+        ''')
+
+    # Progress bar
+    pct = stats.get("percentage", 0)
+    bar_color = "#22c55e" if pct >= 100 else "#eab308" if pct >= 50 else "#ef4444"
+
+    streak_badge = f'<span class="badge bg-success" style="margin-left: 1rem;">{streak} day streak!</span>' if streak > 0 else ''
+
+    return HTMLResponse(f'''
+        <div id="momentum-widget">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                <h5 style="margin: 0;">Today's Must-Dos</h5>
+                <span>{stats.get('completed', 0)}/{stats.get('total', 0)} complete {streak_badge}</span>
+            </div>
+
+            <div class="progress" style="height: 8px; margin-bottom: 1rem; background: #e5e7eb;">
+                <div class="progress-bar" style="width: {pct}%; background: {bar_color};"></div>
+            </div>
+
+            <div class="must-do-list">
+                {''.join(must_do_items) if must_do_items else '<p class="text-muted">No must-dos set for today. Add some below!</p>'}
+            </div>
+
+            <form hx-post="/api/momentum/add"
+                  hx-target="#momentum-widget"
+                  hx-swap="innerHTML"
+                  style="margin-top: 1rem; display: flex; gap: 0.5rem;">
+                <input type="text" name="title" placeholder="Add a must-do for today..."
+                       class="form-control form-control-sm" style="flex: 1;">
+                <button type="submit" class="btn btn-primary btn-sm">Add</button>
+            </form>
+        </div>
+    ''')
+
+
+@app.post("/api/momentum/add")
+async def add_must_do(title: Annotated[str, Form()]):
+    """Add a new must-do item for today."""
+    from cognitex.db.neo4j import get_neo4j_session
+    from datetime import datetime
+    import uuid
+
+    if not title or len(title.strip()) < 2:
+        return await get_momentum_html()
+
+    today = datetime.now().date().isoformat()
+    must_do_id = f"mustdo_{uuid.uuid4().hex[:12]}"
+
+    async for session in get_neo4j_session():
+        # Count existing must-dos to set priority
+        count_query = """
+        MATCH (md:MustDo)
+        WHERE md.date = $today
+        RETURN COUNT(md) as count
+        """
+        count_result = await session.run(count_query, {"today": today})
+        count_data = await count_result.single()
+        priority = (count_data["count"] if count_data else 0) + 1
+
+        # Create the must-do
+        create_query = """
+        CREATE (md:MustDo {
+            id: $id,
+            title: $title,
+            date: $today,
+            priority: $priority,
+            completed: false,
+            created_at: datetime()
+        })
+        RETURN md.id as id
+        """
+        await session.run(create_query, {
+            "id": must_do_id,
+            "title": title.strip(),
+            "today": today,
+            "priority": priority,
+        })
+
+        logger.info("Must-do added", id=must_do_id, title=title[:30])
+
+    return await get_momentum_html()
+
+
+@app.post("/api/momentum/toggle/{must_do_id}")
+async def toggle_must_do(must_do_id: str):
+    """Toggle a must-do item's completion status."""
+    from cognitex.db.neo4j import get_neo4j_session
+
+    async for session in get_neo4j_session():
+        query = """
+        MATCH (md:MustDo {id: $id})
+        SET md.completed = NOT COALESCE(md.completed, false),
+            md.completed_at = CASE WHEN NOT COALESCE(md.completed, false) THEN datetime() ELSE null END
+        RETURN md.completed as completed
+        """
+        result = await session.run(query, {"id": must_do_id})
+        data = await result.single()
+
+        if data:
+            logger.info("Must-do toggled", id=must_do_id, completed=data["completed"])
+
+    return await get_momentum_html()
+
+
+@app.delete("/api/momentum/{must_do_id}")
+async def delete_must_do(must_do_id: str):
+    """Delete a must-do item."""
+    from cognitex.db.neo4j import get_neo4j_session
+
+    async for session in get_neo4j_session():
+        query = """
+        MATCH (md:MustDo {id: $id})
+        DELETE md
+        """
+        await session.run(query, {"id": must_do_id})
+        logger.info("Must-do deleted", id=must_do_id)
+
+    return await get_momentum_html()
+
+
+@app.get("/api/momentum/weekly")
+async def get_weekly_momentum():
+    """Get weekly momentum summary with trends."""
+    from cognitex.db.neo4j import get_neo4j_session
+    from datetime import datetime, timedelta
+
+    async for session in get_neo4j_session():
+        # Get all must-dos from the past 4 weeks
+        query = """
+        MATCH (md:MustDo)
+        WHERE md.date >= date() - duration({days: 28})
+        RETURN
+            md.date as date,
+            md.completed as completed,
+            md.title as title
+        ORDER BY md.date ASC
+        """
+        result = await session.run(query, {})
+        data = await result.data()
+
+        # Group by week
+        weeks = {}
+        for item in data:
+            date_str = item.get("date")
+            if not date_str:
+                continue
+            # Calculate week number
+            try:
+                dt = datetime.fromisoformat(str(date_str))
+                week_start = dt - timedelta(days=dt.weekday())
+                week_key = week_start.strftime("%Y-%m-%d")
+            except Exception:
+                continue
+
+            if week_key not in weeks:
+                weeks[week_key] = {"total": 0, "completed": 0}
+            weeks[week_key]["total"] += 1
+            if item.get("completed"):
+                weeks[week_key]["completed"] += 1
+
+        # Calculate weekly percentages and trends
+        weekly_data = []
+        prev_pct = None
+        for week, stats in sorted(weeks.items()):
+            pct = (stats["completed"] / stats["total"] * 100) if stats["total"] > 0 else 0
+            trend = None
+            if prev_pct is not None:
+                if pct > prev_pct + 5:
+                    trend = "up"
+                elif pct < prev_pct - 5:
+                    trend = "down"
+                else:
+                    trend = "stable"
+            weekly_data.append({
+                "week_start": week,
+                "total": stats["total"],
+                "completed": stats["completed"],
+                "percentage": round(pct, 1),
+                "trend": trend,
+            })
+            prev_pct = pct
+
+        # Calculate overall momentum score
+        if weekly_data:
+            recent_avg = sum(w["percentage"] for w in weekly_data[-2:]) / min(len(weekly_data), 2)
+            momentum_score = round(recent_avg, 0)
+        else:
+            momentum_score = 0
+
+        return {
+            "weeks": weekly_data,
+            "momentum_score": momentum_score,
+            "total_days_tracked": len(set(item.get("date") for item in data if item.get("date"))),
+            "current_streak": calculate_streak([{"percentage": w["percentage"]} for w in weekly_data]),
+        }
+
+    return {"error": "Failed to get weekly momentum"}
 
 
 @app.post("/api/briefing/generate", response_class=HTMLResponse)

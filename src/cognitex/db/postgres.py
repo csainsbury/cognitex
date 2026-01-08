@@ -3,6 +3,7 @@
 from typing import AsyncGenerator
 
 import structlog
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from cognitex.config import get_settings
@@ -45,10 +46,34 @@ async def close_postgres() -> None:
         logger.info("PostgreSQL connection closed")
 
 
+async def _ensure_connected() -> None:
+    """Ensure PostgreSQL is connected, initializing if necessary."""
+    global _engine, _session_factory
+
+    if _session_factory is None:
+        await init_postgres()
+        return
+
+    # Verify connection is still alive
+    try:
+        async with _engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    except Exception as e:
+        logger.warning("PostgreSQL connection lost, reconnecting...", error=str(e))
+        try:
+            if _engine:
+                await _engine.dispose()
+        except Exception:
+            pass
+        _engine = None
+        _session_factory = None
+        await init_postgres()
+        logger.info("PostgreSQL reconnected successfully")
+
+
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     """Get a database session."""
-    if _session_factory is None:
-        raise RuntimeError("Database not initialized. Call init_postgres() first.")
+    await _ensure_connected()
 
     async with _session_factory() as session:
         try:

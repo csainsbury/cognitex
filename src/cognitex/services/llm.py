@@ -255,29 +255,34 @@ class LLMService:
 
     async def classify_email(self, email_data: dict) -> dict:
         """
-        Classify an email using LLM.
+        Classify an email using LLM with enhanced intelligence.
 
         Args:
-            email_data: Email metadata including subject, snippet, sender
+            email_data: Email metadata including subject, snippet, sender, body
 
         Returns:
-            Classification result with category, action_required, urgency, etc.
+            Classification result with category, response_type, suggested_action, etc.
         """
+        # Use body if available for better classification
+        preview = email_data.get('body', email_data.get('snippet', ''))[:800]
+
         prompt = f"""Analyze this email and classify it. Return a JSON object with the classification.
 
 Email:
 - From: {email_data.get('sender_name', '')} <{email_data.get('sender_email', '')}>
 - Subject: {email_data.get('subject', '')}
-- Preview: {email_data.get('snippet', '')[:500]}
+- Content: {preview}
 
 Classify this email with the following fields:
 - classification: one of "actionable", "fyi", "newsletter", "automated", "spam", "personal"
-- action_required: boolean - does this email require a response or action from me?
-- urgency: integer 1-5 (1=low, 5=critical)
+- urgency: one of "immediate" (needs response today), "today" (should respond today), "this_week", "whenever"
+- response_type: one of "reply_needed" (needs email reply), "action_needed" (needs action but not reply), "acknowledge" (quick thanks/confirm), "forward" (delegate to someone), "archive" (no action), "none"
+- suggested_action: brief description of what to do (e.g., "Schedule call with Sarah", "Review attached document", "Confirm meeting attendance")
+- action_required: boolean - does this email require any response or action?
 - sentiment: one of "positive", "neutral", "negative", "urgent"
 - suggested_tasks: array of task titles if action is required (empty array if not)
-- reply_needed: boolean - does this specifically need a reply?
 - deadline_mentioned: string or null - any deadline mentioned in the email
+- key_points: array of 1-3 key points from the email (for quick scanning)
 
 Return ONLY valid JSON, no other text."""
 
@@ -285,7 +290,7 @@ Return ONLY valid JSON, no other text."""
             response = await self.complete(
                 prompt,
                 model=self.fast_model,  # Use fast model for classification
-                max_tokens=512,
+                max_tokens=600,
                 temperature=0.1,
             )
 
@@ -298,27 +303,42 @@ Return ONLY valid JSON, no other text."""
 
             result = json.loads(response)
 
-            # Validate and normalize
+            # Validate and normalize urgency
+            urgency_map = {"immediate": 5, "today": 4, "this_week": 3, "whenever": 2}
+            urgency_str = result.get("urgency", "whenever")
+            if isinstance(urgency_str, int):
+                urgency_int = min(5, max(1, urgency_str))
+            else:
+                urgency_int = urgency_map.get(urgency_str, 2)
+
             return {
                 "classification": result.get("classification", "fyi"),
+                "urgency": urgency_int,
+                "urgency_label": urgency_str if isinstance(urgency_str, str) else "whenever",
+                "response_type": result.get("response_type", "none"),
+                "suggested_action": result.get("suggested_action"),
                 "action_required": bool(result.get("action_required", False)),
-                "urgency": min(5, max(1, int(result.get("urgency", 2)))),
                 "sentiment": result.get("sentiment", "neutral"),
                 "suggested_tasks": result.get("suggested_tasks", []),
-                "reply_needed": bool(result.get("reply_needed", False)),
+                "reply_needed": result.get("response_type") in ("reply_needed", "acknowledge"),
                 "deadline_mentioned": result.get("deadline_mentioned"),
+                "key_points": result.get("key_points", []),
             }
 
         except json.JSONDecodeError as e:
             logger.warning("Failed to parse LLM classification response", error=str(e))
             return {
                 "classification": "unknown",
-                "action_required": False,
                 "urgency": 2,
+                "urgency_label": "whenever",
+                "response_type": "none",
+                "suggested_action": None,
+                "action_required": False,
                 "sentiment": "neutral",
                 "suggested_tasks": [],
                 "reply_needed": False,
                 "deadline_mentioned": None,
+                "key_points": [],
                 "parse_error": str(e),
             }
 
@@ -557,14 +577,17 @@ Perform deep analysis and extract as JSON:
    - Format: {{"name": "...", "type": "...", "context": "..."}}
    - Types: company, university, hospital, government, nonprofit, team
 
-3. "topics": List of 3-7 semantic topics/themes discussed.
+3. "topics": List of 3-7 semantic topics/themes discussed WITH RELEVANCE SCORES.
    - Be specific and use domain language: "type 2 diabetes management", "continuous glucose monitoring"
-   - Include both primary topic and subtopics
+   - Format: {{"name": "...", "relevance": 0.0-1.0, "is_primary": true/false}}
+   - relevance: 0.9-1.0 = central theme, 0.7-0.9 = important, 0.5-0.7 = relevant, <0.5 = tangential
+   - Mark 1-2 topics as is_primary: true (the main focus of this chunk)
 
-4. "concepts": List of domain concepts with definitions.
-   - Format: {{"term": "...", "domain": "...", "definition": "..."}}
+4. "concepts": List of domain concepts with definitions AND CONFIDENCE SCORES.
+   - Format: {{"term": "...", "domain": "...", "definition": "...", "confidence": 0.0-1.0}}
    - Domains: medical, technical, business, legal, scientific, etc.
-   - Example: {{"term": "HbA1c", "domain": "medical", "definition": "glycated hemoglobin measure of blood sugar over 3 months"}}
+   - confidence: how certain you are about the extraction (0.9+ = very certain)
+   - Example: {{"term": "HbA1c", "domain": "medical", "definition": "glycated hemoglobin measure of blood sugar over 3 months", "confidence": 0.95}}
 
 5. "relationships": List of relationships between entities.
    - Format: {{"from": "...", "relationship": "...", "to": "..."}}

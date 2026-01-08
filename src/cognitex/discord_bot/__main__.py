@@ -35,11 +35,12 @@ class CognitexBot(commands.Bot):
         # Initialize databases
         await self._init_databases()
 
-        # Initialize agent
+        # Initialize agent (for slash command interactions)
         await self._init_agent()
 
-        # Initialize trigger system (scheduled jobs + event listeners)
-        await self._init_triggers()
+        # NOTE: Trigger system (autonomous agent, scheduled jobs) is managed by the web app.
+        # Discord bot only handles notifications and user interactions.
+        # await self._init_triggers()  # Disabled - web app handles this
 
         # Register slash commands
         self.tree.add_command(tasks_command)

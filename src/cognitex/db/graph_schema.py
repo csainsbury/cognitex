@@ -133,6 +133,8 @@ async def create_email(
     action_required: bool = False,
     classification: str | None = None,
     urgency: int | None = None,
+    labels: list[str] | None = None,
+    is_sent: bool = False,
 ) -> dict:
     """Create an Email node."""
     query = """
@@ -147,13 +149,17 @@ async def create_email(
         e.action_required = $action_required,
         e.classification = $classification,
         e.urgency = $urgency,
+        e.labels = $labels,
+        e.is_sent = $is_sent,
         e.created_at = datetime(),
         e.processed = false
     ON MATCH SET
         e.sentiment = COALESCE($sentiment, e.sentiment),
         e.action_required = COALESCE($action_required, e.action_required),
         e.classification = COALESCE($classification, e.classification),
-        e.urgency = COALESCE($urgency, e.urgency)
+        e.urgency = COALESCE($urgency, e.urgency),
+        e.labels = COALESCE($labels, e.labels),
+        e.is_sent = COALESCE($is_sent, e.is_sent)
     RETURN e
     """
     result = await session.run(
@@ -168,6 +174,8 @@ async def create_email(
         action_required=action_required,
         classification=classification,
         urgency=urgency,
+        labels=labels or [],
+        is_sent=is_sent,
     )
     record = await result.single()
     return dict(record["e"]) if record else {}
@@ -2374,36 +2382,74 @@ async def link_chunk_to_topic(
     session: AsyncSession,
     chunk_id: str,
     topic_name: str,
+    relevance: float = 1.0,
+    is_primary: bool = False,
 ) -> None:
-    """Create DISCUSSES relationship between Chunk and Topic."""
+    """Create DISCUSSES relationship between Chunk and Topic.
+
+    Args:
+        chunk_id: The chunk ID
+        topic_name: The topic name
+        relevance: Relevance score 0.0-1.0 (how central this topic is to the chunk)
+        is_primary: Whether this is a primary/main topic vs tangential mention
+    """
     normalized = topic_name.lower().strip()
     query = """
     MATCH (c:Chunk {id: $chunk_id})
     MERGE (t:Topic {name: $topic_name})
-    MERGE (c)-[:DISCUSSES]->(t)
+    MERGE (c)-[r:DISCUSSES]->(t)
+    SET r.relevance = $relevance,
+        r.is_primary = $is_primary,
+        r.extracted_at = datetime()
     """
-    await session.run(query, chunk_id=chunk_id, topic_name=normalized)
+    await session.run(
+        query,
+        chunk_id=chunk_id,
+        topic_name=normalized,
+        relevance=relevance,
+        is_primary=is_primary,
+    )
 
 
 async def link_chunk_to_concept(
     session: AsyncSession,
     chunk_id: str,
     concept_name: str,
+    confidence: float = 1.0,
+    context: str | None = None,
 ) -> None:
-    """Create REFERENCES relationship between Chunk and Concept."""
+    """Create REFERENCES relationship between Chunk and Concept.
+
+    Args:
+        chunk_id: The chunk ID
+        concept_name: The concept name
+        confidence: Confidence score 0.0-1.0 (how certain the extraction is)
+        context: Optional context snippet showing how concept is used
+    """
     normalized = concept_name.strip()
     query = """
     MATCH (c:Chunk {id: $chunk_id})
     MERGE (con:Concept {name: $concept_name})
-    MERGE (c)-[:REFERENCES]->(con)
+    MERGE (c)-[r:REFERENCES]->(con)
+    SET r.confidence = $confidence,
+        r.context = $context,
+        r.extracted_at = datetime()
     """
-    await session.run(query, chunk_id=chunk_id, concept_name=normalized)
+    await session.run(
+        query,
+        chunk_id=chunk_id,
+        concept_name=normalized,
+        confidence=confidence,
+        context=context,
+    )
 
 
 async def link_chunk_to_person(
     session: AsyncSession,
     chunk_id: str,
     person_identifier: str,
+    mention_type: str = "named",
+    sentiment: str | None = None,
 ) -> None:
     """
     Create MENTIONS relationship between Chunk and Person.
@@ -2411,13 +2457,18 @@ async def link_chunk_to_person(
     Args:
         chunk_id: The chunk ID
         person_identifier: Email address or name to match/create person
+        mention_type: Type of mention - "named", "quoted", "authored", "recipient"
+        sentiment: Optional sentiment of the mention - "positive", "negative", "neutral"
     """
     # Check if it looks like an email
     if "@" in person_identifier:
         query = """
         MATCH (c:Chunk {id: $chunk_id})
         MERGE (p:Person {email: $identifier})
-        MERGE (c)-[:MENTIONS]->(p)
+        MERGE (c)-[r:MENTIONS]->(p)
+        SET r.mention_type = $mention_type,
+            r.sentiment = $sentiment,
+            r.extracted_at = datetime()
         """
     else:
         # Try to match by name, create with generated email if not found
@@ -2425,9 +2476,18 @@ async def link_chunk_to_person(
         MATCH (c:Chunk {id: $chunk_id})
         MERGE (p:Person {name: $identifier})
         ON CREATE SET p.email = $identifier + '@unknown'
-        MERGE (c)-[:MENTIONS]->(p)
+        MERGE (c)-[r:MENTIONS]->(p)
+        SET r.mention_type = $mention_type,
+            r.sentiment = $sentiment,
+            r.extracted_at = datetime()
         """
-    await session.run(query, chunk_id=chunk_id, identifier=person_identifier)
+    await session.run(
+        query,
+        chunk_id=chunk_id,
+        identifier=person_identifier,
+        mention_type=mention_type,
+        sentiment=sentiment,
+    )
 
 
 async def link_chunk_to_organization(
@@ -2435,31 +2495,60 @@ async def link_chunk_to_organization(
     chunk_id: str,
     org_name: str,
     org_type: str = "",
+    relationship_type: str = "mentioned",
+    confidence: float = 1.0,
 ) -> None:
-    """Create INVOLVES relationship between Chunk and Organization."""
+    """Create INVOLVES relationship between Chunk and Organization.
+
+    Args:
+        chunk_id: The chunk ID
+        org_name: Organization name
+        org_type: Type of organization (company, institution, team, etc.)
+        relationship_type: How the org is involved - "mentioned", "client", "partner", "employer"
+        confidence: Confidence score 0.0-1.0
+    """
     normalized = org_name.strip()
     query = """
     MATCH (c:Chunk {id: $chunk_id})
     MERGE (o:Organization {name: $org_name})
     ON CREATE SET o.type = $org_type
-    MERGE (c)-[:INVOLVES]->(o)
+    MERGE (c)-[r:INVOLVES]->(o)
+    SET r.relationship_type = $relationship_type,
+        r.confidence = $confidence,
+        r.extracted_at = datetime()
     """
-    await session.run(query, chunk_id=chunk_id, org_name=normalized, org_type=org_type)
+    await session.run(
+        query,
+        chunk_id=chunk_id,
+        org_name=normalized,
+        org_type=org_type,
+        relationship_type=relationship_type,
+        confidence=confidence,
+    )
 
 
 async def link_chunk_to_semantic_tag(
     session: AsyncSession,
     chunk_id: str,
     tag_name: str,
+    confidence: float = 1.0,
 ) -> None:
-    """Create TAGGED_AS relationship between Chunk and SemanticTag for clustering."""
+    """Create TAGGED_AS relationship between Chunk and SemanticTag for clustering.
+
+    Args:
+        chunk_id: The chunk ID
+        tag_name: The semantic tag name
+        confidence: Confidence score 0.0-1.0 for the tag assignment
+    """
     normalized = tag_name.lower().strip().replace(" ", "_")
     query = """
     MATCH (c:Chunk {id: $chunk_id})
     MERGE (t:SemanticTag {name: $tag_name})
-    MERGE (c)-[:TAGGED_AS]->(t)
+    MERGE (c)-[r:TAGGED_AS]->(t)
+    SET r.confidence = $confidence,
+        r.extracted_at = datetime()
     """
-    await session.run(query, chunk_id=chunk_id, tag_name=normalized)
+    await session.run(query, chunk_id=chunk_id, tag_name=normalized, confidence=confidence)
 
 
 async def get_unanalyzed_chunks(

@@ -62,27 +62,52 @@ CREATE_TABLE_STATEMENTS = [
 
 
 @dataclass
+class ScoredItem:
+    """An extracted item with a relevance/confidence score."""
+    name: str
+    score: float  # 0.0-1.0
+    is_primary: bool = False  # For topics: is this a main topic?
+    context: str | None = None  # Optional context snippet
+
+
+@dataclass
 class DocumentAnalysis:
     """Result of semantic analysis for a document."""
     file_id: str
     summary: str
-    key_concepts: list[str]
-    topics: list[str]
+    key_concepts: list[ScoredItem]  # Concepts with confidence scores
+    topics: list[ScoredItem]  # Topics with relevance scores
     entities: dict[str, list[str]]  # {"people": [], "organizations": [], "technologies": []}
 
 
 ANALYSIS_PROMPT = """Analyze this document and extract semantic information. Return ONLY valid JSON with no other text.
 
+For topics and concepts, include a relevance score (0.0-1.0) indicating how central they are to the document.
+Mark primary topics (the 1-3 main themes) with is_primary: true.
+
 {
     "summary": "A 2-3 sentence summary of the document's purpose and main content",
-    "key_concepts": ["list", "of", "5-15", "key", "technical", "concepts", "methodologies", "or", "frameworks"],
-    "topics": ["main", "topics", "or", "themes", "covered"],
+    "key_concepts": [
+        {"name": "concept name", "score": 0.9, "context": "brief phrase showing usage"},
+        {"name": "another concept", "score": 0.7}
+    ],
+    "topics": [
+        {"name": "main topic", "score": 0.95, "is_primary": true},
+        {"name": "secondary topic", "score": 0.6, "is_primary": false}
+    ],
     "entities": {
         "people": ["names of people mentioned"],
         "organizations": ["companies, institutions, groups"],
         "technologies": ["specific tools, platforms, languages, frameworks"]
     }
 }
+
+Guidelines for scores:
+- 0.9-1.0: Central to the document, extensively discussed
+- 0.7-0.9: Important, mentioned multiple times with substance
+- 0.5-0.7: Relevant but not a main focus
+- 0.3-0.5: Tangentially mentioned
+- <0.3: Brief mention, likely not worth extracting
 
 Document content:
 """
@@ -191,11 +216,39 @@ class SemanticAnalyzer:
             else:
                 data = json.loads(response_text)
 
+            # Parse concepts - handle both new scored format and legacy string list
+            raw_concepts = data.get("key_concepts", [])
+            concepts = []
+            for item in raw_concepts:
+                if isinstance(item, dict):
+                    concepts.append(ScoredItem(
+                        name=item.get("name", ""),
+                        score=float(item.get("score", 0.8)),
+                        context=item.get("context"),
+                    ))
+                elif isinstance(item, str):
+                    # Legacy format - assign default score
+                    concepts.append(ScoredItem(name=item, score=0.8))
+
+            # Parse topics - handle both new scored format and legacy string list
+            raw_topics = data.get("topics", [])
+            topics = []
+            for item in raw_topics:
+                if isinstance(item, dict):
+                    topics.append(ScoredItem(
+                        name=item.get("name", ""),
+                        score=float(item.get("score", 0.8)),
+                        is_primary=item.get("is_primary", False),
+                    ))
+                elif isinstance(item, str):
+                    # Legacy format - assign default score
+                    topics.append(ScoredItem(name=item, score=0.8))
+
             return DocumentAnalysis(
                 file_id=file_id,
                 summary=data.get("summary", ""),
-                key_concepts=data.get("key_concepts", []),
-                topics=data.get("topics", []),
+                key_concepts=concepts,
+                topics=topics,
                 entities=data.get("entities", {}),
             )
 

@@ -419,20 +419,33 @@ class AutonomousAgent:
         except Exception as e:
             logger.debug("Failed to get learning insights", error=str(e))
 
-        # 2. Active preference rules
+        # 2. Quality-weighted preference rules (Phase 4 enhancement)
+        # These rules have been validated through actual feedback
         try:
             from cognitex.agent.decision_memory import get_decision_memory
             dm = get_decision_memory()
             if dm and dm.rules:
-                rules = await dm.rules.get_matching_rules(
-                    context={"trigger_type": "autonomous_cycle"},
-                    rule_type="action_preference"
-                )
-                if rules:
-                    learned_lines.append("\n### Learned Preferences")
-                    for rule in rules[:5]:
-                        conf = rule.get('confidence', 0)
-                        learned_lines.append(f"- {rule['rule_name']} (confidence: {conf:.0%})")
+                # Get quality-weighted rules for prompt injection
+                weighted_rules = await dm.rules.get_weighted_rules_for_prompt(limit=10)
+                if weighted_rules:
+                    learned_lines.append("\n### Validated Preferences (follow these)")
+                    for rule in weighted_rules:
+                        lifecycle_badge = "[PROVEN]" if rule["lifecycle"] == "validated" else "[LIKELY]"
+                        success = f"{rule['success_rate']:.0f}%" if rule.get("success_rate") else "N/A"
+                        learned_lines.append(
+                            f"- {lifecycle_badge} {rule['guidance']} (success: {success}, uses: {rule['applications']})"
+                        )
+                else:
+                    # Fall back to basic matching rules if no weighted rules
+                    rules = await dm.rules.get_matching_rules(
+                        context={"trigger_type": "autonomous_cycle"},
+                        rule_type="action_preference"
+                    )
+                    if rules:
+                        learned_lines.append("\n### Learned Preferences")
+                        for rule in rules[:5]:
+                            conf = rule.get('confidence', 0)
+                            learned_lines.append(f"- {rule['rule_name']} (confidence: {conf:.0%})")
         except Exception as e:
             logger.debug("Failed to get preference rules", error=str(e))
 
@@ -635,8 +648,16 @@ class AutonomousAgent:
     async def _verify_entity_exists(self, session, label: str, entity_id: str) -> bool:
         """Check if an entity exists in Neo4j."""
         try:
+            # Documents use drive_id, Emails use gmail_id, others use id
+            if label == "Document":
+                id_field = "drive_id"
+            elif label == "Email":
+                id_field = "gmail_id"
+            else:
+                id_field = "id"
+
             result = await session.run(
-                f"MATCH (n:{label}) WHERE n.id = $id RETURN n LIMIT 1",
+                f"MATCH (n:{label}) WHERE n.{id_field} = $id RETURN n LIMIT 1",
                 {"id": entity_id}
             )
             record = await result.single()
@@ -1398,6 +1419,23 @@ class AutonomousAgent:
                 "reason": reason
             }
         )
+
+        # Mark the entity as flagged to prevent re-flagging
+        if entity_type == "email" and entity_id:
+            try:
+                from cognitex.db.neo4j import get_neo4j_session
+                async for session in get_neo4j_session(access_mode="WRITE"):
+                    await session.run(
+                        """
+                        MATCH (e:Email {gmail_id: $gmail_id})
+                        SET e.flagged_at = datetime()
+                        """,
+                        {"gmail_id": entity_id}
+                    )
+                    break
+                logger.debug("Marked email as flagged", gmail_id=entity_id)
+            except Exception as e:
+                logger.warning("Failed to mark email as flagged", gmail_id=entity_id, error=str(e))
 
         # Send Discord notification
         await self._send_review_notification(entity_type, entity_name, issue)

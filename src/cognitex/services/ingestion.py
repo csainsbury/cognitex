@@ -29,16 +29,46 @@ from cognitex.services.gmail import GmailService, fetch_all_messages, build_hist
 logger = structlog.get_logger()
 
 
-async def ingest_email_to_graph(email_data: dict) -> None:
+async def ingest_email_to_graph(
+    email_data: dict,
+    classify: bool = True,
+    body: str | None = None,
+) -> None:
     """
     Ingest a single email into the graph database.
 
     Creates Person nodes for sender/recipients and Email node,
-    with appropriate relationships.
+    with appropriate relationships. Optionally classifies the email
+    using LLM for actionability detection.
 
     Args:
         email_data: Email metadata dict from extract_email_metadata()
+        classify: Whether to run LLM classification (default True)
+        body: Optional email body for better classification
     """
+    # Classify email if requested
+    classification_result = None
+    if classify:
+        try:
+            from cognitex.services.llm import get_llm_service
+            llm = get_llm_service()
+            # Include body in email_data for classification if provided
+            classify_data = {**email_data}
+            if body:
+                classify_data["body"] = body
+            classification_result = await llm.classify_email(classify_data)
+            logger.debug(
+                "Classified email",
+                gmail_id=email_data["gmail_id"],
+                classification=classification_result.get("classification"),
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to classify email",
+                gmail_id=email_data["gmail_id"],
+                error=str(e),
+            )
+
     # Get authenticated user's email to mark "self" in the graph
     user_email = await get_user_email()
     user_email_lower = user_email.lower() if user_email else None
@@ -66,7 +96,16 @@ async def ingest_email_to_graph(email_data: dict) -> None:
                 is_self = (email_addr.lower() == user_email_lower) if user_email_lower else False
                 await create_person(session, email=email_addr, name=name or None, is_user=is_self)
 
-        # Create Email node
+        # Determine if this is a sent email (user is the sender or has SENT label)
+        labels = email_data.get("labels", [])
+        sender_is_user = (
+            email_data["sender_email"]
+            and user_email_lower
+            and email_data["sender_email"].lower() == user_email_lower
+        )
+        is_sent = sender_is_user or "SENT" in labels
+
+        # Create Email node with classification
         await create_email(
             session,
             gmail_id=email_data["gmail_id"],
@@ -74,6 +113,13 @@ async def ingest_email_to_graph(email_data: dict) -> None:
             subject=email_data["subject"],
             date=email_data["date"],
             snippet=email_data.get("snippet"),
+            body_preview=body[:1000] if body else None,
+            classification=classification_result.get("classification") if classification_result else None,
+            urgency=classification_result.get("urgency") if classification_result else None,
+            action_required=classification_result.get("action_required", False) if classification_result else False,
+            sentiment=classification_result.get("sentiment") if classification_result else None,
+            labels=labels,
+            is_sent=is_sent,
         )
 
         # Create relationships
@@ -2076,21 +2122,40 @@ async def analyze_chunk_for_graph(
         key_facts=key_facts,
     )
 
-    # Link to topics
+    # Link to topics (handle both scored and legacy formats)
     topics = entities.get("topics", [])
     for topic in topics:
         if topic:
-            await link_chunk_to_topic(neo4j_session, chunk_id, topic)
+            # New scored format: {"name": "...", "relevance": 0.8, "is_primary": false}
+            if isinstance(topic, dict):
+                name = topic.get("name", "")
+                if name:
+                    await link_chunk_to_topic(
+                        neo4j_session,
+                        chunk_id,
+                        name,
+                        relevance=float(topic.get("relevance", 0.8)),
+                        is_primary=topic.get("is_primary", False),
+                    )
+            elif isinstance(topic, str):
+                # Legacy string format
+                await link_chunk_to_topic(neo4j_session, chunk_id, topic)
 
-    # Link to concepts (handle both string and dict formats)
+    # Link to concepts (handle both scored and legacy formats)
     concepts = entities.get("concepts", [])
     for concept in concepts:
         if concept:
-            # New format: {"term": "...", "domain": "...", "definition": "..."}
+            # New format: {"term": "...", "domain": "...", "definition": "...", "confidence": 0.9}
             if isinstance(concept, dict):
                 term = concept.get("term", "")
                 if term:
-                    await link_chunk_to_concept(neo4j_session, chunk_id, term)
+                    await link_chunk_to_concept(
+                        neo4j_session,
+                        chunk_id,
+                        term,
+                        confidence=float(concept.get("confidence", 0.8)),
+                        context=concept.get("definition"),
+                    )
             else:
                 await link_chunk_to_concept(neo4j_session, chunk_id, concept)
 
