@@ -78,6 +78,27 @@
                 hx-target="#task-{{ task.id }}"
                 hx-swap="outerHTML"
                 title="Edit">Edit</button>
+        <div class="dropdown" style="display: inline-block; position: relative;">
+            <button class="btn btn-warning btn-sm dropdown-toggle"
+                    onclick="this.nextElementSibling.classList.toggle('show')"
+                    title="Reject & Learn">&#128683;</button>
+            <div class="dropdown-menu" style="display: none; position: absolute; right: 0; background: white; border: 1px solid #ddd; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); z-index: 100; min-width: 180px;">
+                <form hx-post="/tasks/{{ task.id }}/reject"
+                      hx-target="#task-{{ task.id }}"
+                      hx-swap="outerHTML"
+                      hx-on::after-request="document.getElementById('subtasks-{{ task.id }}')?.remove()">
+                    <div style="padding: 0.5rem; font-size: 0.8rem; color: #666; border-bottom: 1px solid #eee;">
+                        Reject & teach the system:
+                    </div>
+                    <button type="submit" name="reason" value="automated_notification" class="dropdown-item">Automated notification</button>
+                    <button type="submit" name="reason" value="not_actionable" class="dropdown-item">Not actually actionable</button>
+                    <button type="submit" name="reason" value="already_handled" class="dropdown-item">Already handled</button>
+                    <button type="submit" name="reason" value="not_my_task" class="dropdown-item">Not my responsibility</button>
+                    <button type="submit" name="reason" value="duplicate" class="dropdown-item">Duplicate task</button>
+                    <button type="submit" name="reason" value="spam_marketing" class="dropdown-item">Spam/Marketing email</button>
+                </form>
+            </div>
+        </div>
         <button class="btn btn-danger btn-sm"
                 hx-delete="/tasks/{{ task.id }}"
                 hx-target="#task-{{ task.id }}"

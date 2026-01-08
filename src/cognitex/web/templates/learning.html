@@ -7,12 +7,8 @@
 
 <div class="stats">
     <div class="stat">
-        <div class="stat-value">{{ stats.total_timing_records }}</div>
-        <div class="stat-label">Timing Records</div>
-    </div>
-    <div class="stat">
-        <div class="stat-value">{{ stats.total_deferrals }}</div>
-        <div class="stat-label">Deferrals Tracked</div>
+        <div class="stat-value">{{ stats.total_decisions }}</div>
+        <div class="stat-label">Decision Traces</div>
     </div>
     <div class="stat">
         <div class="stat-value">{{ stats.total_proposals }}</div>
@@ -22,7 +18,21 @@
         <div class="stat-value">{{ "%.0f"|format(stats.approval_rate * 100) }}%</div>
         <div class="stat-label">Approval Rate</div>
     </div>
+    <div class="stat">
+        <div class="stat-value">{{ stats.total_task_rejections }}</div>
+        <div class="stat-label">Task Rejections</div>
+    </div>
 </div>
+
+{% if stats.pending_proposals > 0 %}
+<div style="margin-bottom: 1.5rem; padding: 1rem; background: #fef3c7; border-radius: 8px; display: flex; justify-content: space-between; align-items: center;">
+    <div>
+        <strong>{{ stats.pending_proposals }} proposals awaiting review</strong>
+        <div style="font-size: 0.85rem; color: #666;">Your feedback teaches the system what tasks to suggest</div>
+    </div>
+    <a href="/proposals" class="btn btn-primary">Review Proposals</a>
+</div>
+{% endif %}
 
 <div class="two-col">
     <div>
@@ -254,6 +264,90 @@
             </ul>
             {% else %}
             <p class="empty">No patterns learned yet. Keep using the system to build behavioral insights.</p>
+            {% endif %}
+        </div>
+
+        <!-- Decision Traces -->
+        <div class="card">
+            <h2>Decision Traces</h2>
+            <p style="color: #666; font-size: 0.85rem; margin-bottom: 1rem;">
+                Agent reasoning and decisions tracked for learning
+            </p>
+
+            {% if decision_summary.total > 0 %}
+            <h3 style="font-size: 0.9rem; margin-bottom: 0.5rem;">By Action Type</h3>
+            <div style="display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1rem;">
+                {% for action_type, count in decision_summary.by_action.items() %}
+                <span class="badge" style="background: #e0e7ff; color: #3730a3;">
+                    {{ action_type | replace('_', ' ') | title }}: {{ count }}
+                </span>
+                {% endfor %}
+            </div>
+
+            {% if decision_summary.recent %}
+            <h3 style="font-size: 0.9rem; margin-bottom: 0.5rem;">Recent Decisions</h3>
+            <ul style="list-style: none; padding: 0; font-size: 0.85rem;">
+                {% for d in decision_summary.recent[:5] %}
+                <li style="padding: 0.5rem 0; border-bottom: 1px solid #eee;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span class="badge badge-{{ 'done' if d.decision == 'approve' else 'pending' }}">
+                            {{ d.action_type | replace('_', ' ') }}
+                        </span>
+                        {% if d.quality_score %}
+                        <span style="font-size: 0.8rem; color: #666;">
+                            Quality: {{ "%.0f"|format(d.quality_score * 100) }}%
+                        </span>
+                        {% endif %}
+                    </div>
+                    <div style="font-size: 0.8rem; color: #999; margin-top: 0.25rem;">
+                        {{ d.decision | title }} - {{ d.timestamp }}
+                    </div>
+                </li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+            {% else %}
+            <p class="empty">No decision traces recorded yet. The agent logs decisions as it evaluates actions.</p>
+            {% endif %}
+        </div>
+
+        <!-- Task Rejection History -->
+        <div class="card">
+            <h2>Task Rejection Feedback</h2>
+            <p style="color: #666; font-size: 0.85rem; margin-bottom: 1rem;">
+                Tasks you rejected to teach the system what to avoid
+            </p>
+
+            {% if task_rejections %}
+            <ul style="list-style: none; padding: 0; font-size: 0.85rem;">
+                {% for rej in task_rejections %}
+                <li style="padding: 0.75rem 0; border-bottom: 1px solid #eee;">
+                    <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                        <div style="flex: 1;">
+                            <strong>{{ rej.summary }}</strong>
+                            {% if rej.email_sender %}
+                            <div style="color: #666; font-size: 0.8rem; margin-top: 0.25rem;">
+                                From: {{ rej.email_sender }}
+                            </div>
+                            {% endif %}
+                            {% if rej.email_subject %}
+                            <div style="color: #666; font-size: 0.8rem;">
+                                Subject: {{ rej.email_subject[:60] }}{% if rej.email_subject | length > 60 %}...{% endif %}
+                            </div>
+                            {% endif %}
+                        </div>
+                        <span class="badge badge-paused" style="margin-left: 0.5rem;">
+                            {{ rej.reason | replace('_', ' ') | title }}
+                        </span>
+                    </div>
+                    <div style="font-size: 0.75rem; color: #999; margin-top: 0.25rem;">
+                        {{ rej.timestamp }}
+                    </div>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="empty">No task rejections yet. Use the reject button on tasks to teach the system.</p>
             {% endif %}
         </div>
 

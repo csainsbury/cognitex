@@ -791,6 +791,112 @@ async def task_delete(task_id: str):
     return HTMLResponse("")
 
 
+@app.post("/tasks/{task_id}/reject", response_class=HTMLResponse)
+async def task_reject_and_learn(
+    request: Request,
+    task_id: str,
+    reason: str = Form(...),
+):
+    """Reject a task and record feedback for learning.
+
+    This is used when the autonomous agent created a task that shouldn't exist.
+    Records the rejection pattern to prevent similar tasks in the future.
+    """
+    from cognitex.db.neo4j import get_neo4j_session
+    from cognitex.agent.action_log import log_action, learn_from_rejection
+
+    task_service = get_task_service()
+
+    # Get task details and source email before deleting
+    task_info = None
+    email_info = None
+
+    async for session in get_neo4j_session():
+        # Get task details
+        result = await session.run("""
+            MATCH (t:Task {id: $task_id})
+            OPTIONAL MATCH (t)-[:DERIVED_FROM]->(e:Email)
+            OPTIONAL MATCH (e)-[:SENT_BY]->(sender:Person)
+            RETURN t.title as title,
+                   t.description as description,
+                   t.created_by as created_by,
+                   e.gmail_id as email_id,
+                   e.subject as email_subject,
+                   e.snippet as email_snippet,
+                   sender.email as sender_email
+        """, {"task_id": task_id})
+        record = await result.single()
+
+        if record:
+            task_info = {
+                "title": record["title"],
+                "description": record["description"],
+                "created_by": record["created_by"],
+            }
+            if record["email_id"]:
+                email_info = {
+                    "gmail_id": record["email_id"],
+                    "subject": record["email_subject"],
+                    "snippet": record["email_snippet"],
+                    "sender": record["sender_email"],
+                }
+        break
+
+    if not task_info:
+        return HTMLResponse("<span style='color: red;'>Task not found</span>")
+
+    # Record rejection pattern for learning
+    pattern_data = {
+        "task_title": task_info["title"],
+        "reason": reason,
+        "rejected_at": datetime.now().isoformat(),
+    }
+
+    if email_info:
+        pattern_data["email_subject"] = email_info["subject"]
+        pattern_data["email_sender"] = email_info["sender"]
+        pattern_data["email_snippet"] = email_info.get("snippet", "")[:200]
+
+        # Record as rejection pattern for learning
+        # Include email subject and sender in the rejection reason for pattern matching
+        rejection_context = f"From: {email_info['sender']} | Subject: {email_info['subject']} | Task: {task_info['title']}"
+        await learn_from_rejection(
+            proposal_type="create_task",
+            rejection_reason=rejection_context,
+            context={
+                "reason_category": reason,
+                "email_sender": email_info["sender"],
+                "email_subject": email_info["subject"],
+                "task_title": task_info["title"],
+            }
+        )
+
+    # Log the rejection action
+    await log_action(
+        "task_rejected",
+        "user",
+        summary=f"Rejected task: {task_info['title'][:50]}",
+        details={
+            "task_id": task_id,
+            "reason": reason,
+            "had_source_email": email_info is not None,
+            **pattern_data,
+        }
+    )
+
+    # Delete the task
+    await task_service.delete(task_id)
+
+    logger.info(
+        "Task rejected with learning feedback",
+        task_id=task_id,
+        reason=reason,
+        had_email=email_info is not None,
+    )
+
+    return HTMLResponse("")
+
+
 @app.delete("/tasks/{task_id}/project/{project_id}", response_class=HTMLResponse)
 async def task_unlink_project(request: Request, task_id: str, project_id: str):
     """Remove a project link from a task.
@@ -2579,16 +2685,20 @@ async def reject_draft_with_feedback(
     """Reject a draft with feedback reason for learning."""
     from cognitex.db.neo4j import get_neo4j_session
     from cognitex.agent.decision_memory import get_decision_memory
+    from cognitex.agent.action_log import learn_from_rejection, log_action
 
     async for session in get_neo4j_session():
-        # Update draft status and store rejection reason
+        # Update draft status and store rejection reason, also get original email info
         query = """
         MATCH (d:EmailDraft {id: $draft_id})
         SET d.status = 'rejected',
             d.rejected_at = datetime(),
             d.rejection_reason = $reason,
             d.rejection_reason_text = $reason_text
-        RETURN d.id as id, d.reasoning as reasoning
+        WITH d
+        OPTIONAL MATCH (d)-[:REPLIES_TO]->(e:Email)
+        RETURN d.id as id, d.reasoning as reasoning, d.to as recipient,
+               e.from as email_sender, e.subject as email_subject, e.gmail_id as email_id
         """
         result = await session.run(query, {
             "draft_id": draft_id,
@@ -2613,8 +2723,6 @@ async def reject_draft_with_feedback(
                 reasoning=data.get("reasoning", ""),
                 metadata={"rejection_reason": reason, "rejection_reason_text": reason_text},
             )
-            # Record as rejected with low quality score
-            # This helps the learning system understand what not to do
             logger.info(
                 "Draft rejection recorded for learning",
                 draft_id=draft_id,
@@ -2622,6 +2730,50 @@ async def reject_draft_with_feedback(
             )
         except Exception as e:
             logger.warning("Failed to record rejection for learning", error=str(e))
+
+        # Also record in unified learning system (cross-learns with task rejection)
+        # This helps the agent learn patterns like "don't engage with sender X"
+        try:
+            email_sender = data.get("email_sender") or data.get("recipient") or ""
+            email_subject = data.get("email_subject") or ""
+
+            await learn_from_rejection(
+                proposal_type="draft_email",
+                rejection_reason=f"{reason}: {email_subject[:50]}",
+                context={
+                    "reason_category": reason,
+                    "email_sender": email_sender,
+                    "email_subject": email_subject,
+                    "email_id": data.get("email_id"),
+                    "draft_id": draft_id,
+                }
+            )
+
+            # Map rejection reasons to human-readable text for logging
+            reason_labels = {
+                "spam_marketing": "Spam/Marketing email",
+                "automated_email": "Automated notification",
+                "not_actionable": "No reply needed",
+                "wrong_timing": "Wrong timing",
+                "bad_suggestion": "Poor draft quality",
+                "wrong_recipient": "Wrong recipient/context",
+                "will_handle_manually": "Will handle manually",
+            }
+
+            await log_action(
+                "draft_rejected",
+                "web_ui",
+                summary=f"Rejected draft to {email_sender[:30]}",
+                details={
+                    "draft_id": draft_id,
+                    "reason": reason,
+                    "reason_label": reason_labels.get(reason, reason),
+                    "email_sender": email_sender,
+                    "email_subject": email_subject[:100],
+                }
+            )
+        except Exception as e:
+            logger.warning("Failed to record draft rejection in unified learning", error=str(e))
 
         return HTMLResponse(f'''
             <div id="draft-{draft_id}" class="draft-card" style="background: #fef2f2; border-color: #b91c1c; opacity: 0.7;">
@@ -4159,6 +4311,222 @@ async def api_capture_status():
 # -------------------------------------------------------------------
 
 
+# ========================================================================
+# Proposals Management
+# ========================================================================
+
+@app.get("/proposals", response_class=HTMLResponse)
+async def proposals_page(request: Request):
+    """Task proposals management page."""
+    from cognitex.db.postgres import get_session
+    from cognitex.db.neo4j import get_neo4j_session
+    from sqlalchemy import text
+
+    proposals = []
+    stats = {"pending": 0, "approved": 0, "rejected": 0}
+
+    async for session in get_session():
+        # Get all proposals with stats
+        result = await session.execute(text("""
+            SELECT
+                id, title, description, project_id, goal_id,
+                priority, reason, status, timestamp, decision_at, decision_reason
+            FROM task_proposals
+            ORDER BY
+                CASE status WHEN 'pending' THEN 0 ELSE 1 END,
+                timestamp DESC
+            LIMIT 200
+        """))
+        rows = result.fetchall()
+
+        for row in rows:
+            proposals.append({
+                "id": row.id,
+                "title": row.title,
+                "description": row.description,
+                "project_id": row.project_id,
+                "goal_id": row.goal_id,
+                "priority": row.priority,
+                "reason": row.reason,
+                "status": row.status,
+                "timestamp": row.timestamp,
+                "decision_at": row.decision_at,
+                "decision_reason": row.decision_reason,
+            })
+
+        # Get stats
+        stats_result = await session.execute(text("""
+            SELECT status, COUNT(*) as count
+            FROM task_proposals
+            GROUP BY status
+        """))
+        for row in stats_result.fetchall():
+            stats[row.status] = row.count
+        break
+
+    # Get project names for display
+    project_names = {}
+    async for neo_session in get_neo4j_session():
+        project_ids = list(set(p["project_id"] for p in proposals if p["project_id"]))
+        if project_ids:
+            result = await neo_session.run("""
+                MATCH (p:Project)
+                WHERE p.id IN $ids
+                RETURN p.id as id, p.title as title
+            """, {"ids": project_ids})
+            records = await result.data()
+            project_names = {r["id"]: r["title"] for r in records}
+        break
+
+    # Add project names to proposals
+    for p in proposals:
+        p["project_name"] = project_names.get(p["project_id"], p["project_id"])
+
+    return templates.TemplateResponse(
+        "proposals.html",
+        {
+            "request": request,
+            "proposals": proposals,
+            "stats": stats,
+        }
+    )
+
+
+@app.post("/proposals/{proposal_id}/approve", response_class=HTMLResponse)
+async def approve_proposal_web(proposal_id: str):
+    """Approve a task proposal from the web UI."""
+    from cognitex.agent.action_log import approve_proposal, log_action
+
+    task = await approve_proposal(proposal_id)
+
+    if task:
+        await log_action(
+            "proposal_approved",
+            "web_ui",
+            summary=f"Approved proposal: {task.get('title', '')[:50]}",
+            details={"proposal_id": proposal_id, "task_id": task.get("id")}
+        )
+        return HTMLResponse(f"""
+            <tr id="proposal-{proposal_id}" class="proposal-row approved">
+                <td colspan="6" style="text-align: center; color: var(--success); padding: 1rem;">
+                    ✓ Approved - Task created
+                </td>
+            </tr>
+        """)
+
+    return HTMLResponse(f"""
+        <tr id="proposal-{proposal_id}">
+            <td colspan="6" style="color: var(--danger);">Failed to approve</td>
+        </tr>
+    """)
+
+
+@app.post("/proposals/{proposal_id}/reject", response_class=HTMLResponse)
+async def reject_proposal_web(
+    proposal_id: str,
+    reason: str = Form("not_needed"),
+):
+    """Reject a task proposal from the web UI."""
+    from cognitex.agent.action_log import reject_proposal, log_action, learn_from_rejection
+    from cognitex.db.postgres import get_session
+    from sqlalchemy import text
+
+    # Get proposal details before rejection
+    proposal_title = ""
+    async for session in get_session():
+        result = await session.execute(text("""
+            SELECT title, project_id, priority FROM task_proposals WHERE id = :id
+        """), {"id": proposal_id})
+        row = result.fetchone()
+        if row:
+            proposal_title = row.title
+            # Record rejection for learning
+            await learn_from_rejection(
+                proposal_type="create_task",
+                rejection_reason=f"{reason}: {proposal_title}",
+                context={
+                    "reason_category": reason,
+                    "project_id": row.project_id,
+                    "priority": row.priority,
+                }
+            )
+        break
+
+    success = await reject_proposal(proposal_id, reason)
+
+    if success:
+        await log_action(
+            "proposal_rejected",
+            "web_ui",
+            summary=f"Rejected proposal: {proposal_title[:50]}",
+            details={"proposal_id": proposal_id, "reason": reason}
+        )
+        return HTMLResponse(f"""
+            <tr id="proposal-{proposal_id}" class="proposal-row rejected">
+                <td colspan="6" style="text-align: center; color: var(--danger); padding: 1rem;">
+                    ✗ Rejected ({reason})
+                </td>
+            </tr>
+        """)
+
+    return HTMLResponse(f"""
+        <tr id="proposal-{proposal_id}">
+            <td colspan="6" style="color: var(--danger);">Failed to reject</td>
+        </tr>
+    """)
+
+
+@app.post("/proposals/bulk-reject", response_class=HTMLResponse)
+async def bulk_reject_proposals(
+    request: Request,
+    reason: str = Form("duplicate"),
+):
+    """Bulk reject selected proposals."""
+    from cognitex.agent.action_log import reject_proposal, log_action, learn_from_rejection
+    from cognitex.db.postgres import get_session
+    from sqlalchemy import text
+
+    form_data = await request.form()
+    proposal_ids = form_data.getlist("proposal_ids")
+
+    rejected_count = 0
+    for proposal_id in proposal_ids:
+        # Get proposal details for learning
+        async for session in get_session():
+            result = await session.execute(text("""
+                SELECT title, project_id, priority FROM task_proposals WHERE id = :id
+            """), {"id": proposal_id})
+            row = result.fetchone()
+            if row:
+                await learn_from_rejection(
+                    proposal_type="create_task",
+                    rejection_reason=f"{reason}: {row.title}",
+                    context={
+                        "reason_category": reason,
+                        "project_id": row.project_id,
+                        "priority": row.priority,
+                    }
+                )
+            break
+
+        if await reject_proposal(proposal_id, reason):
+            rejected_count += 1
+
+    await log_action(
+        "proposals_bulk_rejected",
+        "web_ui",
+        summary=f"Bulk rejected {rejected_count} proposals",
+        details={"count": rejected_count, "reason": reason}
+    )
+
+    # Redirect back to proposals page
+    return HTMLResponse(
+        content="",
+        status_code=303,
+        headers={"HX-Redirect": "/proposals"}
+    )
+
+
 @app.get("/learning", response_class=HTMLResponse)
 async def learning_page(request: Request):
     """Learning system dashboard showing accumulated patterns and insights."""
@@ -4284,6 +4652,79 @@ async def learning_page(request: Request):
     except Exception as e:
         logger.warning("Failed to get last policy update", error=str(e))
 
+    # Get task rejections (from reject & learn feature)
+    task_rejections = []
+    try:
+        from cognitex.db.postgres import get_session as get_pg_session2
+        async for session in get_pg_session2():
+            result = await session.execute(text("""
+                SELECT timestamp, summary, details
+                FROM agent_actions
+                WHERE action_type = 'task_rejected'
+                ORDER BY timestamp DESC
+                LIMIT 10
+            """))
+            for row in result.fetchall():
+                details = row[2] if isinstance(row[2], dict) else {}
+                task_rejections.append({
+                    "timestamp": row[0].strftime("%Y-%m-%d %H:%M") if row[0] else "",
+                    "summary": row[1],
+                    "reason": details.get("reason", ""),
+                    "email_sender": details.get("email_sender", ""),
+                    "email_subject": details.get("email_subject", ""),
+                })
+            break
+    except Exception as e:
+        logger.warning("Failed to get task rejections", error=str(e))
+
+    # Get decision traces summary
+    decision_summary = {"total": 0, "by_action": {}, "recent": []}
+    try:
+        from cognitex.db.postgres import get_session as get_pg_session3
+        async for session in get_pg_session3():
+            # Total count and by action type
+            result = await session.execute(text("""
+                SELECT action_type, COUNT(*) as count
+                FROM decision_traces
+                GROUP BY action_type
+                ORDER BY count DESC
+            """))
+            for row in result.fetchall():
+                decision_summary["by_action"][row[0]] = row[1]
+                decision_summary["total"] += row[1]
+
+            # Recent decisions
+            result = await session.execute(text("""
+                SELECT timestamp, action_type, decision, quality_score
+                FROM decision_traces
+                ORDER BY timestamp DESC
+                LIMIT 10
+            """))
+            for row in result.fetchall():
+                decision_summary["recent"].append({
+                    "timestamp": row[0].strftime("%Y-%m-%d %H:%M") if row[0] else "",
+                    "action_type": row[1],
+                    "decision": row[2],
+                    "quality_score": row[3],
+                })
+            break
+    except Exception as e:
+        logger.warning("Failed to get decision traces", error=str(e))
+
+    # Get pending proposals count for link
+    pending_proposals_count = 0
+    try:
+        from cognitex.db.postgres import get_session as get_pg_session4
+        async for session in get_pg_session4():
+            result = await session.execute(text("""
+                SELECT COUNT(*) FROM task_proposals WHERE status = 'pending'
+            """))
+            row = result.fetchone()
+            pending_proposals_count = row[0] if row else 0
+            break
+    except Exception:
+        pass
+
     # Calculate stats
     total_proposals = proposals.get("total_proposals", 0)
     approval_rate = proposals.get("overall_approval_rate", 0)
@@ -4293,6 +4734,9 @@ async def learning_page(request: Request):
         "total_deferrals": deferral_stats.get("total", 0),
         "total_proposals": total_proposals,
         "approval_rate": approval_rate,
+        "pending_proposals": pending_proposals_count,
+        "total_decisions": decision_summary["total"],
+        "total_task_rejections": len(task_rejections),
     }
 
     return templates.TemplateResponse(
@@ -4308,6 +4752,8 @@ async def learning_page(request: Request):
             "learned_patterns": learned_patterns,
             "rules_by_lifecycle": rules_by_lifecycle,
             "last_update": last_update,
+            "task_rejections": task_rejections,
+            "decision_summary": decision_summary,
         },
     )
 

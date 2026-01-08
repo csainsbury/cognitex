@@ -64,13 +64,29 @@
                         title="Show full email, thread history, related docs and tasks">
                     Deep Context
                 </button>
-                <button class="btn btn-danger btn-sm"
-                        hx-delete="/api/twin/drafts/{{ draft.id }}"
-                        hx-target="#draft-{{ draft.id }}"
-                        hx-swap="outerHTML"
-                        hx-confirm="Discard this draft?">
-                    Discard
-                </button>
+                <div class="dropdown" style="display: inline-block; position: relative;">
+                    <button class="btn btn-danger btn-sm dropdown-toggle"
+                            onclick="this.nextElementSibling.classList.toggle('show')"
+                            title="Reject & Learn">
+                        Reject
+                    </button>
+                    <div class="dropdown-menu" style="display: none; position: absolute; right: 0; background: white; border: 1px solid #ddd; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); z-index: 100; min-width: 200px;">
+                        <form hx-post="/api/twin/drafts/{{ draft.id }}/reject"
+                              hx-target="#draft-{{ draft.id }}"
+                              hx-swap="outerHTML">
+                            <div style="padding: 0.5rem; font-size: 0.75rem; color: #666; border-bottom: 1px solid #eee;">
+                                Why reject? (helps learning)
+                            </div>
+                            <button type="submit" name="reason" value="spam_marketing" class="dropdown-item">Spam/Marketing email</button>
+                            <button type="submit" name="reason" value="automated_email" class="dropdown-item">Automated notification</button>
+                            <button type="submit" name="reason" value="not_actionable" class="dropdown-item">No reply needed</button>
+                            <button type="submit" name="reason" value="wrong_timing" class="dropdown-item">Wrong timing</button>
+                            <button type="submit" name="reason" value="bad_suggestion" class="dropdown-item">Poor draft quality</button>
+                            <button type="submit" name="reason" value="wrong_recipient" class="dropdown-item">Wrong recipient/context</button>
+                            <button type="submit" name="reason" value="will_handle_manually" class="dropdown-item">I'll handle manually</button>
+                        </form>
+                    </div>
+                </div>
             </div>
             <div id="context-{{ draft.id }}"></div>
         </div>

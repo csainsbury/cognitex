@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+
+{% block title %}Task Proposals - Cognitex{% endblock %}
+
+{% block content %}
+<h1>Task Proposals</h1>
+<p style="color: #666; margin-bottom: 1.5rem;">
+    Review proposals from the autonomous agent. Your approvals and rejections help the system learn your preferences.
+</p>
+
+<div class="stats">
+    <div class="stat">
+        <div class="stat-value">{{ stats.pending }}</div>
+        <div class="stat-label">Pending</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value">{{ stats.approved }}</div>
+        <div class="stat-label">Approved</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value">{{ stats.rejected }}</div>
+        <div class="stat-label">Rejected</div>
+    </div>
+    <div class="stat">
+        {% set total = stats.approved + stats.rejected %}
+        {% set rate = (stats.approved / total * 100) if total > 0 else 0 %}
+        <div class="stat-value">{{ "%.0f"|format(rate) }}%</div>
+        <div class="stat-label">Approval Rate</div>
+    </div>
+</div>
+
+{% set pending_proposals = proposals | selectattr('status', 'equalto', 'pending') | list %}
+{% if pending_proposals | length > 0 %}
+<div class="card">
+    <div class="card-header">
+        <h2>Pending Proposals ({{ pending_proposals | length }})</h2>
+        <div style="display: flex; gap: 0.5rem;">
+            <button class="btn btn-secondary btn-sm" onclick="selectAllPending()">Select All</button>
+            <form id="bulk-reject-form" hx-post="/proposals/bulk-reject" hx-swap="none" style="display: inline;">
+                <select name="reason" class="btn btn-sm" style="padding: 0.25rem 0.5rem;">
+                    <option value="not_needed">Not needed</option>
+                    <option value="duplicate">Duplicate</option>
+                    <option value="too_vague">Too vague</option>
+                    <option value="wrong_project">Wrong project</option>
+                    <option value="already_done">Already done</option>
+                    <option value="not_my_task">Not my responsibility</option>
+                    <option value="automated_source">From automated email</option>
+                    <option value="low_priority">Too low priority</option>
+                </select>
+                <button type="submit" class="btn btn-danger btn-sm" onclick="return confirmBulkReject()">
+                    Reject Selected
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th style="width: 30px;"><input type="checkbox" id="select-all" onclick="toggleSelectAll(this)"></th>
+                <th>Title</th>
+                <th>Project</th>
+                <th>Priority</th>
+                <th>Reason</th>
+                <th style="width: 180px;">Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for proposal in pending_proposals %}
+            <tr id="proposal-{{ proposal.id }}" class="proposal-row">
+                <td>
+                    <input type="checkbox" name="proposal_ids" value="{{ proposal.id }}" form="bulk-reject-form" class="proposal-checkbox">
+                </td>
+                <td>
+                    <strong>{{ proposal.title }}</strong>
+                    {% if proposal.description %}
+                    <div style="font-size: 0.85rem; color: #666; margin-top: 0.25rem;">
+                        {{ proposal.description[:100] }}{% if proposal.description | length > 100 %}...{% endif %}
+                    </div>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if proposal.project_name %}
+                    <span style="font-size: 0.85rem;">{{ proposal.project_name }}</span>
+                    {% else %}
+                    <span style="color: #999;">-</span>
+                    {% endif %}
+                </td>
+                <td><span class="priority-{{ proposal.priority }}">{{ proposal.priority }}</span></td>
+                <td style="font-size: 0.85rem; color: #666;">{{ proposal.reason[:80] if proposal.reason else '-' }}{% if proposal.reason and proposal.reason | length > 80 %}...{% endif %}</td>
+                <td>
+                    <button class="btn btn-success btn-sm"
+                            hx-post="/proposals/{{ proposal.id }}/approve"
+                            hx-target="#proposal-{{ proposal.id }}"
+                            hx-swap="outerHTML"
+                            title="Approve">
+                        ✓ Approve
+                    </button>
+                    <div class="dropdown" style="display: inline-block; position: relative;">
+                        <button class="btn btn-danger btn-sm"
+                                onclick="this.nextElementSibling.classList.toggle('show')"
+                                title="Reject">
+                            ✗ Reject
+                        </button>
+                        <div class="dropdown-menu" style="display: none; position: absolute; right: 0; background: white; border: 1px solid #ddd; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); z-index: 100; min-width: 180px;">
+                            <form hx-post="/proposals/{{ proposal.id }}/reject"
+                                  hx-target="#proposal-{{ proposal.id }}"
+                                  hx-swap="outerHTML">
+                                <div style="padding: 0.5rem; font-size: 0.75rem; color: #666; border-bottom: 1px solid #eee;">
+                                    Why reject? (helps learning)
+                                </div>
+                                <button type="submit" name="reason" value="not_needed" class="dropdown-item">Not needed</button>
+                                <button type="submit" name="reason" value="duplicate" class="dropdown-item">Duplicate task</button>
+                                <button type="submit" name="reason" value="too_vague" class="dropdown-item">Too vague</button>
+                                <button type="submit" name="reason" value="wrong_project" class="dropdown-item">Wrong project</button>
+                                <button type="submit" name="reason" value="already_done" class="dropdown-item">Already done</button>
+                                <button type="submit" name="reason" value="not_my_task" class="dropdown-item">Not my responsibility</button>
+                                <button type="submit" name="reason" value="automated_source" class="dropdown-item">From automated email</button>
+                                <button type="submit" name="reason" value="low_priority" class="dropdown-item">Too low priority</button>
+                            </form>
+                        </div>
+                    </div>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% set decided_proposals = proposals | rejectattr('status', 'equalto', 'pending') | list %}
+{% if decided_proposals | length > 0 %}
+<div class="card" style="margin-top: 2rem;">
+    <h2>Recent Decisions</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Title</th>
+                <th>Status</th>
+                <th>Reason</th>
+                <th>Decided</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for proposal in decided_proposals[:20] %}
+            <tr class="{% if proposal.status == 'approved' %}approved{% else %}rejected{% endif %}">
+                <td>{{ proposal.title }}</td>
+                <td>
+                    {% if proposal.status == 'approved' %}
+                    <span style="color: var(--success);">✓ Approved</span>
+                    {% else %}
+                    <span style="color: var(--danger);">✗ Rejected</span>
+                    {% endif %}
+                </td>
+                <td style="font-size: 0.85rem; color: #666;">{{ proposal.decision_reason or '-' }}</td>
+                <td style="font-size: 0.85rem; color: #666;">{{ proposal.decision_at.strftime('%Y-%m-%d %H:%M') if proposal.decision_at else '-' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% if not pending_proposals and not decided_proposals %}
+<div class="card">
+    <p class="empty">No proposals yet. The autonomous agent will create proposals when it identifies tasks to suggest.</p>
+</div>
+{% endif %}
+
+<script>
+function toggleSelectAll(checkbox) {
+    document.querySelectorAll('.proposal-checkbox').forEach(cb => {
+        cb.checked = checkbox.checked;
+    });
+}
+
+function selectAllPending() {
+    document.querySelectorAll('.proposal-checkbox').forEach(cb => {
+        cb.checked = true;
+    });
+    document.getElementById('select-all').checked = true;
+}
+
+function confirmBulkReject() {
+    const selected = document.querySelectorAll('.proposal-checkbox:checked').length;
+    if (selected === 0) {
+        alert('No proposals selected');
+        return false;
+    }
+    return confirm(`Reject ${selected} selected proposals?`);
+}
+
+// Handle bulk reject redirect
+document.body.addEventListener('htmx:beforeOnLoad', function(evt) {
+    if (evt.detail.xhr.getResponseHeader('HX-Redirect')) {
+        window.location.href = evt.detail.xhr.getResponseHeader('HX-Redirect');
+    }
+});
+</script>
+
+<style>
+.proposal-row.approved {
+    background-color: #ecfdf5;
+}
+.proposal-row.rejected {
+    background-color: #fef2f2;
+}
+tr.approved {
+    background-color: #f0fdf4;
+}
+tr.rejected {
+    background-color: #fef2f2;
+}
+</style>
+{% endblock %}

@@ -283,6 +283,38 @@
             border-color: var(--success);
         }
 
+        .btn-warning {
+            background-color: #fff;
+            color: #d97706;
+            border-color: #fcd34d;
+        }
+
+        .btn-warning:hover {
+            background-color: #fffbeb;
+            border-color: #d97706;
+        }
+
+        /* Dropdown styles */
+        .dropdown-menu.show {
+            display: block !important;
+        }
+
+        .dropdown-item {
+            display: block;
+            width: 100%;
+            padding: 0.4rem 0.75rem;
+            font-size: 0.85rem;
+            color: var(--text-main);
+            background: none;
+            border: none;
+            text-align: left;
+            cursor: pointer;
+        }
+
+        .dropdown-item:hover {
+            background-color: #f3f4f6;
+        }
+
         .btn-sm {
             padding: 0.25rem 0.6rem;
             font-size: 0.75rem;
@@ -860,6 +892,7 @@
             <a href="/ideas" {% if "/ideas" in request.url.path %}class="active"{% endif %}>Ideas</a>
             <a href="/graph" {% if "/graph" in request.url.path %}class="active"{% endif %}>Graph</a>
             <a href="/state" {% if "/state" in request.url.path %}class="active"{% endif %}>State</a>
+            <a href="/proposals" {% if "/proposals" in request.url.path %}class="active"{% endif %}>Proposals</a>
             <a href="/learning" {% if "/learning" in request.url.path %}class="active"{% endif %}>Learning</a>
             <a href="/agent-log" {% if "/agent-log" in request.url.path %}class="active"{% endif %}>Agent Log</a>
             <a href="/twin" {% if "/twin" in request.url.path %}class="active"{% endif %}>Twin</a>
@@ -1180,6 +1213,15 @@
 
     document.addEventListener('DOMContentLoaded', initPeoplePickers);
     document.body.addEventListener('htmx:afterSwap', initPeoplePickers);
+
+    // Close dropdowns when clicking outside
+    document.addEventListener('click', function(e) {
+        if (!e.target.closest('.dropdown')) {
+            document.querySelectorAll('.dropdown-menu.show').forEach(menu => {
+                menu.classList.remove('show');
+            });
+        }
+    });
     </script>
 </body>
 </html>
