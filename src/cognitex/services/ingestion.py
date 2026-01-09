@@ -98,11 +98,23 @@ async def ingest_email_to_graph(
 
         # Determine if this is a sent email (user is the sender or has SENT label)
         labels = email_data.get("labels", [])
-        sender_is_user = (
-            email_data["sender_email"]
-            and user_email_lower
-            and email_data["sender_email"].lower() == user_email_lower
-        )
+
+        # Check if sender is a known user email (supports multiple user emails)
+        sender_is_user = False
+        if email_data["sender_email"]:
+            # First check against primary user email
+            if user_email_lower and email_data["sender_email"].lower() == user_email_lower:
+                sender_is_user = True
+            else:
+                # Check if sender Person node has is_user=true (for secondary emails)
+                result = await session.run(
+                    "MATCH (p:Person {email: $email}) RETURN p.is_user as is_user",
+                    {"email": email_data["sender_email"]}
+                )
+                record = await result.single()
+                if record and record.get("is_user"):
+                    sender_is_user = True
+
         is_sent = sender_is_user or "SENT" in labels
 
         # Create Email node with classification
