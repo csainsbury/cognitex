@@ -64,7 +64,7 @@
         <span style="color: #9ca3af; font-size: 0.75rem;">+ steps</span>
         {% endif %}
     </td>
-    <td class="actions">
+    <td class="actions" onclick="event.stopPropagation()">
         {% if task.status != 'done' %}
         <button class="btn btn-success btn-sm"
                 hx-post="/tasks/{{ task.id }}/complete"
