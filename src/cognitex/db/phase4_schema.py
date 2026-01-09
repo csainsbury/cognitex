@@ -115,6 +115,26 @@ CREATE INDEX IF NOT EXISTS idx_state_obs_outcome ON state_observations(outcome);
 CREATE INDEX IF NOT EXISTS idx_state_obs_clinical ON state_observations(post_clinical);
 CREATE INDEX IF NOT EXISTS idx_state_obs_timestamp ON state_observations(observed_at);
 
+-- User feedback for nuanced learning (semantic retrieval + rule extraction)
+CREATE TABLE IF NOT EXISTS user_feedback (
+    id TEXT PRIMARY KEY,
+    target_type TEXT NOT NULL,      -- 'context_pack', 'email_draft', 'task', 'proposal'
+    target_id TEXT NOT NULL,
+    feedback_category TEXT,         -- Quick-select category (e.g., 'not_needed', 'spam_marketing')
+    feedback_text TEXT,             -- Free text details for nuanced learning
+    feedback_embedding vector(768), -- Semantic embedding for retrieval
+    context JSONB DEFAULT '{}',     -- Rich context snapshot (email_subject, sender, etc.)
+    was_rejection BOOLEAN DEFAULT false,
+    action_taken TEXT,              -- 'rejected', 'edited', 'approved_with_note'
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_feedback_type ON user_feedback(target_type);
+CREATE INDEX IF NOT EXISTS idx_user_feedback_target ON user_feedback(target_id);
+CREATE INDEX IF NOT EXISTS idx_user_feedback_rejection ON user_feedback(was_rejection);
+CREATE INDEX IF NOT EXISTS idx_user_feedback_created ON user_feedback(created_at);
+CREATE INDEX IF NOT EXISTS idx_user_feedback_category ON user_feedback(feedback_category);
+
 -- Add lifecycle columns to preference_rules if they don't exist
 -- These are added via ALTER TABLE to preserve existing data
 """

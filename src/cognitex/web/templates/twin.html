@@ -70,20 +70,37 @@
                             title="Reject & Learn">
                         Reject
                     </button>
-                    <div class="dropdown-menu" style="display: none; position: absolute; right: 0; background: white; border: 1px solid #ddd; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); z-index: 100; min-width: 200px;">
-                        <form hx-post="/api/twin/drafts/{{ draft.id }}/reject"
+                    <div class="dropdown-menu" id="reject-menu-{{ draft.id }}" style="display: none; position: absolute; right: 0; background: white; border: 1px solid #ddd; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); z-index: 100; min-width: 280px;">
+                        <form id="reject-form-{{ draft.id }}"
+                              hx-post="/api/twin/drafts/{{ draft.id }}/reject"
                               hx-target="#draft-{{ draft.id }}"
                               hx-swap="outerHTML">
-                            <div style="padding: 0.5rem; font-size: 0.75rem; color: #666; border-bottom: 1px solid #eee;">
-                                Why reject? (helps learning)
+                            <div class="reason-select" id="reason-select-{{ draft.id }}">
+                                <div style="padding: 0.5rem; font-size: 0.75rem; color: #666; border-bottom: 1px solid #eee;">
+                                    Why reject? (helps learning)
+                                </div>
+                                <button type="button" onclick="selectRejectReason('{{ draft.id }}', 'spam_marketing', 'Spam/Marketing')" class="dropdown-item">Spam/Marketing email</button>
+                                <button type="button" onclick="selectRejectReason('{{ draft.id }}', 'automated_email', 'Automated notification')" class="dropdown-item">Automated notification</button>
+                                <button type="button" onclick="selectRejectReason('{{ draft.id }}', 'not_actionable', 'No reply needed')" class="dropdown-item">No reply needed</button>
+                                <button type="button" onclick="selectRejectReason('{{ draft.id }}', 'wrong_timing', 'Wrong timing')" class="dropdown-item">Wrong timing</button>
+                                <button type="button" onclick="selectRejectReason('{{ draft.id }}', 'bad_suggestion', 'Poor draft quality')" class="dropdown-item">Poor draft quality</button>
+                                <button type="button" onclick="selectRejectReason('{{ draft.id }}', 'wrong_recipient', 'Wrong recipient/context')" class="dropdown-item">Wrong recipient/context</button>
+                                <button type="button" onclick="selectRejectReason('{{ draft.id }}', 'will_handle_manually', 'I will handle manually')" class="dropdown-item">I'll handle manually</button>
                             </div>
-                            <button type="submit" name="reason" value="spam_marketing" class="dropdown-item">Spam/Marketing email</button>
-                            <button type="submit" name="reason" value="automated_email" class="dropdown-item">Automated notification</button>
-                            <button type="submit" name="reason" value="not_actionable" class="dropdown-item">No reply needed</button>
-                            <button type="submit" name="reason" value="wrong_timing" class="dropdown-item">Wrong timing</button>
-                            <button type="submit" name="reason" value="bad_suggestion" class="dropdown-item">Poor draft quality</button>
-                            <button type="submit" name="reason" value="wrong_recipient" class="dropdown-item">Wrong recipient/context</button>
-                            <button type="submit" name="reason" value="will_handle_manually" class="dropdown-item">I'll handle manually</button>
+                            <div class="feedback-prompt" id="feedback-prompt-{{ draft.id }}" style="display: none; padding: 0.75rem;">
+                                <input type="hidden" name="reason" id="reason-{{ draft.id }}" value="">
+                                <p style="margin: 0 0 0.5rem 0; font-size: 0.85rem; color: #333;">
+                                    <strong id="reason-label-{{ draft.id }}"></strong>
+                                </p>
+                                <p style="margin: 0 0 0.5rem 0; font-size: 0.8rem; color: #666;">
+                                    Want to add details? <span style="color: #999;">(helps improve suggestions)</span>
+                                </p>
+                                <textarea name="reason_text" placeholder="e.g., 'This sender is actually a colleague' or 'I never respond to this type of email'" style="width: 100%; min-height: 60px; font-size: 0.85rem; padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px; resize: vertical;"></textarea>
+                                <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+                                    <button type="submit" class="btn btn-danger btn-sm">Reject with Feedback</button>
+                                    <button type="submit" class="btn btn-secondary btn-sm" onclick="document.querySelector('#reject-form-{{ draft.id }} textarea').value = ''">Skip Details</button>
+                                </div>
+                            </div>
                         </form>
                     </div>
                 </div>
@@ -267,4 +284,14 @@
         font-family: inherit;
     }
 </style>
+
+<script>
+function selectRejectReason(draftId, reason, label) {
+    // Hide the reason selection, show the feedback prompt
+    document.getElementById('reason-select-' + draftId).style.display = 'none';
+    document.getElementById('feedback-prompt-' + draftId).style.display = 'block';
+    document.getElementById('reason-' + draftId).value = reason;
+    document.getElementById('reason-label-' + draftId).textContent = label;
+}
+</script>
 {% endblock %}

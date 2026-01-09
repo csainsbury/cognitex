@@ -476,6 +476,46 @@ class AutonomousAgent:
         except Exception as e:
             logger.debug("Failed to get proposal patterns", error=str(e))
 
+        # 5. User feedback rules and similar past feedback (Phase 4 feedback learning)
+        # This includes nuanced free-text feedback from users
+        try:
+            from cognitex.agent.feedback_learning import get_learning_context_for_decision
+
+            # Get learning context for task decisions
+            feedback_context = await get_learning_context_for_decision(
+                target_type="task",
+                context_summary="autonomous agent task creation cycle",
+                include_rules=True,
+                include_similar_feedback=True,
+                max_rules=5,
+                max_feedback=3,
+            )
+
+            # Add formatted prompt text if available
+            if feedback_context.get("prompt_text"):
+                learned_lines.append(f"\n{feedback_context['prompt_text']}")
+
+            # Also get context for email draft decisions
+            email_feedback = await get_learning_context_for_decision(
+                target_type="email_draft",
+                context_summary="autonomous agent email draft cycle",
+                include_rules=True,
+                include_similar_feedback=True,
+                max_rules=3,
+                max_feedback=2,
+            )
+
+            if email_feedback.get("prompt_text"):
+                learned_lines.append(f"\n### Email Draft Preferences")
+                # Extract just the content, avoid duplicating headers
+                email_text = email_feedback["prompt_text"]
+                for line in email_text.split("\n"):
+                    if line.startswith("- ") and line not in learned_lines:
+                        learned_lines.append(line)
+
+        except Exception as e:
+            logger.debug("Failed to get feedback learning context", error=str(e))
+
         learned_guidelines = "\n".join(learned_lines) if learned_lines else "(No specific guidelines yet - keep learning from feedback)"
 
         # =====================================================================

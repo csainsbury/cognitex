@@ -82,20 +82,37 @@
             <button class="btn btn-warning btn-sm dropdown-toggle"
                     onclick="this.nextElementSibling.classList.toggle('show')"
                     title="Reject & Learn">&#128683;</button>
-            <div class="dropdown-menu" style="display: none; position: absolute; right: 0; background: white; border: 1px solid #ddd; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); z-index: 100; min-width: 180px;">
-                <form hx-post="/tasks/{{ task.id }}/reject"
+            <div class="dropdown-menu" id="task-reject-menu-{{ task.id }}" style="display: none; position: absolute; right: 0; background: white; border: 1px solid #ddd; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); z-index: 100; min-width: 250px;">
+                <form id="task-reject-form-{{ task.id }}"
+                      hx-post="/tasks/{{ task.id }}/reject"
                       hx-target="#task-{{ task.id }}"
                       hx-swap="outerHTML"
                       hx-on::after-request="document.getElementById('subtasks-{{ task.id }}')?.remove()">
-                    <div style="padding: 0.5rem; font-size: 0.8rem; color: #666; border-bottom: 1px solid #eee;">
-                        Reject & teach the system:
+                    <div class="reason-select" id="task-reason-select-{{ task.id }}">
+                        <div style="padding: 0.5rem; font-size: 0.8rem; color: #666; border-bottom: 1px solid #eee;">
+                            Reject & teach the system:
+                        </div>
+                        <button type="button" onclick="selectTaskRejectReason('{{ task.id }}', 'automated_notification', 'Automated notification')" class="dropdown-item">Automated notification</button>
+                        <button type="button" onclick="selectTaskRejectReason('{{ task.id }}', 'not_actionable', 'Not actually actionable')" class="dropdown-item">Not actually actionable</button>
+                        <button type="button" onclick="selectTaskRejectReason('{{ task.id }}', 'already_handled', 'Already handled')" class="dropdown-item">Already handled</button>
+                        <button type="button" onclick="selectTaskRejectReason('{{ task.id }}', 'not_my_task', 'Not my responsibility')" class="dropdown-item">Not my responsibility</button>
+                        <button type="button" onclick="selectTaskRejectReason('{{ task.id }}', 'duplicate', 'Duplicate task')" class="dropdown-item">Duplicate task</button>
+                        <button type="button" onclick="selectTaskRejectReason('{{ task.id }}', 'spam_marketing', 'Spam/Marketing email')" class="dropdown-item">Spam/Marketing email</button>
                     </div>
-                    <button type="submit" name="reason" value="automated_notification" class="dropdown-item">Automated notification</button>
-                    <button type="submit" name="reason" value="not_actionable" class="dropdown-item">Not actually actionable</button>
-                    <button type="submit" name="reason" value="already_handled" class="dropdown-item">Already handled</button>
-                    <button type="submit" name="reason" value="not_my_task" class="dropdown-item">Not my responsibility</button>
-                    <button type="submit" name="reason" value="duplicate" class="dropdown-item">Duplicate task</button>
-                    <button type="submit" name="reason" value="spam_marketing" class="dropdown-item">Spam/Marketing email</button>
+                    <div class="feedback-prompt" id="task-feedback-prompt-{{ task.id }}" style="display: none; padding: 0.75rem;">
+                        <input type="hidden" name="reason" id="task-reason-{{ task.id }}" value="">
+                        <p style="margin: 0 0 0.5rem 0; font-size: 0.85rem; color: #333;">
+                            <strong id="task-reason-label-{{ task.id }}"></strong>
+                        </p>
+                        <p style="margin: 0 0 0.5rem 0; font-size: 0.8rem; color: #666;">
+                            Add details? <span style="color: #999;">(optional)</span>
+                        </p>
+                        <textarea name="reason_text" placeholder="e.g., 'Tasks from this sender are always FYI only'" style="width: 100%; min-height: 50px; font-size: 0.85rem; padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+                        <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+                            <button type="submit" class="btn btn-warning btn-sm">Reject</button>
+                            <button type="submit" class="btn btn-secondary btn-sm" onclick="document.querySelector('#task-reject-form-{{ task.id }} textarea').value = ''">Skip</button>
+                        </div>
+                    </div>
                 </form>
             </div>
         </div>

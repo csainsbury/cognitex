@@ -283,6 +283,8 @@ Classify this email with the following fields:
 - suggested_tasks: array of task titles if action is required (empty array if not)
 - deadline_mentioned: string or null - any deadline mentioned in the email
 - key_points: array of 1-3 key points from the email (for quick scanning)
+- needs_research: boolean - does this email reference topics, entities, projects, or concepts that would benefit from background research before responding? (e.g., mentions unfamiliar companies, technical terms, people you should know about, project history)
+- research_topics: array of strings - if needs_research is true, list specific topics to research (e.g., ["Acme Corp Q3 results", "Project Aurora timeline", "Jane Smith background"])
 
 Return ONLY valid JSON, no other text."""
 
@@ -323,6 +325,8 @@ Return ONLY valid JSON, no other text."""
                 "reply_needed": result.get("response_type") in ("reply_needed", "acknowledge"),
                 "deadline_mentioned": result.get("deadline_mentioned"),
                 "key_points": result.get("key_points", []),
+                "needs_research": bool(result.get("needs_research", False)),
+                "research_topics": result.get("research_topics", []),
             }
 
         except json.JSONDecodeError as e:
@@ -339,6 +343,8 @@ Return ONLY valid JSON, no other text."""
                 "reply_needed": False,
                 "deadline_mentioned": None,
                 "key_points": [],
+                "needs_research": False,
+                "research_topics": [],
                 "parse_error": str(e),
             }
 

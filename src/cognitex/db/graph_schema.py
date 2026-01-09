@@ -31,6 +31,7 @@ SCHEMA_STATEMENTS = [
     "CREATE INDEX email_date IF NOT EXISTS FOR (e:Email) ON (e.date)",
     "CREATE INDEX email_thread_id IF NOT EXISTS FOR (e:Email) ON (e.thread_id)",
     "CREATE INDEX email_action_required IF NOT EXISTS FOR (e:Email) ON (e.action_required)",
+    "CREATE INDEX email_needs_research IF NOT EXISTS FOR (e:Email) ON (e.needs_research)",
     "CREATE INDEX event_start IF NOT EXISTS FOR (ev:Event) ON (ev.start)",
     "CREATE INDEX task_status IF NOT EXISTS FOR (t:Task) ON (t.status)",
     "CREATE INDEX task_due IF NOT EXISTS FOR (t:Task) ON (t.due_date)",
@@ -135,6 +136,8 @@ async def create_email(
     urgency: int | None = None,
     labels: list[str] | None = None,
     is_sent: bool = False,
+    needs_research: bool = False,
+    research_topics: list[str] | None = None,
 ) -> dict:
     """Create an Email node."""
     query = """
@@ -151,6 +154,8 @@ async def create_email(
         e.urgency = $urgency,
         e.labels = $labels,
         e.is_sent = $is_sent,
+        e.needs_research = $needs_research,
+        e.research_topics = $research_topics,
         e.created_at = datetime(),
         e.processed = false
     ON MATCH SET
@@ -159,7 +164,9 @@ async def create_email(
         e.classification = COALESCE($classification, e.classification),
         e.urgency = COALESCE($urgency, e.urgency),
         e.labels = COALESCE($labels, e.labels),
-        e.is_sent = COALESCE($is_sent, e.is_sent)
+        e.is_sent = COALESCE($is_sent, e.is_sent),
+        e.needs_research = COALESCE($needs_research, e.needs_research),
+        e.research_topics = COALESCE($research_topics, e.research_topics)
     RETURN e
     """
     result = await session.run(
@@ -176,6 +183,8 @@ async def create_email(
         urgency=urgency,
         labels=labels or [],
         is_sent=is_sent,
+        needs_research=needs_research,
+        research_topics=research_topics or [],
     )
     record = await result.single()
     return dict(record["e"]) if record else {}

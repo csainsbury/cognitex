@@ -395,6 +395,225 @@ class ContextPackCompiler:
         )
         return pack
 
+    async def compile_research_pack(
+        self,
+        email: dict,
+        research_topics: list[str],
+    ) -> ContextPackContent:
+        """Compile a research briefing pack for an email.
+
+        Gathers background context on specified topics before the user
+        needs to respond. Uses semantic search and graph traversal to
+        find related documents, people, and prior communications.
+
+        Args:
+            email: Email dict with gmail_id, subject, snippet, etc.
+            research_topics: List of topics to research (from classification)
+
+        Returns:
+            ContextPackContent with research briefing
+        """
+        from cognitex.services.llm import get_llm_service
+
+        pack_id = f"pack_{uuid.uuid4().hex[:12]}"
+        gmail_id = email.get("gmail_id")
+        subject = email.get("subject", "")
+
+        llm = get_llm_service()
+        topic_briefings = []
+        all_artifacts = []
+        key_facts = []
+        related_people = []
+
+        for topic in research_topics[:5]:  # Max 5 topics
+            topic_brief = {
+                "topic": topic,
+                "summary": "",
+                "documents": [],
+                "entities": [],
+            }
+
+            # Semantic search for related documents
+            try:
+                from cognitex.db.postgres import get_session as get_postgres_session
+                from cognitex.services.ingestion import search_chunks_semantic
+
+                async for pg_session in get_postgres_session():
+                    chunks = await search_chunks_semantic(pg_session, topic, limit=5)
+
+                    for chunk in chunks:
+                        doc_name = await self._get_document_name(chunk.get("drive_id"))
+                        if doc_name and chunk.get("similarity", 0) > 0.5:
+                            topic_brief["documents"].append({
+                                "name": doc_name,
+                                "drive_id": chunk.get("drive_id"),
+                                "snippet": chunk.get("content", "")[:200],
+                                "relevance": chunk.get("similarity", 0),
+                            })
+                            all_artifacts.append({
+                                "title": f"{doc_name} (re: {topic})",
+                                "url": f"https://drive.google.com/file/d/{chunk.get('drive_id')}/view",
+                                "drive_id": chunk.get("drive_id"),
+                                "relevance_score": chunk.get("similarity", 0.5),
+                                "snippet": chunk.get("content", "")[:150] + "...",
+                                "reviewed": False,
+                            })
+                    break
+
+            except Exception as e:
+                logger.warning("Failed to search docs for topic", topic=topic, error=str(e))
+
+            # Graph search for related entities (people, projects)
+            try:
+                async for session in get_neo4j_session():
+                    # Search for people/projects mentioned in relation to topic
+                    entity_query = """
+                    MATCH (c:Chunk)
+                    WHERE c.content CONTAINS $topic OR c.summary CONTAINS $topic
+                    OPTIONAL MATCH (c)-[:MENTIONS]->(p:Person)
+                    OPTIONAL MATCH (c)-[:RELATES_TO]->(proj:Project)
+                    WITH p, proj
+                    WHERE p IS NOT NULL OR proj IS NOT NULL
+                    RETURN
+                        COLLECT(DISTINCT {type: 'person', name: p.name, email: p.email}) as people,
+                        COLLECT(DISTINCT {type: 'project', title: proj.title, id: proj.id}) as projects
+                    LIMIT 1
+                    """
+                    result = await session.run(entity_query, {"topic": topic})
+                    record = await result.single()
+
+                    if record:
+                        people = record.get("people", [])
+                        projects = record.get("projects", [])
+
+                        for person in people[:3]:
+                            if person.get("name"):
+                                topic_brief["entities"].append(person)
+                                if person not in related_people:
+                                    related_people.append(person)
+
+                        for proj in projects[:2]:
+                            if proj.get("title"):
+                                topic_brief["entities"].append(proj)
+
+            except Exception as e:
+                logger.warning("Failed to search entities for topic", topic=topic, error=str(e))
+
+            # Generate topic summary using LLM if we have documents
+            if topic_brief["documents"]:
+                doc_context = "\n".join([
+                    f"- {d['name']}: {d['snippet'][:150]}..."
+                    for d in topic_brief["documents"][:3]
+                ])
+                entity_context = ", ".join([
+                    e.get("name") or e.get("title", "")
+                    for e in topic_brief["entities"][:5]
+                ])
+
+                try:
+                    summary_prompt = f"""Summarize the key information about "{topic}" based on these sources:
+
+{doc_context}
+
+Related people/projects: {entity_context or 'None identified'}
+
+Provide a 2-3 sentence briefing that would help someone respond to an email about this topic.
+Focus on facts, recent developments, and key relationships."""
+
+                    topic_brief["summary"] = await llm.complete(
+                        summary_prompt,
+                        model=llm.fast_model,
+                        max_tokens=200,
+                        temperature=0.3,
+                    )
+
+                    # Extract key facts
+                    key_facts.append(f"**{topic}**: {topic_brief['summary'][:200]}")
+
+                except Exception as e:
+                    logger.warning("Failed to generate topic summary", topic=topic, error=str(e))
+                    topic_brief["summary"] = f"Found {len(topic_brief['documents'])} related documents."
+
+            topic_briefings.append(topic_brief)
+
+        # Build the context pack
+        objective = f"Research background for: {subject[:60]}"
+
+        # Format last touch as research summary
+        research_recap = self._format_research_recap(topic_briefings)
+
+        # Generate decision support
+        decisions = []
+        if related_people:
+            decisions.append(f"Consider cc'ing: {', '.join(p.get('name', p.get('email', '')) for p in related_people[:3])}")
+
+        pack = ContextPackContent(
+            pack_id=pack_id,
+            task_id=f"email_{gmail_id}",
+            objective=objective,
+            last_touch_recap=research_recap,
+            artifact_links=all_artifacts[:8],
+            decision_list=decisions,
+            dont_forget=key_facts[:5],
+            build_stage=BuildStage.T_24H,
+            readiness_score=0.8 if topic_briefings else 0.4,
+        )
+
+        # Store pack
+        await self._store_pack(pack)
+
+        # Link to email in graph
+        try:
+            async for session in get_neo4j_session():
+                link_query = """
+                MATCH (e:Email {gmail_id: $gmail_id})
+                MATCH (p:ContextPack {id: $pack_id})
+                SET p.pack_type = 'research'
+                MERGE (e)-[:HAS_PACK]->(p)
+                """
+                await session.run(link_query, {
+                    "gmail_id": gmail_id,
+                    "pack_id": pack.pack_id,
+                })
+        except Exception as e:
+            logger.warning("Failed to link research pack to email", error=str(e))
+
+        logger.info(
+            "Compiled research pack",
+            pack_id=pack_id,
+            email_subject=subject[:30],
+            topics=len(research_topics),
+            docs_found=len(all_artifacts),
+        )
+        return pack
+
+    def _format_research_recap(self, topic_briefings: list[dict]) -> str:
+        """Format research briefings into readable recap."""
+        if not topic_briefings:
+            return "No research topics identified."
+
+        lines = ["## Research Briefing\n"]
+        for brief in topic_briefings:
+            topic = brief.get("topic", "Unknown")
+            summary = brief.get("summary", "No information found.")
+            docs = brief.get("documents", [])
+            entities = brief.get("entities", [])
+
+            lines.append(f"### {topic}\n")
+            lines.append(f"{summary}\n")
+
+            if docs:
+                lines.append(f"\n_Sources: {len(docs)} documents_")
+
+            if entities:
+                entity_names = [e.get("name") or e.get("title") for e in entities if e.get("name") or e.get("title")]
+                if entity_names:
+                    lines.append(f"\n_Related: {', '.join(entity_names[:4])}_")
+
+            lines.append("")
+
+        return "\n".join(lines)
+
     async def refresh_pack(
         self,
         pack_id: str,
@@ -1181,6 +1400,28 @@ class ContextPackTriggerSystem:
 
                 for email in emails:
                     await self._create_email_response_pack(email)
+
+                # Also check for emails needing research
+                research_query = """
+                MATCH (e:Email)
+                WHERE e.needs_research = true
+                  AND e.date > datetime() - duration('P7D')
+                  AND NOT EXISTS {
+                    MATCH (e)-[:HAS_PACK]->(p:ContextPack {pack_type: 'research'})
+                  }
+                RETURN e.gmail_id as gmail_id, e.subject as subject,
+                       e.snippet as snippet, e.research_topics as research_topics,
+                       e.date as date
+                ORDER BY e.date DESC
+                LIMIT 5
+                """
+                research_result = await session.run(research_query)
+                research_emails = await research_result.data()
+
+                for email in research_emails:
+                    topics = email.get("research_topics", [])
+                    if topics:
+                        await self.compiler.compile_research_pack(email, topics)
 
         except Exception as e:
             logger.warning("Failed to check actionable emails", error=str(e))

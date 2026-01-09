@@ -102,21 +102,38 @@
                                 title="Reject">
                             ✗ Reject
                         </button>
-                        <div class="dropdown-menu" style="display: none; position: absolute; right: 0; background: white; border: 1px solid #ddd; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); z-index: 100; min-width: 180px;">
-                            <form hx-post="/proposals/{{ proposal.id }}/reject"
+                        <div class="dropdown-menu" id="proposal-reject-menu-{{ proposal.id }}" style="display: none; position: absolute; right: 0; background: white; border: 1px solid #ddd; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); z-index: 100; min-width: 250px;">
+                            <form id="proposal-reject-form-{{ proposal.id }}"
+                                  hx-post="/proposals/{{ proposal.id }}/reject"
                                   hx-target="#proposal-{{ proposal.id }}"
                                   hx-swap="outerHTML">
-                                <div style="padding: 0.5rem; font-size: 0.75rem; color: #666; border-bottom: 1px solid #eee;">
-                                    Why reject? (helps learning)
+                                <div class="reason-select" id="proposal-reason-select-{{ proposal.id }}">
+                                    <div style="padding: 0.5rem; font-size: 0.75rem; color: #666; border-bottom: 1px solid #eee;">
+                                        Why reject? (helps learning)
+                                    </div>
+                                    <button type="button" onclick="selectProposalRejectReason('{{ proposal.id }}', 'not_needed', 'Not needed')" class="dropdown-item">Not needed</button>
+                                    <button type="button" onclick="selectProposalRejectReason('{{ proposal.id }}', 'duplicate', 'Duplicate task')" class="dropdown-item">Duplicate task</button>
+                                    <button type="button" onclick="selectProposalRejectReason('{{ proposal.id }}', 'too_vague', 'Too vague')" class="dropdown-item">Too vague</button>
+                                    <button type="button" onclick="selectProposalRejectReason('{{ proposal.id }}', 'wrong_project', 'Wrong project')" class="dropdown-item">Wrong project</button>
+                                    <button type="button" onclick="selectProposalRejectReason('{{ proposal.id }}', 'already_done', 'Already done')" class="dropdown-item">Already done</button>
+                                    <button type="button" onclick="selectProposalRejectReason('{{ proposal.id }}', 'not_my_task', 'Not my responsibility')" class="dropdown-item">Not my responsibility</button>
+                                    <button type="button" onclick="selectProposalRejectReason('{{ proposal.id }}', 'automated_source', 'From automated email')" class="dropdown-item">From automated email</button>
+                                    <button type="button" onclick="selectProposalRejectReason('{{ proposal.id }}', 'low_priority', 'Too low priority')" class="dropdown-item">Too low priority</button>
                                 </div>
-                                <button type="submit" name="reason" value="not_needed" class="dropdown-item">Not needed</button>
-                                <button type="submit" name="reason" value="duplicate" class="dropdown-item">Duplicate task</button>
-                                <button type="submit" name="reason" value="too_vague" class="dropdown-item">Too vague</button>
-                                <button type="submit" name="reason" value="wrong_project" class="dropdown-item">Wrong project</button>
-                                <button type="submit" name="reason" value="already_done" class="dropdown-item">Already done</button>
-                                <button type="submit" name="reason" value="not_my_task" class="dropdown-item">Not my responsibility</button>
-                                <button type="submit" name="reason" value="automated_source" class="dropdown-item">From automated email</button>
-                                <button type="submit" name="reason" value="low_priority" class="dropdown-item">Too low priority</button>
+                                <div class="feedback-prompt" id="proposal-feedback-prompt-{{ proposal.id }}" style="display: none; padding: 0.75rem;">
+                                    <input type="hidden" name="reason" id="proposal-reason-{{ proposal.id }}" value="">
+                                    <p style="margin: 0 0 0.5rem 0; font-size: 0.85rem; color: #333;">
+                                        <strong id="proposal-reason-label-{{ proposal.id }}"></strong>
+                                    </p>
+                                    <p style="margin: 0 0 0.5rem 0; font-size: 0.8rem; color: #666;">
+                                        Add details? <span style="color: #999;">(optional)</span>
+                                    </p>
+                                    <textarea name="reason_text" placeholder="e.g., 'This type of task should be assigned to the ops team'" style="width: 100%; min-height: 50px; font-size: 0.85rem; padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+                                    <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+                                        <button type="submit" class="btn btn-danger btn-sm">Reject</button>
+                                        <button type="submit" class="btn btn-secondary btn-sm" onclick="document.querySelector('#proposal-reject-form-{{ proposal.id }} textarea').value = ''">Skip</button>
+                                    </div>
+                                </div>
                             </form>
                         </div>
                     </div>
@@ -168,6 +185,14 @@
 {% endif %}
 
 <script>
+function selectProposalRejectReason(proposalId, reason, label) {
+    // Hide the reason selection, show the feedback prompt
+    document.getElementById('proposal-reason-select-' + proposalId).style.display = 'none';
+    document.getElementById('proposal-feedback-prompt-' + proposalId).style.display = 'block';
+    document.getElementById('proposal-reason-' + proposalId).value = reason;
+    document.getElementById('proposal-reason-label-' + proposalId).textContent = label;
+}
+
 function toggleSelectAll(checkbox) {
     document.querySelectorAll('.proposal-checkbox').forEach(cb => {
         cb.checked = checkbox.checked;

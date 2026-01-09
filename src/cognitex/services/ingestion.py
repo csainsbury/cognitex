@@ -132,6 +132,8 @@ async def ingest_email_to_graph(
             sentiment=classification_result.get("sentiment") if classification_result else None,
             labels=labels,
             is_sent=is_sent,
+            needs_research=classification_result.get("needs_research", False) if classification_result else False,
+            research_topics=classification_result.get("research_topics") if classification_result else None,
         )
 
         # Create relationships

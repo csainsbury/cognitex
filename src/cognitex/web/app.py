@@ -2786,6 +2786,85 @@ async def reject_draft_with_feedback(
 
 
 # ========================================================================
+# Generic User Feedback API
+# ========================================================================
+
+@app.post("/api/feedback")
+async def record_user_feedback_api(
+    target_type: Annotated[str, Form()],
+    target_id: Annotated[str, Form()],
+    feedback_category: Annotated[str | None, Form()] = None,
+    feedback_text: Annotated[str | None, Form()] = None,
+    was_rejection: Annotated[bool, Form()] = False,
+    context: Annotated[str | None, Form()] = None,
+    action_taken: Annotated[str | None, Form()] = None,
+):
+    """
+    Generic endpoint for recording user feedback with optional free text.
+
+    This endpoint stores feedback in the user_feedback table with semantic
+    embeddings for later retrieval and rule extraction.
+
+    Args:
+        target_type: Type of item (context_pack, email_draft, task, proposal)
+        target_id: ID of the specific item
+        feedback_category: Quick-select category (e.g., 'spam_marketing', 'not_needed')
+        feedback_text: Free text details for nuanced learning
+        was_rejection: Whether this feedback is a rejection
+        context: JSON string with rich context (email_subject, sender, etc.)
+        action_taken: What action was taken ('rejected', 'edited', 'approved_with_note')
+    """
+    from cognitex.agent.feedback_learning import record_feedback
+    import json as json_module
+
+    # Parse context JSON if provided
+    context_data = {}
+    if context:
+        try:
+            context_data = json_module.loads(context)
+        except json_module.JSONDecodeError:
+            pass
+
+    try:
+        feedback_id = await record_feedback(
+            target_type=target_type,
+            target_id=target_id,
+            feedback_category=feedback_category,
+            feedback_text=feedback_text,
+            was_rejection=was_rejection,
+            context=context_data,
+            action_taken=action_taken,
+        )
+
+        return HTMLResponse(f'''
+            <div class="alert alert-success" style="padding: 0.5rem; font-size: 0.85rem;">
+                <strong>Feedback recorded</strong> - This helps improve future suggestions.
+            </div>
+        ''')
+
+    except Exception as e:
+        logger.error("Failed to record feedback", error=str(e))
+        return HTMLResponse(f'''
+            <div class="alert alert-warning" style="padding: 0.5rem; font-size: 0.85rem;">
+                <strong>Note:</strong> Feedback could not be saved, but action was completed.
+            </div>
+        ''', status_code=200)  # Still return 200 so the UI flow isn't broken
+
+
+@app.get("/api/feedback/stats")
+async def get_feedback_stats_api():
+    """Get statistics about collected feedback for the learning dashboard."""
+    from cognitex.agent.feedback_learning import get_feedback_stats
+
+    try:
+        stats = await get_feedback_stats()
+        return stats
+    except Exception as e:
+        logger.error("Failed to get feedback stats", error=str(e))
+        return {"error": str(e)}
+
+
+# ========================================================================
 # Phase 5.1: Multi-turn Email Drafting
 # ========================================================================
 
@@ -3603,6 +3682,66 @@ async def archive_pack(pack_id: str):
         return HTMLResponse("")  # Empty to remove from DOM
 
     raise HTTPException(status_code=500, detail="Failed to archive pack")
+
+
+@app.post("/api/twin/emails/{gmail_id}/research")
+async def trigger_research_pack(
+    gmail_id: str,
+    topics: Annotated[str | None, Form()] = None,
+):
+    """Manually trigger research pack compilation for an email.
+
+    If topics is provided, uses those. Otherwise, uses the email's
+    stored research_topics from classification.
+    """
+    from cognitex.db.neo4j import get_neo4j_session
+    from cognitex.agent.context_pack import get_context_pack_compiler
+
+    async for session in get_neo4j_session():
+        # Get email details and stored research topics
+        query = """
+        MATCH (e:Email {gmail_id: $gmail_id})
+        RETURN e.gmail_id as gmail_id, e.subject as subject,
+               e.snippet as snippet, e.research_topics as research_topics
+        """
+        result = await session.run(query, {"gmail_id": gmail_id})
+        record = await result.single()
+
+        if not record:
+            raise HTTPException(status_code=404, detail="Email not found")
+
+        email = dict(record)
+
+        # Determine topics to research
+        if topics:
+            # User-provided topics (comma-separated)
+            research_topics = [t.strip() for t in topics.split(",") if t.strip()]
+        else:
+            # Use stored topics from classification
+            research_topics = email.get("research_topics") or []
+
+        if not research_topics:
+            return HTMLResponse('''
+                <div class="alert alert-warning" style="padding: 0.5rem; margin-top: 0.5rem;">
+                    No research topics identified. Please specify topics or classify the email first.
+                </div>
+            ''')
+
+        # Compile research pack
+        compiler = get_context_pack_compiler()
+        pack = await compiler.compile_research_pack(email, research_topics)
+
+        # Return success message
+        return HTMLResponse(f'''
+            <div class="alert alert-success" style="padding: 0.5rem; margin-top: 0.5rem; background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 4px;">
+                <strong>Research pack created!</strong>
+                <br>Researched {len(research_topics)} topic(s): {", ".join(research_topics[:3])}
+                <br>Found {len(pack.artifact_links)} related documents.
+                <br><a href="/twin" style="color: #047857;">View in Digital Twin &rarr;</a>
+            </div>
+        ''')
+
+    raise HTTPException(status_code=500, detail="Failed to create research pack")
 
 
 # ========================================================================

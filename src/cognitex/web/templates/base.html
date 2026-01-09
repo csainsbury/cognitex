@@ -1214,6 +1214,15 @@
     document.addEventListener('DOMContentLoaded', initPeoplePickers);
     document.body.addEventListener('htmx:afterSwap', initPeoplePickers);
 
+    // Task rejection feedback - two-stage UI
+    function selectTaskRejectReason(taskId, reason, label) {
+        // Hide the reason selection, show the feedback prompt
+        document.getElementById('task-reason-select-' + taskId).style.display = 'none';
+        document.getElementById('task-feedback-prompt-' + taskId).style.display = 'block';
+        document.getElementById('task-reason-' + taskId).value = reason;
+        document.getElementById('task-reason-label-' + taskId).textContent = label;
+    }
+
     // Close dropdowns when clicking outside
     document.addEventListener('click', function(e) {
         if (!e.target.closest('.dropdown')) {

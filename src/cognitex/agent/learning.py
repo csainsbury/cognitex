@@ -180,6 +180,7 @@ class LearningSystem:
             "timestamp": datetime.now().isoformat(),
             "rules_validated": {},
             "rules_extracted": 0,
+            "feedback_rules_extracted": 0,
             "patterns_updated": {},
         }
 
@@ -193,6 +194,17 @@ class LearningSystem:
             new_rule_ids = await dm.extract_rules_from_patterns(min_occurrences=3)
             results["rules_extracted"] = len(new_rule_ids)
 
+            # 2b. Extract rules from user feedback (free-text feedback learning)
+            try:
+                from cognitex.agent.feedback_learning import extract_rules_from_feedback
+                feedback_rule_ids = await extract_rules_from_feedback(
+                    min_occurrences=3,
+                    days_back=30,
+                )
+                results["feedback_rules_extracted"] = len(feedback_rule_ids)
+            except Exception as e:
+                logger.warning("Failed to extract rules from feedback", error=str(e))
+
             # 3. Update learned patterns cache
             await self._update_patterns_cache()
             results["patterns_updated"]["proposal"] = True
@@ -203,7 +215,7 @@ class LearningSystem:
                 action_type="learning_update",
                 source="learning_system",
                 summary=f"Policy update: {validation_results.get('validated', 0)} rules validated, "
-                        f"{len(new_rule_ids)} rules extracted",
+                        f"{len(new_rule_ids)} pattern rules + {results['feedback_rules_extracted']} feedback rules extracted",
                 details=results,
             )
 
