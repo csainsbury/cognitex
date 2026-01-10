@@ -1159,6 +1159,61 @@ class AutonomousAgent:
         except Exception as e:
             logger.warning("Deduplication check failed", error=str(e))
 
+        # 1b. SEMANTIC DEDUPLICATION CHECK
+        # Check if a semantically similar task already exists (e.g., "Review Q3 Report" vs "Review Q3 Financials")
+        try:
+            from cognitex.services.llm import get_llm_service
+            from cognitex.db.postgres import get_session as get_pg_session
+
+            llm = get_llm_service()
+
+            # Get all pending task titles from Neo4j
+            pending_query = """
+            MATCH (t:Task)
+            WHERE t.status IN ['pending', 'in_progress']
+            RETURN t.id as id, t.title as title
+            LIMIT 50
+            """
+            result = await session.run(pending_query)
+            pending_tasks = await result.data()
+
+            if pending_tasks:
+                # Generate embedding for proposed title
+                proposed_embedding = await llm.generate_embedding(title)
+
+                # Check similarity against each pending task
+                for task in pending_tasks:
+                    existing_title = task.get("title", "")
+                    if not existing_title:
+                        continue
+
+                    # Generate embedding for existing title and compute similarity
+                    existing_embedding = await llm.generate_embedding(existing_title)
+
+                    # Cosine similarity calculation
+                    import numpy as np
+                    proposed_vec = np.array(proposed_embedding)
+                    existing_vec = np.array(existing_embedding)
+                    similarity = float(np.dot(proposed_vec, existing_vec) / (
+                        np.linalg.norm(proposed_vec) * np.linalg.norm(existing_vec)
+                    ))
+
+                    if similarity > 0.85:
+                        logger.info(
+                            "Skipping semantically similar task",
+                            proposed=title,
+                            existing=existing_title,
+                            similarity=f"{similarity:.2f}",
+                        )
+                        return {
+                            "skipped": True,
+                            "reason": f"similar task exists: '{existing_title}' (similarity: {similarity:.0%})",
+                        }
+
+        except Exception as e:
+            # Don't block task creation if semantic check fails
+            logger.warning("Semantic deduplication check failed", error=str(e))
+
         # 2. THROTTLING CHECK
         # Don't flood the user with proposals for the same project
         if settings.task_creation_mode == "propose" and project_id:

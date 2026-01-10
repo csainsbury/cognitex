@@ -534,6 +534,100 @@ Return ONLY valid JSON, no other text."""
 
         return unique_steps
 
+    async def process_sync_batch(
+        self,
+        machine_id: str,
+        cli_type: str,
+        sessions: list[dict],
+    ) -> dict:
+        """Process a batch of sessions from remote sync.
+
+        This is the canonical implementation used by both web app and API endpoints.
+        Processes sessions in background to avoid HTTP timeouts.
+
+        Args:
+            machine_id: Identifier for the source machine
+            cli_type: Type of CLI (e.g., 'claude')
+            sessions: List of session data dicts
+
+        Returns:
+            Dict with ingested count and errors
+        """
+        driver = get_driver()
+        ingested = 0
+        errors = []
+
+        for session_data in sessions:
+            try:
+                session_id = session_data.get("session_id")
+                if not session_id:
+                    errors.append({"error": "Missing session_id"})
+                    continue
+
+                # Check if we have pre-extracted summary or need to extract from messages
+                summary = session_data.get("summary")
+                decisions = session_data.get("decisions", [])
+                next_steps = session_data.get("next_steps", [])
+                topics = session_data.get("topics", [])
+                files_changed = session_data.get("files_changed", [])
+                completion_state = session_data.get("completion_state", "unknown")
+
+                # If no summary but messages provided, extract using LLM
+                if not summary and session_data.get("messages"):
+                    extracted = await self.extract_session_summary(
+                        session_data["messages"],
+                        session_data.get("project_path", "unknown"),
+                    )
+                    summary = extracted.get("summary")
+                    decisions = extracted.get("decisions", decisions)
+                    next_steps = extracted.get("next_steps", next_steps)
+                    topics = extracted.get("topics", topics)
+                    files_changed = extracted.get("files_changed", files_changed)
+                    completion_state = extracted.get("completion_state", completion_state)
+
+                # Store in Neo4j
+                async with driver.session() as neo_session:
+                    await self._store_session(
+                        neo_session,
+                        session_id=f"{machine_id}:{session_id}",  # Namespace by machine
+                        cli_type=cli_type,
+                        project_path=session_data.get("project_path", "unknown"),
+                        git_branch=session_data.get("git_branch", "unknown"),
+                        slug=session_data.get("slug", session_id[:8]),
+                        started_at=session_data.get("started_at"),
+                        ended_at=session_data.get("ended_at"),
+                        user_messages=session_data.get("user_messages", 0),
+                        assistant_messages=session_data.get("assistant_messages", 0),
+                        summary=summary,
+                        decisions=decisions,
+                        files_changed=files_changed,
+                        next_steps=next_steps,
+                        topics=topics,
+                        completion_state=completion_state,
+                    )
+
+                ingested += 1
+
+            except Exception as e:
+                errors.append({
+                    "session_id": session_data.get("session_id"),
+                    "error": str(e),
+                })
+                logger.error(
+                    "Session sync failed",
+                    session_id=session_data.get("session_id"),
+                    error=str(e),
+                )
+
+        logger.info(
+            "Session sync batch completed",
+            machine_id=machine_id,
+            ingested=ingested,
+            errors=len(errors),
+        )
+
+        return {"ingested": ingested, "errors": errors}
+
 
 # Module-level singleton
 _ingester: CodingSessionIngester | None = None
