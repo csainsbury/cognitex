@@ -135,6 +135,46 @@ CREATE INDEX IF NOT EXISTS idx_user_feedback_rejection ON user_feedback(was_reje
 CREATE INDEX IF NOT EXISTS idx_user_feedback_created ON user_feedback(created_at);
 CREATE INDEX IF NOT EXISTS idx_user_feedback_category ON user_feedback(feedback_category);
 
+-- Domain expertise: Agent's "mental model" for specific domains
+-- These are self-improving knowledge bases that agents update after successful actions
+CREATE TABLE IF NOT EXISTS domain_expertise (
+    id TEXT PRIMARY KEY,
+    domain TEXT NOT NULL UNIQUE,        -- e.g., 'project:cognitex', 'email_drafting', 'task_extraction'
+    domain_type TEXT NOT NULL,          -- 'project', 'skill', 'entity', 'workflow'
+    title TEXT,                         -- Human-readable title
+    expertise_content JSONB NOT NULL,   -- Structured expertise data (mental model)
+    expertise_embedding vector(768),    -- Semantic embedding for matching
+    version INTEGER DEFAULT 1,
+    learnings_count INTEGER DEFAULT 0,  -- How many times this has been updated
+    last_improved_at TIMESTAMP,
+    last_used_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT NOW(),
+    created_by TEXT DEFAULT 'system'
+);
+
+CREATE INDEX IF NOT EXISTS idx_expertise_domain ON domain_expertise(domain);
+CREATE INDEX IF NOT EXISTS idx_expertise_type ON domain_expertise(domain_type);
+CREATE INDEX IF NOT EXISTS idx_expertise_improved ON domain_expertise(last_improved_at);
+CREATE INDEX IF NOT EXISTS idx_expertise_used ON domain_expertise(last_used_at);
+
+-- Expertise learnings log: Track what was learned and when
+CREATE TABLE IF NOT EXISTS expertise_learnings (
+    id TEXT PRIMARY KEY,
+    expertise_id TEXT NOT NULL REFERENCES domain_expertise(id),
+    learning_type TEXT NOT NULL,        -- 'pattern', 'preference', 'fact', 'relationship', 'correction'
+    learning_content JSONB NOT NULL,    -- The actual learning
+    source_action TEXT,                 -- What action triggered this learning
+    source_id TEXT,                     -- ID of the task/email/etc that was completed
+    confidence FLOAT DEFAULT 0.7,
+    applied_count INTEGER DEFAULT 0,    -- How many times this learning was used
+    successful_applications INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_learnings_expertise ON expertise_learnings(expertise_id);
+CREATE INDEX IF NOT EXISTS idx_learnings_type ON expertise_learnings(learning_type);
+CREATE INDEX IF NOT EXISTS idx_learnings_created ON expertise_learnings(created_at);
+
 -- Add lifecycle columns to preference_rules if they don't exist
 -- These are added via ALTER TABLE to preserve existing data
 """

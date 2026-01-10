@@ -519,6 +519,36 @@ class AutonomousAgent:
         learned_guidelines = "\n".join(learned_lines) if learned_lines else "(No specific guidelines yet - keep learning from feedback)"
 
         # =====================================================================
+        # EXPERTISE CONTEXT - Agent's mental models for specific domains
+        # =====================================================================
+        expertise_text = ""
+        try:
+            from cognitex.agent.expertise import get_expertise_manager
+            em = get_expertise_manager()
+
+            # Build context from current work for relevant expertise search
+            context_parts = []
+            if pending_emails_text:
+                context_parts.append(pending_emails_text[:500])
+            if goals_text:
+                context_parts.append(goals_text[:300])
+            if projects_text:
+                context_parts.append(projects_text[:300])
+
+            if context_parts:
+                search_context = " ".join(context_parts)
+                expertise_text = await em.get_expertise_for_prompt(
+                    context_text=search_context,
+                    max_length=1500,
+                )
+
+            if expertise_text:
+                learned_guidelines = f"{expertise_text}\n\n{learned_guidelines}"
+
+        except Exception as e:
+            logger.debug("Failed to load expertise context", error=str(e))
+
+        # =====================================================================
         # STATE CONTEXT - Current user state affects what actions are appropriate
         # =====================================================================
         state_context_text = await self._build_state_context()

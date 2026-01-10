@@ -776,6 +776,35 @@ async def task_complete(request: Request, task_id: str):
         energy_cost=task_before.get("energy_cost", "medium") if task_before else "medium",
     )
 
+    # Self-improve expertise based on completed task
+    if task_before:
+        try:
+            from cognitex.agent.expertise import get_expertise_manager
+            em = get_expertise_manager()
+
+            # Determine domain from project or general task completion
+            projects = task_before.get("projects", [])
+            project_id = projects[0].get("id") if projects else None
+            domain = f"project:{project_id}" if project_id else "task_completion"
+
+            await em.self_improve(
+                domain=domain,
+                action_type="task_completed",
+                action_result={
+                    "task_id": task_id,
+                    "title": task_before.get("title"),
+                    "priority": task_before.get("priority"),
+                    "project_id": project_id,
+                    "subtasks_count": len(task_before.get("subtasks", [])),
+                },
+                context={
+                    "created_by": task_before.get("created_by"),
+                    "was_autonomous": task_before.get("created_by") == "autonomous_agent",
+                },
+            )
+        except Exception as e:
+            logger.debug("Expertise self-improve skipped", error=str(e))
+
     task = await task_service.get(task_id)
     return templates.TemplateResponse(
         "partials/task_row.html",
@@ -2500,6 +2529,30 @@ async def approve_draft(draft_id: str):
             result = await agent.handle_approval(target_approval["id"], approved=True)
 
             if result.get("success"):
+                # Self-improve expertise based on successful email draft
+                try:
+                    from cognitex.agent.expertise import get_expertise_manager
+                    em = get_expertise_manager()
+
+                    # Determine domain from sender/project context
+                    params = target_approval.get("params", {})
+                    sender = params.get("to", "").split("@")[0] if params.get("to") else None
+                    domain = f"email:{sender}" if sender else "email_drafting"
+
+                    await em.self_improve(
+                        domain=domain,
+                        action_type="email_draft_approved",
+                        action_result={
+                            "draft_id": draft_id,
+                            "to": params.get("to"),
+                            "subject": params.get("subject"),
+                            "body_preview": params.get("body", "")[:200],
+                        },
+                        context={"approval_id": target_approval["id"]},
+                    )
+                except Exception as e:
+                    logger.debug("Expertise self-improve skipped", error=str(e))
+
                 action_text = html.escape(str(result.get('action', 'Email queued for sending')))
                 return HTMLResponse(f'''
                     <div class="draft-card" style="background: #d1fae5; border-color: #065f46;">
@@ -4545,6 +4598,30 @@ async def approve_proposal_web(proposal_id: str):
             summary=f"Approved proposal: {task.get('title', '')[:50]}",
             details={"proposal_id": proposal_id, "task_id": task.get("id")}
         )
+
+        # Self-improve expertise based on approved task proposal
+        try:
+            from cognitex.agent.expertise import get_expertise_manager
+            em = get_expertise_manager()
+
+            # Use project domain if available, otherwise general task creation
+            project_id = task.get("project_id")
+            domain = f"project:{project_id}" if project_id else "task_extraction"
+
+            await em.self_improve(
+                domain=domain,
+                action_type="task_proposal_approved",
+                action_result={
+                    "task_id": task.get("id"),
+                    "title": task.get("title"),
+                    "priority": task.get("priority"),
+                    "project_id": project_id,
+                },
+                context={"proposal_id": proposal_id},
+            )
+        except Exception as e:
+            logger.debug("Expertise self-improve skipped", error=str(e))
+
         return HTMLResponse(f"""
             <tr id="proposal-{proposal_id}" class="proposal-row approved">
                 <td colspan="6" style="text-align: center; color: var(--success); padding: 1rem;">
@@ -4930,6 +5007,247 @@ async def api_learning_run_update():
     except Exception as e:
         logger.error("Manual policy update failed", error=str(e))
         return {"status": "error", "message": str(e)}
+
+
+# ========================================================================
+# Agent Expertise System
+# ========================================================================
+
+@app.get("/expertise", response_class=HTMLResponse)
+async def expertise_page(request: Request):
+    """Agent Expertise dashboard - view and manage agent mental models."""
+    from cognitex.agent.expertise import get_expertise_manager
+
+    em = get_expertise_manager()
+
+    # Get all expertise domains
+    expertise_list = []
+    try:
+        expertise_list = await em.list_expertise()
+    except Exception as e:
+        logger.warning("Failed to list expertise", error=str(e))
+
+    # Get recent learnings
+    recent_learnings = []
+    try:
+        recent_learnings = await em.get_recent_learnings(limit=15)
+    except Exception as e:
+        logger.warning("Failed to get recent learnings", error=str(e))
+
+    # Stats
+    stats = {
+        "total_domains": len(expertise_list),
+        "total_learnings": sum(e.get("learnings_count", 0) for e in expertise_list),
+        "project_count": len([e for e in expertise_list if e.get("domain_type") == "project"]),
+        "skill_count": len([e for e in expertise_list if e.get("domain_type") == "skill"]),
+    }
+
+    # Build HTML (inline template for simplicity)
+    expertise_rows = ""
+    for exp in expertise_list:
+        domain_type = exp.get("domain_type", "unknown")
+        badge_color = {
+            "project": "#3b82f6",
+            "skill": "#10b981",
+            "entity": "#8b5cf6",
+            "workflow": "#f59e0b",
+        }.get(domain_type, "#6b7280")
+
+        last_improved = exp.get("last_improved_at", "")
+        if last_improved:
+            last_improved = last_improved[:10]
+
+        expertise_rows += f"""
+        <tr>
+            <td><strong>{html.escape(exp.get('title', exp.get('domain', '')))}</strong></td>
+            <td><span style="background: {badge_color}; color: white; padding: 2px 8px; border-radius: 3px; font-size: 0.75rem;">{domain_type}</span></td>
+            <td>{exp.get('learnings_count', 0)}</td>
+            <td>v{exp.get('version', 1)}</td>
+            <td>{last_improved or '-'}</td>
+            <td>
+                <button class="btn btn-secondary btn-sm"
+                        hx-get="/api/expertise/{exp.get('id')}"
+                        hx-target="#expertise-detail"
+                        hx-swap="innerHTML">View</button>
+            </td>
+        </tr>
+        """
+
+    learning_items = ""
+    for learn in recent_learnings:
+        content = learn.get("content", {})
+        content_text = content.get("content", str(content))[:100] if isinstance(content, dict) else str(content)[:100]
+        learning_items += f"""
+        <div style="padding: 0.5rem; border-bottom: 1px solid #eee;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span style="font-weight: 500;">{html.escape(learn.get('domain', '')[:30])}</span>
+                <span style="font-size: 0.75rem; color: #6b7280;">{learn.get('type', '')}</span>
+            </div>
+            <div style="font-size: 0.85rem; color: #4b5563; margin-top: 0.25rem;">
+                {html.escape(content_text)}...
+            </div>
+            <div style="font-size: 0.7rem; color: #9ca3af; margin-top: 0.25rem;">
+                {learn.get('source_action', '')} | {learn.get('created_at', '')[:10] if learn.get('created_at') else ''}
+            </div>
+        </div>
+        """
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Agent Expertise - Cognitex</title>
+        <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+        <style>
+            body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #f9fafb; }}
+            .container {{ max-width: 1200px; margin: 0 auto; }}
+            h1 {{ color: #111827; margin-bottom: 0.5rem; }}
+            .subtitle {{ color: #6b7280; margin-bottom: 1.5rem; }}
+            .stats {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1.5rem; }}
+            .stat {{ background: white; padding: 1rem; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
+            .stat-value {{ font-size: 1.5rem; font-weight: 600; color: #111827; }}
+            .stat-label {{ font-size: 0.8rem; color: #6b7280; }}
+            .card {{ background: white; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 1rem; }}
+            .card-header {{ padding: 1rem; border-bottom: 1px solid #e5e7eb; }}
+            .card-header h2 {{ margin: 0; font-size: 1.1rem; color: #111827; }}
+            table {{ width: 100%; border-collapse: collapse; }}
+            th, td {{ padding: 0.75rem; text-align: left; border-bottom: 1px solid #e5e7eb; }}
+            th {{ background: #f9fafb; font-weight: 500; color: #374151; font-size: 0.85rem; }}
+            .btn {{ padding: 0.375rem 0.75rem; border: 1px solid #d1d5db; background: white; border-radius: 4px; cursor: pointer; }}
+            .btn:hover {{ background: #f3f4f6; }}
+            .btn-sm {{ font-size: 0.8rem; padding: 0.25rem 0.5rem; }}
+            .grid {{ display: grid; grid-template-columns: 2fr 1fr; gap: 1rem; }}
+            a {{ color: #2563eb; text-decoration: none; }}
+            a:hover {{ text-decoration: underline; }}
+            #expertise-detail {{ background: #f3f4f6; padding: 1rem; border-radius: 4px; margin-top: 1rem; min-height: 100px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Agent Expertise</h1>
+            <p class="subtitle">Self-improving mental models that make your agent an expert. <a href="/learning">← Back to Learning</a></p>
+
+            <div class="stats">
+                <div class="stat">
+                    <div class="stat-value">{stats['total_domains']}</div>
+                    <div class="stat-label">Expertise Domains</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value">{stats['total_learnings']}</div>
+                    <div class="stat-label">Total Learnings</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value">{stats['project_count']}</div>
+                    <div class="stat-label">Project Experts</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value">{stats['skill_count']}</div>
+                    <div class="stat-label">Skill Experts</div>
+                </div>
+            </div>
+
+            <div class="grid">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Expertise Domains</h2>
+                    </div>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Domain</th>
+                                <th>Type</th>
+                                <th>Learnings</th>
+                                <th>Version</th>
+                                <th>Last Improved</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {expertise_rows if expertise_rows else '<tr><td colspan="6" style="text-align:center; color:#6b7280;">No expertise yet. Complete tasks to start learning.</td></tr>'}
+                        </tbody>
+                    </table>
+
+                    <div id="expertise-detail">
+                        <p style="color: #6b7280; text-align: center;">Select an expertise domain to view details</p>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Recent Learnings</h2>
+                    </div>
+                    <div style="max-height: 500px; overflow-y: auto;">
+                        {learning_items if learning_items else '<p style="padding: 1rem; color: #6b7280; text-align: center;">No learnings yet</p>'}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+    return HTMLResponse(html_content)
+
+
+@app.get("/api/expertise/{expertise_id}")
+async def get_expertise_detail(expertise_id: str):
+    """Get detailed view of an expertise domain."""
+    from cognitex.agent.expertise import get_expertise_manager
+
+    em = get_expertise_manager()
+
+    # Get expertise by iterating (since we don't have get by ID directly)
+    all_exp = await em.list_expertise()
+    target = next((e for e in all_exp if e.get("id") == expertise_id), None)
+
+    if not target:
+        return HTMLResponse("<p>Expertise not found</p>")
+
+    # Get full expertise with content
+    full_exp = await em.get_expertise(target["domain"])
+
+    if not full_exp:
+        return HTMLResponse("<p>Could not load expertise details</p>")
+
+    content = full_exp.get("content", {})
+
+    # Format content for display
+    content_html = "<div style='font-size: 0.9rem;'>"
+
+    for key, value in content.items():
+        if not value:
+            continue
+
+        content_html += f"<div style='margin-bottom: 0.75rem;'><strong>{key.replace('_', ' ').title()}:</strong><br>"
+
+        if isinstance(value, list):
+            if value:
+                content_html += "<ul style='margin: 0.25rem 0; padding-left: 1.25rem;'>"
+                for item in value[:5]:  # Limit to 5 items
+                    if isinstance(item, dict):
+                        item_text = item.get("content", item.get("name", str(item)))
+                    else:
+                        item_text = str(item)
+                    content_html += f"<li>{html.escape(str(item_text)[:100])}</li>"
+                if len(value) > 5:
+                    content_html += f"<li style='color: #6b7280;'>... and {len(value) - 5} more</li>"
+                content_html += "</ul>"
+        else:
+            content_html += f"<span style='color: #4b5563;'>{html.escape(str(value)[:200])}</span>"
+
+        content_html += "</div>"
+
+    content_html += "</div>"
+
+    return HTMLResponse(f"""
+        <h3 style="margin-top: 0;">{html.escape(full_exp.get('title', full_exp.get('domain', '')))}</h3>
+        <p style="font-size: 0.8rem; color: #6b7280;">
+            Domain: {html.escape(full_exp.get('domain', ''))} |
+            Version: {full_exp.get('version', 1)} |
+            Learnings: {full_exp.get('learnings_count', 0)}
+        </p>
+        {content_html}
+    """)
 
 
 # ========================================================================
