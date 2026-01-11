@@ -760,56 +760,66 @@ async def task_complete(request: Request, task_id: str):
     """Mark task as complete and record state observation for learning."""
     task_service = get_task_service()
 
-    # Get task info before completing (for learning)
-    task_before = await task_service.get(task_id)
+    try:
+        # Get task info before completing (for learning)
+        task_before = await task_service.get(task_id)
 
-    task = await task_service.complete(task_id)
+        if not task_before:
+            raise HTTPException(status_code=404, detail="Task not found")
 
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+        task = await task_service.complete(task_id)
 
-    # Record state observation for learning
-    await _record_task_outcome(
-        task_id=task_id,
-        task_title=task_before.get("title", "") if task_before else "",
-        outcome="completed",
-        energy_cost=task_before.get("energy_cost", "medium") if task_before else "medium",
-    )
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
 
-    # Self-improve expertise based on completed task
-    if task_before:
+        # Record state observation for learning (non-blocking)
         try:
-            from cognitex.agent.expertise import get_expertise_manager
-            em = get_expertise_manager()
-
-            # Determine domain from project or general task completion
-            projects = task_before.get("projects", [])
-            project_id = projects[0].get("id") if projects else None
-            domain = f"project:{project_id}" if project_id else "task_completion"
-
-            await em.self_improve(
-                domain=domain,
-                action_type="task_completed",
-                action_result={
-                    "task_id": task_id,
-                    "title": task_before.get("title"),
-                    "priority": task_before.get("priority"),
-                    "project_id": project_id,
-                    "subtasks_count": len(task_before.get("subtasks", [])),
-                },
-                context={
-                    "created_by": task_before.get("created_by"),
-                    "was_autonomous": task_before.get("created_by") == "autonomous_agent",
-                },
+            await _record_task_outcome(
+                task_id=task_id,
+                task_title=task_before.get("title", "") if task_before else "",
+                outcome="completed",
+                energy_cost=task_before.get("energy_cost", "medium") if task_before else "medium",
             )
         except Exception as e:
-            logger.debug("Expertise self-improve skipped", error=str(e))
+            logger.debug("Task outcome recording skipped", error=str(e))
 
-    task = await task_service.get(task_id)
-    return templates.TemplateResponse(
-        "partials/task_row.html",
-        {"request": request, "task": task},
-    )
+        # Self-improve expertise based on completed task (non-blocking)
+        if task_before:
+            try:
+                from cognitex.agent.expertise import get_expertise_manager
+                em = get_expertise_manager()
+
+                # Determine domain from project or general task completion
+                projects = task_before.get("projects", [])
+                project_id = projects[0].get("id") if projects else None
+                domain = f"project:{project_id}" if project_id else "task_completion"
+
+                await em.self_improve(
+                    domain=domain,
+                    action_type="task_completed",
+                    action_result={
+                        "task_id": task_id,
+                        "title": task_before.get("title"),
+                        "priority": task_before.get("priority"),
+                        "project_id": project_id,
+                        "subtasks_count": len(task_before.get("subtasks", [])),
+                    },
+                    context={
+                        "created_by": task_before.get("created_by"),
+                        "was_autonomous": task_before.get("created_by") == "autonomous_agent",
+                    },
+                )
+            except Exception as e:
+                logger.debug("Expertise self-improve skipped", error=str(e))
+
+        # Return empty response - hx-swap="delete" will remove the row
+        return HTMLResponse("")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Task completion failed", task_id=task_id, error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.delete("/tasks/{task_id}", response_class=HTMLResponse)
@@ -4983,10 +4993,18 @@ async def learning_page(request: Request):
     except Exception as e:
         logger.warning("Failed to get recent rejections", error=str(e))
 
-    # Get duration calibration
-    calibration = {"samples": 0, "avg_error": 0, "avg_actual_minutes": 0}
+    # Get duration calibration - normalize to template expectations
+    calibration = {"samples": 0, "avg_error": 0, "avg_actual_minutes": 0, "by_project": {}}
     try:
-        calibration = await get_calibration_summary()
+        raw_calibration = await get_calibration_summary()
+        overall = raw_calibration.get("overall", {})
+        calibration = {
+            "samples": overall.get("total_records", 0),
+            "avg_error": (overall.get("overall_pace_factor", 1.0) - 1.0),  # Convert pace to error
+            "avg_actual_minutes": overall.get("total_hours_tracked", 0) * 60 / max(overall.get("total_records", 1), 1),
+            "by_project": raw_calibration.get("by_project", {}),
+            "insights": raw_calibration.get("insights", []),
+        }
     except Exception as e:
         logger.warning("Failed to get calibration summary", error=str(e))
 
@@ -5114,9 +5132,9 @@ async def learning_page(request: Request):
 
             # Recent decisions
             result = await session.execute(text("""
-                SELECT timestamp, action_type, decision, quality_score
+                SELECT created_at, action_type, status, quality_score
                 FROM decision_traces
-                ORDER BY timestamp DESC
+                ORDER BY created_at DESC
                 LIMIT 10
             """))
             for row in result.fetchall():

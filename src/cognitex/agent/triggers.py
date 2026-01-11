@@ -27,6 +27,7 @@ class TriggerSystem:
         self.agent: Agent | None = None
         self._running = False
         self._event_tasks: list[asyncio.Task] = []
+        self._user_email: str | None = None  # Cached user email for filtering sent emails
 
     async def start(self) -> None:
         """Start the trigger system."""
@@ -1613,6 +1614,7 @@ class TriggerSystem:
         """Filter emails to only those that are potentially actionable.
 
         Filters out:
+        - Emails SENT BY the user (outgoing emails)
         - Auto-generated notifications
         - Marketing/newsletters
         - Calendar invites (handled separately)
@@ -1622,10 +1624,18 @@ class TriggerSystem:
         """
         actionable = []
 
+        # Get user email for filtering sent emails
+        user_email = self._get_user_email()
+
         for email in emails:
             sender = email.get("sender_email", "").lower()
             subject = email.get("subject", "").lower()
             snippet = email.get("snippet", "").lower()
+
+            # Skip emails sent BY the user (outgoing emails)
+            if user_email and sender == user_email:
+                logger.debug("Filtered sent email (from user)", subject=subject[:30])
+                continue
 
             # Skip noise senders
             if any(noise in sender for noise in self.NOISE_SENDERS):
@@ -1684,6 +1694,25 @@ class TriggerSystem:
                     actionable.append(email)
 
         return actionable
+
+    def _get_user_email(self) -> str | None:
+        """Get the authenticated user's email address (cached).
+
+        Used to filter out sent emails from actionable email processing.
+        """
+        if self._user_email:
+            return self._user_email
+
+        try:
+            from cognitex.services.gmail import GmailService
+            gmail = GmailService()
+            profile = gmail.get_profile()
+            self._user_email = profile.get("emailAddress", "").lower()
+            logger.debug("Cached user email for filtering", email=self._user_email)
+            return self._user_email
+        except Exception as e:
+            logger.warning("Could not get user email for filtering", error=str(e))
+            return None
 
     # =========================================================================
     # Utilities

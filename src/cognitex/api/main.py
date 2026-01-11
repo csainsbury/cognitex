@@ -28,10 +28,40 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await init_redis()
 
     logger.info("All connections initialized")
+
+    # Initialize Phase 4 learning schema
+    from cognitex.db.phase4_schema import init_phase4_schema
+    await init_phase4_schema()
+
+    # Start trigger system (handles email events, scheduled jobs, autonomous agent)
+    from cognitex.agent.triggers import start_triggers, stop_triggers
+    try:
+        await start_triggers()
+        logger.info("Trigger system started (email events, scheduled jobs, autonomous agent)")
+    except Exception as e:
+        logger.error("Failed to start trigger system", error=str(e))
+
+    # Set up Gmail watch for push notifications
+    from cognitex.services.push_notifications import get_watch_manager
+    try:
+        if settings.google_pubsub_topic:
+            watch_manager = get_watch_manager()
+            result = await watch_manager.setup_gmail_watch()
+            if "error" not in result:
+                logger.info("Gmail watch set up", history_id=result.get("historyId"))
+            else:
+                logger.warning("Gmail watch setup failed", error=result.get("error"))
+    except Exception as e:
+        logger.warning("Failed to set up Gmail watch", error=str(e))
+
     yield
 
     # Cleanup
     logger.info("Shutting down Cognitex")
+    try:
+        await stop_triggers()
+    except Exception:
+        pass
     await close_redis()
     await close_neo4j()
     await close_postgres()

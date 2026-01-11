@@ -142,34 +142,12 @@ class TaskService:
         if not task:
             return None
 
-        # 3. Handle Timing Logic (PostgreSQL) for status transitions
+        # 3. Handle Timing Logic for status transitions
+        # Note: Timing is recorded in task_timing table, not on tasks (which are in Neo4j)
         if status and status != prev_status:
-            async for pg_session in get_session():
-                # Start Timer: pending -> in_progress
-                if status == "in_progress" and prev_status != "in_progress":
-                    await pg_session.execute(
-                        text("""
-                            UPDATE tasks
-                            SET started_at = NOW()
-                            WHERE id = :id AND started_at IS NULL
-                        """),
-                        {"id": task_id},
-                    )
-                    await pg_session.commit()
-
-                # Stop Timer: in_progress -> done
-                elif status == "done" and prev_status != "done":
-                    # Record completion time
-                    await pg_session.execute(
-                        text("""
-                            UPDATE tasks
-                            SET completed_at = NOW()
-                            WHERE id = :id
-                        """),
-                        {"id": task_id},
-                    )
-                    await pg_session.commit()
-
+            try:
+                # Record timing when task completes
+                if status == "done" and prev_status != "done":
                     # Calculate duration if we have a start time
                     if prev_task.get("started_at"):
                         from datetime import datetime as dt
@@ -184,6 +162,9 @@ class TaskService:
                             completed_at=dt.now(),
                             estimated_minutes=int(prev_task.get("effort_estimate") or 30),
                         )
+            except Exception as e:
+                # Don't fail task update if timing recording fails
+                logger.debug("Task timing recording skipped", task_id=task_id, error=str(e))
 
         logger.info("Updated task", task_id=task_id, status=status)
         return task
