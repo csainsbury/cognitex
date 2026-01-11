@@ -13,6 +13,7 @@ from cognitex.config import get_settings
 from cognitex.agent.memory import Memory, init_memory, get_memory
 from cognitex.agent.decision_memory import DecisionMemory, init_decision_memory, get_decision_memory
 from cognitex.agent.tools import ToolRisk, ToolResult, get_tool_registry
+from cognitex.agent.tool_filter import ModeToolFilter, get_tool_filter
 
 logger = structlog.get_logger()
 
@@ -53,10 +54,14 @@ class Agent:
         self.memory: Memory | None = None
         self.decision_memory: DecisionMemory | None = None
         self.tool_registry = get_tool_registry()
+        self.tool_filter = get_tool_filter()
         self._initialized = False
         self._client = None
         self._model = None
         self._provider = None
+        # Cache for filtered tools (set during _build_system_prompt)
+        self._current_mode = None
+        self._filtered_tools: list[str] = []
 
     async def initialize(self) -> None:
         """Initialize the agent and all subsystems."""
@@ -217,10 +222,20 @@ class Agent:
             )
             return response.choices[0].message.content
 
-    def _build_system_prompt(self) -> str:
-        """Build the system prompt with available tools."""
+    async def _build_system_prompt(self) -> str:
+        """Build the system prompt with available tools, filtered by operating mode."""
+        # Filter tools based on current operating mode
+        all_tools = self.tool_registry.all()
+        eligible_tools, filtered_tools, current_mode = await self.tool_filter.get_eligible_tools(
+            all_tools
+        )
+
+        # Cache for reference
+        self._current_mode = current_mode
+        self._filtered_tools = filtered_tools
+
         tool_descriptions = []
-        for tool in self.tool_registry.all():
+        for tool in eligible_tools:
             risk_label = {
                 ToolRisk.READONLY: "(read-only)",
                 ToolRisk.AUTO: "(auto-execute)",
@@ -237,6 +252,27 @@ class Agent:
             )
 
         tools_text = "\n".join(tool_descriptions)
+
+        # Add filter notice if tools were filtered
+        filter_notice = ""
+        if filtered_tools:
+            filter_notice = self.tool_filter.format_filter_notice(filtered_tools, current_mode)
+
+        # Get scratch pad context if enabled
+        scratch_context = ""
+        settings = get_settings()
+        if settings.scratch_pad_enabled:
+            try:
+                from cognitex.services.scratch_pad import get_scratch_pad_service
+
+                scratch_service = get_scratch_pad_service()
+                scratch_context = await scratch_service.get_context_for_prompt(
+                    space_names=["general"],
+                    max_entries=8,
+                    max_length=1500,
+                )
+            except Exception as e:
+                logger.debug("Failed to load scratch pad context", error=str(e))
 
         # Get current date/time for context
         now = datetime.now()
@@ -300,7 +336,9 @@ Common relationships:
 Example queries:
 - Tasks from a person: MATCH (t:Task)-[:REQUESTED_BY]->(p:Person {{email: $email}}) RETURN t
 - Recent emails: MATCH (e:Email) WHERE e.date > datetime() - duration('P7D') RETURN e ORDER BY e.date DESC LIMIT 10
-- Person's communication history: MATCH (p:Person {{email: $email}})<-[:SENT_BY]-(e:Email) RETURN e ORDER BY e.date DESC LIMIT 5"""
+- Person's communication history: MATCH (p:Person {{email: $email}})<-[:SENT_BY]-(e:Email) RETURN e ORDER BY e.date DESC LIMIT 5
+{filter_notice}
+{scratch_context}"""
 
     async def _get_learned_context(self, message: str) -> str | None:
         """
@@ -428,7 +466,7 @@ Example queries:
         trace = ReactTrace()
 
         # Build conversation for the LLM
-        system_prompt = self._build_system_prompt()
+        system_prompt = await self._build_system_prompt()
 
         # Add learned context from past decisions
         learned_context = await self._get_learned_context(message)
@@ -442,7 +480,39 @@ Example queries:
 
         # Include recent conversation history from working memory
         context = await self.memory.working.get_context()
-        recent_interactions = context.get("interactions", [])[-10:]  # Last 10 interactions
+        recent_interactions = context.get("interactions", [])
+
+        # Check if we need to summarize older interactions
+        summary_prefix = ""
+        settings = get_settings()
+        if settings.context_summarization_enabled and len(recent_interactions) > settings.recent_turns_to_keep:
+            from cognitex.agent.summarization import get_summarizer, format_summary_for_prompt
+
+            summarizer = get_summarizer()
+            if summarizer.should_summarize(recent_interactions):
+                # Get session ID from working memory
+                session_id = context.get("session_id", "default")
+                result = await summarizer.summarize_older_messages(
+                    messages=recent_interactions,
+                    session_id=session_id,
+                )
+                summary_prefix = format_summary_for_prompt(result.summary)
+                recent_interactions = result.recent_messages
+                logger.debug(
+                    "Summarized conversation history",
+                    messages_summarized=result.messages_summarized,
+                    tokens_saved=result.estimated_tokens_saved,
+                )
+            else:
+                # Just keep recent interactions
+                recent_interactions = recent_interactions[-settings.recent_turns_to_keep:]
+        else:
+            # Fallback: keep last 10 if summarization disabled
+            recent_interactions = recent_interactions[-10:]
+
+        # Add summary to system prompt if generated
+        if summary_prefix:
+            system_prompt = summary_prefix + system_prompt
 
         for interaction in recent_interactions:
             role = interaction.get("role", "user")
@@ -619,6 +689,26 @@ Example queries:
                     except Exception as e:
                         logger.warning("Failed to create decision trace", error=str(e))
 
+                # Append to scratch pad if enabled
+                settings = get_settings()
+                if settings.scratch_pad_enabled:
+                    try:
+                        from cognitex.services.scratch_pad import get_scratch_pad_service
+
+                        scratch_service = get_scratch_pad_service()
+                        # Ensure general space exists
+                        await scratch_service.get_or_create_space("general")
+                        # Create concise summary of action
+                        action_summary = self._format_action_summary(action, action_input, result)
+                        if action_summary:
+                            await scratch_service.append_entry(
+                                space_name="general",
+                                text=action_summary,
+                                source="agent",
+                            )
+                    except Exception as e:
+                        logger.debug("Failed to update scratch pad", error=str(e))
+
                 # Format the observation
                 if result.needs_approval:
                     return f"Action staged for approval (ID: {result.approval_id}). Details: {result.data}", result.approval_id, trace_id
@@ -653,6 +743,48 @@ Example queries:
         except Exception as e:
             logger.error("Tool execution failed", tool=action, error=str(e))
             return f"Error executing {action}: {str(e)}", None, None
+
+    def _format_action_summary(self, action: str, action_input: dict, result: ToolResult) -> str | None:
+        """Format a concise summary of an action for the scratch pad.
+
+        Returns None for read-only queries to avoid cluttering the scratch pad.
+        """
+        # Skip read-only queries - they don't change state
+        tool = self.tool_registry.get(action)
+        if tool and tool.risk == ToolRisk.READONLY:
+            return None
+
+        # Format based on action type
+        if action == "create_task":
+            title = action_input.get("title", "Unknown")
+            return f"Created task: {title}"
+        elif action == "update_task":
+            task_id = action_input.get("task_id", "")[:8]
+            status = action_input.get("status", "")
+            if status:
+                return f"Updated task {task_id}: status={status}"
+            return f"Updated task {task_id}"
+        elif action == "draft_email":
+            to = action_input.get("to", "")
+            subject = action_input.get("subject", "")[:30]
+            return f"Drafted email to {to}: {subject}"
+        elif action == "create_event":
+            title = action_input.get("title", "")
+            return f"Created calendar event: {title}"
+        elif action == "send_notification":
+            return f"Sent notification"
+        elif action == "add_memory":
+            content = action_input.get("content", "")[:50]
+            return f"Stored memory: {content}..."
+        elif action in ["create_project", "update_project"]:
+            title = action_input.get("title", "Unknown")
+            return f"{'Created' if action == 'create_project' else 'Updated'} project: {title}"
+        elif action in ["create_goal", "update_goal"]:
+            title = action_input.get("title", "Unknown")
+            return f"{'Created' if action == 'create_goal' else 'Updated'} goal: {title}"
+        else:
+            # Generic summary for other mutation actions
+            return f"Executed: {action}"
 
     async def _generate_summary(self, original_message: str, trace: ReactTrace) -> str:
         """Generate a natural summary when hitting max iterations."""

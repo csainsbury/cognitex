@@ -1232,5 +1232,14 @@
         }
     });
     </script>
+
+    <!-- Scratch Pad Panel (loads via HTMX) -->
+    {% if show_scratch_pad is not defined or show_scratch_pad %}
+    <div hx-get="/api/scratch/panel"
+         hx-trigger="load"
+         hx-swap="innerHTML"
+         id="scratch-panel-container">
+    </div>
+    {% endif %}
 </body>
 </html>

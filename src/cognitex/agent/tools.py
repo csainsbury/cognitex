@@ -17,6 +17,22 @@ class ToolRisk(Enum):
     APPROVAL = "approval"      # Requires user approval before execution
 
 
+class ToolCategory(Enum):
+    """Functional category for mode-based tool filtering.
+
+    Used by the state-aware tool filter to determine which tools
+    are appropriate for the user's current operating mode.
+    """
+    READONLY = "readonly"           # Graph queries, searches, data retrieval
+    NOTIFICATION = "notification"   # Sending notifications to user
+    EMAIL = "email"                 # Email drafting and management
+    TASK_MUTATION = "task_mutation" # Creating or updating tasks
+    PROJECT_MUTATION = "project_mutation"  # Creating or updating projects/goals
+    EVENT = "event"                 # Calendar event creation
+    MEMORY = "memory"               # Memory storage and retrieval
+    WEB = "web"                     # External web searches and fetches
+
+
 @dataclass
 class ToolResult:
     """Result from executing a tool."""
@@ -33,6 +49,7 @@ class ToolDefinition:
     name: str
     description: str
     risk: ToolRisk
+    category: ToolCategory
     parameters: dict[str, Any] = field(default_factory=dict)
     examples: list[str] = field(default_factory=list)
 
@@ -43,6 +60,7 @@ class BaseTool(ABC):
     name: str
     description: str
     risk: ToolRisk
+    category: ToolCategory  # Functional category for mode-based filtering
     parameters: dict[str, Any] = {}
 
     @abstractmethod
@@ -56,6 +74,7 @@ class BaseTool(ABC):
             name=self.name,
             description=self.description,
             risk=self.risk,
+            category=self.category,
             parameters=self.parameters,
         )
 
@@ -70,6 +89,7 @@ class GraphQueryTool(BaseTool):
     name = "graph_query"
     description = "Query the knowledge graph using Cypher. Returns nodes and relationships."
     risk = ToolRisk.READONLY
+    category = ToolCategory.READONLY
     parameters = {
         "query": {"type": "string", "description": "Cypher query to execute"},
         "params": {"type": "object", "description": "Query parameters", "optional": True},
@@ -104,6 +124,7 @@ class SearchDocumentsTool(BaseTool):
     name = "search_documents"
     description = "Search documents using semantic similarity. Returns matching docs with relevance scores."
     risk = ToolRisk.READONLY
+    category = ToolCategory.READONLY
     parameters = {
         "query": {"type": "string", "description": "Search query text"},
         "limit": {"type": "integer", "description": "Max results", "default": 10},
@@ -128,6 +149,7 @@ class GetCalendarTool(BaseTool):
     name = "get_calendar"
     description = "Get calendar events. Can filter by date range."
     risk = ToolRisk.READONLY
+    category = ToolCategory.READONLY
     parameters = {
         "days_back": {"type": "integer", "description": "Days in the past", "default": 0},
         "days_ahead": {"type": "integer", "description": "Days in the future", "default": 7},
@@ -187,6 +209,7 @@ class GetTasksTool(BaseTool):
     name = "get_tasks"
     description = "Get tasks from the graph. Can filter by status, assignee, due date."
     risk = ToolRisk.READONLY
+    category = ToolCategory.READONLY
     parameters = {
         "status": {"type": "string", "description": "Filter by status: pending, in_progress, done", "optional": True},
         "limit": {"type": "integer", "description": "Max results", "default": 20},
@@ -227,6 +250,7 @@ class GetContactTool(BaseTool):
     name = "get_contact"
     description = "Get contact profile including relationship history and learned communication preferences (tone, greeting style, etc.)."
     risk = ToolRisk.READONLY
+    category = ToolCategory.READONLY
     parameters = {
         "email": {"type": "string", "description": "Contact's email address"},
     }
@@ -296,6 +320,7 @@ class RecallMemoryTool(BaseTool):
     name = "recall_memory"
     description = "Search past interactions, decisions, and observations. Use for context about past events."
     risk = ToolRisk.READONLY
+    category = ToolCategory.MEMORY
     parameters = {
         "query": {"type": "string", "description": "What to search for in memory"},
         "memory_type": {"type": "string", "description": "Type: interaction, decision, observation", "optional": True},
@@ -333,6 +358,7 @@ class CreateTaskTool(BaseTool):
     name = "create_task"
     description = "Create a new task. Can link to projects, goals, emails, or events."
     risk = ToolRisk.AUTO
+    category = ToolCategory.TASK_MUTATION
     parameters = {
         "title": {"type": "string", "description": "Task title"},
         "description": {"type": "string", "description": "Task description", "optional": True},
@@ -392,6 +418,7 @@ class FindTaskTool(BaseTool):
     name = "find_task"
     description = "Find a specific task by title or keywords. Use this before update_task to get the task_id. Returns matching tasks with their IDs."
     risk = ToolRisk.READONLY
+    category = ToolCategory.READONLY
     parameters = {
         "title_search": {"type": "string", "description": "Title or keywords to search for"},
         "status": {"type": "string", "description": "Filter by status: pending, in_progress, done, all", "optional": True},
@@ -448,6 +475,7 @@ class UpdateTaskTool(BaseTool):
     name = "update_task"
     description = "Update task status, due date, priority, or other properties. Use find_task first to get the task_id if you only have the title."
     risk = ToolRisk.AUTO
+    category = ToolCategory.TASK_MUTATION
     parameters = {
         "task_id": {"type": "string", "description": "Task ID to update (use find_task to get this from title)"},
         "title": {"type": "string", "description": "New title", "optional": True},
@@ -590,6 +618,7 @@ class SendNotificationTool(BaseTool):
     name = "send_notification"
     description = "Send a message to the user's Discord channel. Use for updates, alerts, questions."
     risk = ToolRisk.AUTO
+    category = ToolCategory.NOTIFICATION
     parameters = {
         "message": {"type": "string", "description": "Message content (supports markdown)"},
         "urgency": {"type": "string", "description": "low, normal, high", "default": "normal"},
@@ -621,6 +650,7 @@ class AddMemoryTool(BaseTool):
     name = "add_memory"
     description = "Store an observation, decision, or interaction in memory for future reference."
     risk = ToolRisk.AUTO
+    category = ToolCategory.MEMORY
     parameters = {
         "content": {"type": "string", "description": "What to remember"},
         "memory_type": {"type": "string", "description": "Type: observation, decision, interaction"},
@@ -668,6 +698,7 @@ class DraftEmailTool(BaseTool):
     name = "draft_email"
     description = "Create a draft email. Will be staged for user approval before sending."
     risk = ToolRisk.APPROVAL
+    category = ToolCategory.EMAIL
     parameters = {
         "to": {"type": "string", "description": "Recipient email address"},
         "subject": {"type": "string", "description": "Email subject"},
@@ -781,6 +812,7 @@ class CreateEventTool(BaseTool):
     name = "create_event"
     description = "Create a new calendar event. Will be staged for user approval."
     risk = ToolRisk.APPROVAL
+    category = ToolCategory.EVENT
     parameters = {
         "title": {"type": "string", "description": "Event title"},
         "start": {"type": "string", "description": "Start time (ISO datetime)"},
@@ -841,6 +873,7 @@ class GetProjectsTool(BaseTool):
     name = "get_projects"
     description = "Get a list of projects. Can filter by status."
     risk = ToolRisk.READONLY
+    category = ToolCategory.READONLY
     parameters = {
         "status": {"type": "string", "description": "Filter by status: planning, active, paused, completed, archived", "optional": True},
         "include_archived": {"type": "boolean", "description": "Include archived projects", "default": False},
@@ -874,6 +907,7 @@ class GetProjectTool(BaseTool):
     name = "get_project"
     description = "Get detailed project info including tasks, repos, and related projects."
     risk = ToolRisk.READONLY
+    category = ToolCategory.READONLY
     parameters = {
         "project_id": {"type": "string", "description": "Project ID to fetch"},
     }
@@ -899,6 +933,7 @@ class CreateProjectTool(BaseTool):
     name = "create_project"
     description = "Create a new project. Can link to goal and assign owner/stakeholders."
     risk = ToolRisk.AUTO
+    category = ToolCategory.PROJECT_MUTATION
     parameters = {
         "title": {"type": "string", "description": "Project title"},
         "description": {"type": "string", "description": "Project description", "optional": True},
@@ -955,6 +990,7 @@ class LinkProjectToPersonTool(BaseTool):
     name = "link_project_to_person"
     description = "Link a project to a person as owner or stakeholder."
     risk = ToolRisk.AUTO
+    category = ToolCategory.PROJECT_MUTATION
     parameters = {
         "project_id": {"type": "string", "description": "Project ID"},
         "person_email": {"type": "string", "description": "Person's email address"},
@@ -988,6 +1024,7 @@ class UpdateProjectTool(BaseTool):
     name = "update_project"
     description = "Update project status, title, or other properties."
     risk = ToolRisk.AUTO
+    category = ToolCategory.PROJECT_MUTATION
     parameters = {
         "project_id": {"type": "string", "description": "Project ID to update"},
         "title": {"type": "string", "description": "New title", "optional": True},
@@ -1034,6 +1071,7 @@ class GetGoalsTool(BaseTool):
     name = "get_goals"
     description = "Get a list of goals. Can filter by status and timeframe."
     risk = ToolRisk.READONLY
+    category = ToolCategory.READONLY
     parameters = {
         "status": {"type": "string", "description": "Filter by status: active, achieved, abandoned", "optional": True},
         "timeframe": {"type": "string", "description": "Filter by timeframe: quarterly, yearly, multi_year", "optional": True},
@@ -1070,6 +1108,7 @@ class GetGoalTool(BaseTool):
     name = "get_goal"
     description = "Get detailed goal info including child goals and linked projects."
     risk = ToolRisk.READONLY
+    category = ToolCategory.READONLY
     parameters = {
         "goal_id": {"type": "string", "description": "Goal ID to fetch"},
     }
@@ -1095,6 +1134,7 @@ class CreateGoalTool(BaseTool):
     name = "create_goal"
     description = "Create a new high-level goal. Can be linked to parent goals."
     risk = ToolRisk.AUTO
+    category = ToolCategory.PROJECT_MUTATION
     parameters = {
         "title": {"type": "string", "description": "Goal title"},
         "description": {"type": "string", "description": "Goal description", "optional": True},
@@ -1142,6 +1182,7 @@ class ParseGoalTool(BaseTool):
     and data pipelines as the first phase"
     """
     risk = ToolRisk.AUTO
+    category = ToolCategory.PROJECT_MUTATION
     parameters = {
         "description": {"type": "string", "description": "Natural language goal description"},
         "create_projects": {"type": "boolean", "description": "Create extracted projects", "default": True, "optional": True},
@@ -1192,6 +1233,7 @@ class UpdateGoalTool(BaseTool):
     name = "update_goal"
     description = "Update goal status, title, or other properties."
     risk = ToolRisk.AUTO
+    category = ToolCategory.PROJECT_MUTATION
     parameters = {
         "goal_id": {"type": "string", "description": "Goal ID to update"},
         "title": {"type": "string", "description": "New title", "optional": True},
@@ -1238,6 +1280,7 @@ class LinkTaskTool(BaseTool):
     name = "link_task"
     description = "Link a task to a project, goal, document, or set it as blocked by another task."
     risk = ToolRisk.AUTO
+    category = ToolCategory.TASK_MUTATION
     parameters = {
         "task_id": {"type": "string", "description": "Task ID to link"},
         "project_id": {"type": "string", "description": "Project ID to link to", "optional": True},
@@ -1298,6 +1341,7 @@ class SearchCodeTool(BaseTool):
     name = "search_code"
     description = "Search code across all indexed GitHub repositories using semantic similarity. Use to find relevant code for a task or concept."
     risk = ToolRisk.READONLY
+    category = ToolCategory.READONLY
     parameters = {
         "query": {"type": "string", "description": "Search query describing what code you're looking for"},
         "repo": {"type": "string", "description": "Optional: limit search to specific repository (owner/repo format)"},
@@ -1335,6 +1379,7 @@ class ReadCodeFileTool(BaseTool):
     name = "read_code_file"
     description = "Read the full content of a code file by its file ID. Use after search_code to get complete file content."
     risk = ToolRisk.READONLY
+    category = ToolCategory.READONLY
     parameters = {
         "file_id": {"type": "string", "description": "Code file ID (from search_code results)"},
         "max_length": {"type": "integer", "description": "Maximum content length to return", "default": 15000},
@@ -1381,6 +1426,7 @@ class GetRepositoriesTool(BaseTool):
     name = "get_repositories"
     description = "List all GitHub repositories that have been synced and indexed. Shows repo name, language, and file count."
     risk = ToolRisk.READONLY
+    category = ToolCategory.READONLY
     parameters = {}
 
     async def execute(self) -> ToolResult:
@@ -1417,6 +1463,7 @@ class WebSearchTool(BaseTool):
 
     Returns search results with titles, snippets, and URLs."""
     risk = ToolRisk.READONLY
+    category = ToolCategory.WEB
     parameters = {
         "query": {"type": "string", "description": "Search query"},
         "num_results": {"type": "integer", "description": "Number of results to return", "default": 5},
@@ -1472,6 +1519,7 @@ class WebFetchTool(BaseTool):
     name = "web_fetch"
     description = """Fetch and extract the main content from a web page. Use after web_search to get detailed information from a specific URL."""
     risk = ToolRisk.READONLY
+    category = ToolCategory.WEB
     parameters = {
         "url": {"type": "string", "description": "URL to fetch"},
         "max_length": {"type": "integer", "description": "Maximum content length", "default": 8000},
@@ -1543,6 +1591,7 @@ class ReadDocumentTool(BaseTool):
     name = "read_document"
     description = "Read the full text content of a document by its Drive ID. Use after search_documents to get full content."
     risk = ToolRisk.READONLY
+    category = ToolCategory.READONLY
     parameters = {
         "drive_id": {"type": "string", "description": "Google Drive ID of the file"},
         "max_length": {"type": "integer", "description": "Maximum content length to return", "default": 10000},
@@ -1641,6 +1690,14 @@ class ToolRegistry:
     def by_risk(self, risk: ToolRisk) -> list[BaseTool]:
         """Get tools filtered by risk level."""
         return [t for t in self._tools.values() if t.risk == risk]
+
+    def by_category(self, category: ToolCategory) -> list[BaseTool]:
+        """Get tools filtered by functional category."""
+        return [t for t in self._tools.values() if t.category == category]
+
+    def by_categories(self, categories: list[ToolCategory]) -> list[BaseTool]:
+        """Get tools that match any of the given categories."""
+        return [t for t in self._tools.values() if t.category in categories]
 
     def definitions(self) -> list[ToolDefinition]:
         """Get definitions of all tools for the planner."""

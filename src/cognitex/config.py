@@ -195,6 +195,50 @@ class Settings(BaseSettings):
         description="auto=create tasks immediately, propose=send for approval first",
     )
 
+    # State-Aware Tool Filtering
+    state_aware_tools_enabled: bool = Field(
+        default=True,
+        description="Filter available tools based on user's operating mode",
+    )
+    allow_tool_override: bool = Field(
+        default=True,
+        description="Allow users to temporarily override tool filtering",
+    )
+
+    # Context Summarization
+    context_summarization_enabled: bool = Field(
+        default=True,
+        description="Auto-summarize older conversation history when context grows large",
+    )
+    max_context_tokens: int = Field(
+        default=8000,
+        ge=2000,
+        le=32000,
+        description="Token threshold before triggering summarization",
+    )
+    summarization_strategy: Literal["aggressive", "moderate", "minimal"] = Field(
+        default="moderate",
+        description="How aggressively to summarize (affects turns kept)",
+    )
+    recent_turns_to_keep: int = Field(
+        default=7,
+        ge=3,
+        le=15,
+        description="Number of recent conversation turns to keep verbatim",
+    )
+
+    # Scratch Pad
+    scratch_pad_enabled: bool = Field(
+        default=True,
+        description="Enable the scratch pad active memory system",
+    )
+    scratch_archive_days: int = Field(
+        default=7,
+        ge=1,
+        le=30,
+        description="Days before scratch pad entries are archived",
+    )
+
     @property
     def is_development(self) -> bool:
         return self.environment == "development"

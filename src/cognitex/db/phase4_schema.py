@@ -175,6 +175,52 @@ CREATE INDEX IF NOT EXISTS idx_learnings_expertise ON expertise_learnings(expert
 CREATE INDEX IF NOT EXISTS idx_learnings_type ON expertise_learnings(learning_type);
 CREATE INDEX IF NOT EXISTS idx_learnings_created ON expertise_learnings(created_at);
 
+-- Conversation summaries for context compression (PA Enhancement Phase 2)
+-- Stores compressed summaries of older conversation turns
+CREATE TABLE IF NOT EXISTS conversation_summaries (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    summary_text TEXT NOT NULL,
+    summary_embedding vector(768),  -- For semantic retrieval of past context
+    token_count INTEGER,
+    messages_summarized INTEGER,
+    message_range_start TIMESTAMP,
+    message_range_end TIMESTAMP,
+    strategy TEXT DEFAULT 'moderate',  -- 'aggressive', 'moderate', 'minimal'
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_conv_summary_session ON conversation_summaries(session_id);
+CREATE INDEX IF NOT EXISTS idx_conv_summary_created ON conversation_summaries(created_at);
+
+-- Scratch spaces for active working memory (PA Enhancement Phase 3)
+-- Provides a visible, editable workspace bridging agent actions and user context
+CREATE TABLE IF NOT EXISTS scratch_spaces (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,          -- 'general', 'project:xyz', 'task:abc'
+    space_type TEXT NOT NULL,           -- 'general', 'project', 'task'
+    linked_entity_id TEXT,              -- Optional project_id or task_id
+    content TEXT NOT NULL DEFAULT '',   -- Current scratch pad content
+    entries JSONB DEFAULT '[]',         -- Array of {timestamp, source, text, archived}
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_scratch_space_type ON scratch_spaces(space_type);
+CREATE INDEX IF NOT EXISTS idx_scratch_linked ON scratch_spaces(linked_entity_id);
+CREATE INDEX IF NOT EXISTS idx_scratch_updated ON scratch_spaces(updated_at);
+
+-- Scratch archive for old entries (>7 days by default)
+CREATE TABLE IF NOT EXISTS scratch_archive (
+    id TEXT PRIMARY KEY,
+    scratch_space_id TEXT REFERENCES scratch_spaces(id) ON DELETE CASCADE,
+    entries JSONB NOT NULL,
+    archived_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_scratch_archive_space ON scratch_archive(scratch_space_id);
+CREATE INDEX IF NOT EXISTS idx_scratch_archive_date ON scratch_archive(archived_at);
+
 -- Add lifecycle columns to preference_rules if they don't exist
 -- These are added via ALTER TABLE to preserve existing data
 """
