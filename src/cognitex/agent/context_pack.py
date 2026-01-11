@@ -1340,7 +1340,7 @@ class ContextPackTriggerSystem:
                     if not existing:
                         logger.info(
                             "Building context pack",
-                            event=event.get("summary", "Unknown")[:30],
+                            event_title=event.get("summary", "Unknown")[:30],
                             stage=stage.value,
                             whisper=is_whisper,
                         )

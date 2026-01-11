@@ -1259,7 +1259,7 @@ Your response:"""
                         context_sections.append(pack_text)
 
                 except Exception as e:
-                    logger.debug("Failed to build context pack for event", event=title, error=str(e))
+                    logger.debug("Failed to build context pack for event", event_title=title, error=str(e))
                     continue
 
             if context_sections:

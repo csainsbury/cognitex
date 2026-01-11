@@ -40,6 +40,7 @@
         <!-- Main content (user-editable) -->
         <div class="scratch-content">
             <textarea id="scratch-content-editor"
+                      name="content"
                       placeholder="Type notes here... (auto-saves)"
                       hx-put="/api/scratch/{{ space.name }}"
                       hx-trigger="keyup changed delay:1s"

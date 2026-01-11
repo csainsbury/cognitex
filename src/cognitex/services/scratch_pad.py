@@ -205,7 +205,7 @@ class ScratchPadService:
     async def append_entry(
         self,
         space_name: str,
-        text: str,
+        entry_text: str,
         source: str = "agent",
     ) -> ScratchEntry:
         """Append an entry to a scratch space."""
@@ -214,7 +214,7 @@ class ScratchPadService:
         entry = ScratchEntry(
             timestamp=datetime.now(),
             source=source,
-            text=text,
+            text=entry_text,
         )
 
         async for session in get_session():
@@ -223,7 +223,7 @@ class ScratchPadService:
                 await session.execute(
                     text("""
                         UPDATE scratch_spaces
-                        SET entries = entries || :entry::jsonb,
+                        SET entries = entries || CAST(:entry AS jsonb),
                             updated_at = NOW()
                         WHERE name = :name
                     """),

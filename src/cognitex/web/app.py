@@ -4383,13 +4383,16 @@ async def api_scratch_update(
 async def api_scratch_add_entry(
     request: Request,
     space_name: str,
-    text: str = Form(...),
+    text: str = Form(""),
 ):
     """Add an entry to a scratch space."""
     from cognitex.services.scratch_pad import get_scratch_pad_service
 
     scratch_service = get_scratch_pad_service()
-    await scratch_service.append_entry(space_name, text, source="user")
+
+    # Only add entry if text is non-empty
+    if text.strip():
+        await scratch_service.append_entry(space_name, text, source="user")
 
     # Return updated panel
     space = await scratch_service.get_space(space_name)
