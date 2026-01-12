@@ -100,8 +100,13 @@ async def create_session(user_email: str, user_name: str | None = None) -> str:
     return serializer.dumps(session_id)
 
 
-async def verify_session(signed_session_id: str) -> dict | None:
-    """Verify session and return user data or None."""
+async def verify_session(signed_session_id: str, refresh: bool = True) -> dict | None:
+    """Verify session and return user data or None.
+
+    Args:
+        signed_session_id: The signed session cookie value
+        refresh: If True, extends the Redis TTL on successful verification (sliding window)
+    """
     if not signed_session_id:
         return None
 
@@ -119,13 +124,21 @@ async def verify_session(signed_session_id: str) -> dict | None:
         return None
 
     # Get session data from Redis
-    session_json = await redis.get(f"{REDIS_SESSION_PREFIX}{session_id}")
+    redis_key = f"{REDIS_SESSION_PREFIX}{session_id}"
+    session_json = await redis.get(redis_key)
     if not session_json:
         logger.debug("Session not found in Redis", session_id=session_id[:8])
         return None
 
     try:
-        return json.loads(session_json)
+        session_data = json.loads(session_json)
+
+        # Refresh the session TTL on each successful verification (sliding window)
+        # This keeps active users logged in
+        if refresh:
+            await redis.expire(redis_key, SESSION_MAX_AGE)
+
+        return session_data
     except json.JSONDecodeError:
         logger.warning("Invalid session data in Redis")
         return None
