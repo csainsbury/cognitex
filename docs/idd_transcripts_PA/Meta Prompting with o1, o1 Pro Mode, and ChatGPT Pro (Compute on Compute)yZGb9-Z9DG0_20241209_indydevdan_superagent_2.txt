@@ -1,0 +1,968 @@
+what's up Engineers welcome back I have
+a massive two for one grand slam for you
+today open AI 12 days of releases has
+kicked off with Chad GPT Pro and the new
+complete 01 model I absolutely had to
+purchase the insane chat GPT Pro
+subscription for 200 bucks a month I
+bought this because of course I'm
+addicted to being on the edge and also
+so you don't have to take on the risk
+before you see what it can do in this
+video you'll find out out if it's worth
+it we've been preparing for the o1
+launch for quite a while the trick with
+these highly capable reasoning models
+like 01 and o1 PR mode is knowing what
+to prompt to reveal and challenge its
+capabilities and oh boy do I have a
+challenge for 01 today we're challenging
+the new 01 series with meta prompting an
+advanced prompt engineering technique
+where you write a prompt that writes
+prompts for you this technique unlocks
+asymmetric productivity for you in the
+generative AI age that we live in we'll
+talk about why and how to best utilize
+this pattern in this video Let's
+understand meta prompting with handson
+examples using the new 01 and 01 Pro
+mode and let's see if it's worth your
+hard earned
+cash this is a meta prompt at first
+glance this just looks like a standard
+information Rich XML prompt with a huge
+set of instructions you can see this
+prompt has has about 3,000 tokens so
+there's a lot going on here there's a
+lot of information packed into this
+prompt let's run our meta prompt in a
+static Way by replacing our user input
+variable here we'll generate prompts
+using the new 01 model and then we'll
+take those prompts and run it against
+both chat GPT 01 and 01 Pro mode at the
+same time so we can compare the results
+side by side together so let's start
+with some meta prompting in our
+directory here you can see we have three
+examples that we're going to work
+through and some images that we'll talk
+about in a second let's go ahead and
+start out by just generating three new
+prompts from our meta prompt so what
+I'll do is I'll copy The Meta prompt
+just paste it in a brand new file here
+and then let's start with our Hacker
+News perspective so this is a simple
+user input where I'm basically walking
+through everything we want to pass into
+this prompt I'm using a semi-structured
+input format you can see we have purpose
+instructions sections and and variables
+and all I'll do here is copy this paste
+it into our meta prompt and replace our
+user input I'll then copy the entire
+meta prompt and go over to chat gbt
+using the new 01 model I'm just going to
+paste this in and we're going to let
+this rip so we want o1 to generate a new
+prompt based on this meta prompt and all
+the details for what the prompt will do
+is embedded in the user input here so
+you can see it took 9 seconds for 01 to
+spit out this result this is much f
+faster over 01 preview we can go ahead
+and just copy this let's create a new
+file here we'll call this prompt hn
+perspectives we're going to use this
+prompt to analyze Hacker News commentary
+we have this new prompt here this is
+pretty incredible it's generated
+automatically for us thanks to our meta
+prompt in an XML is format we've talked
+about XML format on the channel in the
+past long story short there is that XML
+is the best way to get highquality
+results out of your prompts uh feel free
+to pause the video and check out you
+know the details of this prompt but it
+basically just took everything we asked
+for in our user input it read the entire
+meta prompt that we have here um you
+know tons of instructions here we have
+an input format and then of course
+several Rich examples and it generated a
+brand new prompt for us so you can see
+here you an expert at analyzing and
+aggregating perspectives from a given
+Hacker News Post so great start solid
+instructions here let's continue to our
+next prompt bug analysis this is a
+prompt that's going to analyze code and
+Report bugs so as you'll see this is
+going to be a very useful prompt for
+reviewing code why have your coworker
+review your code when you can have ai
+review it first and save them and
+yourself a lot of time in the pr review
+process so this is a powerful prompt you
+can see here we actually have a example
+of what we want the examples in the
+prompt to look like so we're giving the
+meta prompt some additional information
+here to create a great High equality
+prompt to solve the problem we're aiming
+to solve in this case we want to analyze
+and review code fixes to be recommended
+we wanted to look for critical bugs that
+would crash the program and we also
+wanted to give us a ranking so when
+you're writing the input to The Meta
+prompt that defines the prompt you're
+looking for you can just kind of write
+out you know in natural language what
+you want the sections to look like what
+are the variables what are the sections
+what do you want your examples to look
+like copy this and we can replace the
+previous user input here copy this and
+same deal so I'm going to start a new
+chat here paste this in and run this
+once again on o we don't need 01 Pro
+mode yet the real comparison will be uh
+in executing these large intense prompts
+in 01 Pro mode so let's go ahead and
+copy this out you can see we have a uh
+great prompt written here let's go ahead
+and take a look at this so this is
+prompt bug
+analysis if we paste this in you know we
+have three examples so these were
+automatically generated examples thanks
+to our meta prompt you can see the
+format you know it's giving us severity
+the file the description and then
+something cool added to the example we
+want a contrl f lookup to figure out
+where that issue is and it's going to
+give us a recommended fix so this is you
+know the importance of good prompt
+engineering you're never going to get
+this format by just saying find bugs in
+my code right by doing something like
+this right find bugs in my code and then
+you just place your code here right this
+is why prompt engineering is a very very
+real skill by specifying examples by
+creating instructions by defining a
+clear purpose this prompt output is
+going to be very very rich and useful as
+you'll see in a second here so this is
+great we have a bug analysis prompt
+let's go ahead and generate one more
+prompt here's our last prompt here and
+this is going to be a oh let me actually
+create this uh update this to XML here
+and our last prompt here is going to be
+a script to blog we're going to take the
+script from a previous YouTube video and
+then we're going to pass in the topic or
+the title of that video and it's going
+to generate a HTML CSS only blog basic
+on the script okay so we're just going
+to copy this follow that same process
+we're going to replace our user input
+from our meta
+prompt and you know I just have these
+all pre-typed out I don't want to waste
+your time writing out these user inputs
+so I'm just going to copy this we're
+going to start a new session so that the
+chat history does not affect the meta
+prompt and you know let's actually go
+ahead and use o1 prom mode for this
+final meta prompt I'm going to run that
+here and we can do this side by side
+just for fun so we'll do this side by
+side you can see a big difference here
+um 01 Pro mode is taking some time to
+think right away and you can see 01 the
+01 base model is already done it's it's
+written this great uh instruction Rich
+prompt it has the two variables I asked
+for it has the lead in for the
+completion for the llm that's going to
+run this prompt this is quite fantastic
+right you're an expert web designer and
+writer who specializes in creating
+engaging humanlike blog posts using only
+HTML and CSS okay so um right away we
+can see just by running our meta promps
+01 is very very powerful um I'm still
+kind of in shocked that this ran for 4
+seconds and it was able to work through
+the meta prompt that quickly so uh this
+is a task that GPT 4 o l models
+typically have problems with if you look
+at the meta prompt it's kind of complex
+especially when you get to the examples
+because in the examples we have input
+prompts and the expected outputs which
+are themselves prompts right so you can
+imagine lower quality even middle tier
+models have problems with the meta
+prompt and you know we can see the new
+01 did this task with no problem in 4
+seconds okay so let's go ahead and just
+use this I'll say prompt gript to blog.
+XML file I'll paste this and now we have
+a new prompt right this new generative
+AI mini program that takes in a script
+and a topic and we'll generate a HTML
+and CSS blog for us we'll see how the
+outputs perform between 01 PR mode and
+01 in just a moment but you can see here
+we have a very very similar output from
+01 Pro mode for the use case of meta
+prompting 01 and 01 Pro mode put out
+very similar results you can see avoid
+overhype and keep it real avoid sounding
+like an AI aim for natural human-like
+voice actually prefer the 01 output here
+a little bit more for that specific
+instruction but very very similar
+outputs here we're not going to worry
+about this this is not really what we
+were aiming to compare let's go ahead
+and open up new sessions and start
+running our prompts that are meta
+prompts generated for
+us before we move on let me just quick
+highlight again the value of meta
+prompting why is meta prompting so
+important if you haven't noticed uh The
+Prompt is everything Engineers product
+builders managers anyone who can get
+their hands on a highquality prompt can
+do a lot more with a lot less prompts
+give you superh human abilities thanks
+to the language models underneath them
+as every engineer with their eyes
+actually open is noticing you know
+software engineering has completely
+changed right language models prompting
+has completely changed the way software
+is written this is just a single domain
+there are many others actively being
+transformed by llms prompts and gen AI
+as a whole right there are many more to
+come and they're all fueled by one thing
+the prompt in the age of generative AI
+your ability to generate prompts is your
+ability to generate results so the
+quality and the quantity of prompts
+right highlighting here The Meta prompt
+the quality and quantity of prompts you
+can generate will determine how
+effective you are in the generative AI
+age that's what meta prompting is all
+about more prompts at higher quality
+based on your meta prompt you can start
+with the one we're experimenting with
+right here I've been using this meta
+prompt here for uh about half a year now
+3K tokens great clear instructions Some
+solid examples you can start with the
+meta prompt here link will be in the
+description this is a very very valuable
+resource and an important pattern I'm
+giving to you here and it's going to
+become more important especially when we
+embed our meta prompt into AI agents
+that can then automate the process of
+executing the meta prompt which
+generates new prompts for us hint hint
+more on that coming in 2025 you can
+really hear the agentic recursive Auto
+looping nature of handing off this meta
+prompt to an AI agent right so smash the
+like comment subscribe stay connected to
+this information and be on the lookout
+for the weekly video every Monday in
+2025 um everything we're doing here is
+going parabolic especially as the
+technology of generative AI continues to
+evolve so so that's the important of the
+meta prompt let's go ahead and run it
+let's make sure that you know it's
+actually generating some great high
+quality prompts for
+us I thought it would be interesting and
+cool to actually look at The Hacker News
+Post on chat GPT for this we're going to
+paste in a block of Json which contains
+all the kind of comments and the
+commentary we can go to the Post here so
+here's the you know chat TPT Pro Hacker
+News Post and you know a bunch of Rich
+commentary no AI summary will ever
+replace the learning and the growth
+you'll have when you actually just read
+everyone's thoughts and opinion so you
+know highly recommend you do that we can
+go ahead take this post ID and go to
+algolia and paste that here and you know
+with this link what you'll see is the
+entire Hacker News Post broken down in
+this Json format so we can copy this
+I'll create a new file uh this is hn
+post. Json paste the results in here
+automatically format you can see this is
+a 200k token Json blob that is too many
+tokens I think that 01 and ow and pro
+mode run with about a Max of 128k tokens
+which is still quite a lot so let's go
+ahead and pair this down a little bit we
+can open up the terminal and use JQ for
+this so if i r on
+jq. and then we pass in h&amp; post you can
+see all the children getting printed out
+there and you can see all the comments
+are going to be in this first children
+block okay so this is all we need to get
+all the Hacker News comments and if we
+hit up again and we do a length check on
+this I think it's just pipe length yeah
+so you can see we have 145 items let's
+pair this down
+to um we can do 50 so we'll get the
+first 50 and I want to Output this to hn
+poost 50.
+Json okay and then we can just look at
+this new file that's a 100K tokens this
+is going to be more manageable so I'll
+it's kind of wild to say 100K tokens is
+going to be more manageable but it's
+true that's how powerful these 01 models
+are so I'm going to copy this I'll open
+up our prompt hn perspectives I'll paste
+this in and I'll actually copy this into
+a new file here I'll revert this and now
+we have our prompt hent perspectives
+prompt filled out so if I go back to XML
+here you can see we have user prompt
+with all that Json and now we have a
+100K token prompt this is the moment of
+truth we can open up chat gpg Pro
+instances here let's make sure we're in
+fresh sessions and let's see how both of
+these models perform okay same prompt
+both sides 01 Pro mode 01 and let's fire
+these off so right away first thing to
+notice is that these models are thinking
+a little bit and you can see how long
+this scroll takes this is a huge huge
+prompt right away they're thinking okay
+o1 is outputting results already this is
+very very impressive it it thought for
+one
+second uh wow okay so they really really
+punch this model forward 01 is very fast
+I mean that's uh non reasing models are
+slower than this so very impressive you
+can see on the left side 01 Pro mode if
+we open up the details actually doesn't
+have any details here for us yet it's
+thinking uh so that's fine but you can
+see you know taking some time this is
+the you know typical UI for 01 Pro mode
+you pay something in and then it takes
+some time to really think through me
+meanwhile we can work through our output
+on okay okay very nice 01 promoe just
+wrapped up for us and it just spit out
+this massive result so this fantastic I
+thought for one minute you can see that
+here let's kind of walk through this
+right so main points perspectives from
+the discussion so we have price value
+justification debate over the 200 month
+price tag of course that makes sense
+many users urge it's expensive compared
+to 20 of course it's a basically a 10x
+jump I think the big kicker here which I
+completely agree with so users find it
+absurd While others see it Justified if
+it can give you the productivity rates
+or if you can basically pay it back by
+Saving Time from using it right the idea
+is that if it saves you multiples hours
+on time monthly it's worth it for others
+it's simply too expensive right so
+totally understandable you can see that
+same type of perspective here broken
+down in 01 Pro mode comparison to
+Alternatives is a big topic here and you
+can see both models kind of going down
+the line here this all looks great uh I
+do like the shorter more concise bullet
+points from 01 Pro mode but if we scroll
+down here and look for top three
+representative comments for each one of
+the perspectives this was a great
+comment right uh if you save 4.5 hours
+in a Google sheet the 200 bucks a month
+is cheap right I mean that's paid itself
+off very very quickly so we have you
+know if you don't have the use case for
+01 reasoning models which a lot of
+Engineers and Builders don't need the 01
+model and also my opinion here is that
+that most engineers and product Builders
+don't know how to use these powerful
+reasoning models you really do need
+interesting hard uh complex problems to
+even get value out of these otherwise 40
+Gemini Sonet is going to cover you know
+most cases but you can just kind of see
+here you know we're getting very similar
+results I'm leaning more toward 01 Pro
+here but these are where things get kind
+of interesting right we have a breakdown
+of the table right so we have five
+different perspectives we have sentiment
+we have summaries these are great you
+can you know stop you can pause the
+video Read these if you're interested
+and then we have a nice flowchart here
+so I actually want to copy out these
+flowcharts I did also ask for a
+flowchart at the ending here which is
+kind of hilarious to ask for that and
+let's just open this up and take a look
+at this flowchart okay so this is really
+interesting so users uh assesses value
+price debates 200 is too high cheap
+Alternatives uh logical flow here right
+if you're using claw open source just
+skip it quality is uncertain still
+hallucinates so I I don't know about
+this this this model does doesn't really
+hallucinate yeah if it saves time if
+you're a high earner if you have complex
+use cases then it's completely Justified
+right so you have business
+specifications where youou the losses so
+this is a decent chart right this kind
+of breaks down I think the sentiment
+around chpt Pro so let's go ahead and
+look at the as we're talking about it
+let's go ahead and look at the results
+from uh chpt Pro 01 Pro mode so let's
+just paste this in and let's see this
+break down right so open ey introduces
+pro at 200 worth it so I like this slow
+better uh yes High income Pros uh
+justify time-saving less time spent on
+complex task worth it no individuals uh
+you know too expensive not enough value
+stick with cheaper alternatives make
+sense we have the open source block here
+and then we have adoption and Reliance
+right addiction leads to potential
+higher price skeptical llm hype question
+so all makes sense I love the breakdown
+from both of these models let's go ahead
+and close this up and move on to our
+next prompt so far how are you liking
+the output of of 01 prom mode and 01 as
+you can see I think the difference is
+marginal based on these examples and
+based on this you know one promp for
+running here but you can already start
+to see some differences right just a
+little bit of detail here a little bit
+of extra kind of information uh I like
+how it's breaking down the information a
+little bit more in O Pro mode let's run
+some more prompts and then we can make a
+better decision
+here let's go ahead and run script to
+blogs so this is pretty interesting
+let's close this let's close this and
+let's focus in on our script to blog
+what I'll do here is I'll open up a
+script from our previous YouTube video
+so this is from the qwq local reasoning
+model video that we put out last week
+and what I'll do is I'll paste that
+script in here so you can see this
+entire script right here and then I'll
+paste in the video title so we have our
+title in here as well so we have a a 4K
+token prompt not too large but there's
+not nearly as much information to work
+through as our Hacker News perspectives
+prompt let's copy this hop back over to
+chpt Pro let's use new fresh windows so
+we don't contaminate and then let's just
+paste these prompts in and let's see how
+01 and 01 Pro mode generates a HTML CSS
+only blog post based on the transcript
+from the last video we did on the
+channel so right away you can see the
+same deal happening we do get a detail
+of the inner monologue okay 01 is
+finished already this model is insanely
+fast this is one of the most advanced
+okay so it's it's it's in progress um
+this model is just absolutely incredible
+uh the speed here is really making me
+appreciate the intelligence it has even
+more 0 and preview would have taken
+probably about double the time to Output
+this but okay so copy code let's go
+ahead and create a blog file here so
+this is 01 qwq blogpost HTML we'll paste
+this in and something important to note
+about this prompt here is that I also
+have image references so you can see
+here inside the prompt The Meta prompt
+picked up on this perfectly it didn't
+change the file references at all we
+have a couple pgs which will uh link
+directly to this images directory right
+with some images so you know we do have
+images for this blog post let's see how
+01 has down here and generating this
+let's go ahead and open up uh preview
+okay sorry if my screen blinded you
+there interesting right so we have the
+title uh we have the hook that's
+something that we explicitly mentioned
+um in the instructions start with a
+strong hook that captures the reader
+attention and we have a table of
+contents here this is perfect we did ask
+for that uh search for table of contents
+right highlighting the three main points
+good and then it kind of jumps into it
+right so this is really really cool
+right this is a automatically generated
+blog post let me actually read this hook
+and see if like this so ever wonder if
+local reasoning models can deliver the
+same Nuance on the Fly insights we've
+come to expect from Big cloud-based
+systems good news it just got a whole
+lot more interesting meet qwq Quinn with
+questions the model that's raising
+eyebrows in the world of local a
+reasoning this is really good in this
+post we'll explore a trick that makes
+qwq instantly more useful prompt
+chaining okay so this is this is solid
+you know again comment down below let me
+know what you think about this hook
+automatically generated by 01 it's it's
+pulling from the ideas of you know my
+intro from the previous YouTube video
+and I'll of course link this video in
+the description check it out and then
+you know this blog post will make uh
+quite a bit more sense but this is right
+on topic you know anyone that's seen our
+last video you know this is exactly what
+it's all about the whole idea in that
+video is we want to make qwq more useful
+with prompt chaining so this is
+excellent table of contents just like we
+asked rise of the qwq reasoning models
+nicknamed it qdb in the intro here's the
+thumbnail for that video breaking down
+promp chaining it's talking about the
+Reasoner and or and the extractor just
+like we talked about in the video you
+can use qwq to generate the long
+thinking output with the Chain of
+Thought and then you can use a Quinn 2.5
+or now llama 3.3 to extract the result
+right and simplify the output you can
+also now use ama's uh structured outputs
+so this just got released just wanted to
+quickly bring this up Alama now has
+support for structured outputs more
+reliability and consist
+in Json mode so just something to bring
+up quickly here uh you know you can now
+use a model like qwq that thinks and you
+can extract the final result right with
+an extractor model that pulls out uh the
+example so anyway refocusing here on the
+01 blog post output we can see we have
+that prompt chain image placed really
+really well and you know I actually
+meant to paste in the images inside of
+chat gbt here I completely just missed
+out on that the 01 models now have image
+support but it looks like very clearly
+01 did not need to see these images to
+place them properly so the last bit of
+our blog here I do like these cards
+right a little bit of box shadow image
+right in the center here and you know
+simple kind of lightweight section so
+this is 01 let's go ahead and look at
+the output from 01 in PR mode so I'm
+going to just copy the output here open
+up a new file this is going to be 01
+promode blogpost
+HTML we can paste this and let's go into
+HTML preview mode so crack open qwq
+ready for so this is already better
+right it's not prefixing with hook but
+let's open up 0 one's output so it had
+this hook prefix right there's no reason
+to show that so already 01 prom mode
+understands the problem a little bit
+better than 01 so QQ also known as CHR
+questions is stirring excitement because
+it's not just another a model it's a
+reasoning Powerhouse you can run right
+on your machine let's be honest qq's raw
+output can be a bit messy don't worry
+there's a brilliant solution prompt
+chaining in this post we'll walk through
+how prompt chaining transform qwq into a
+super useful OnDemand idea machine Let's
+dive in okay so pretty interesting a
+little more exciting than I would like
+the language to be but it's fine we can
+tweak that very easily by updating the
+prompt we have the table of contents
+that's good problem with local reging
+models I like this so setting up a kind
+of intro solution example structure uh
+we can see these images here we we get
+this nice centered caption which I think
+is a nice addition here introduction to
+prompt chaining a game changer promp
+chaining clever technique and it it's
+really nailing exactly everything in
+that YouTube video it's nailing every
+one of the ideas um you can use to
+generate Rich thought out answers then
+use another model like a streamlined
+Quinn 2.5 model to neatly extract
+results it's fantastic how prompt
+training Works in a nutshell great
+breakdown here I do like that it you
+know kind of created this little howto
+in in the center here putting it all
+together you can see we have our 01
+image there and Prof for reasing models
+through our prompt engineering at the
+bottom here this is really cool Pro tip
+start simple this is this is pretty nice
+right gave us a little Pro tip uh item
+here why wait for tomorrow's models or
+next week's new code releases with
+prompt chain you can harness qq's
+reasoning capabilities today and keep a
+tidy usable final result every time so
+this is fantastic to me the language of
+01 PR mode is a lot more human maybe
+minus this this intro that the intro is
+kind of annoying to me but you know
+that's fine you might like intros like
+this uh nothing wrong with it I will say
+I did like the format like the the
+visual format of the base1 model a
+little bit better but I think that
+content wise 01 Pro mode is a bit better
+here right these howtos and this tip
+here and the you know image captions I
+think provides quite a bit more value
+than the 01 base output blog but again
+you know comment down below let me know
+what you think do you see one model
+beating the other out or is it just
+close enough I feel like it is kind of
+hard to tell and these results could
+just be about the non-deterministic
+nature of llms as a whole right to me a
+consistent theme Here 01 prom mode is
+giving me just a little Edge is it worth
+$200 a month well that really just
+depends on the volume of reasoning that
+I need solved over the course of a month
+right I think that's the big kind of
+delineation with the decision of whether
+chat GPT Pro is actually worth it so we
+have one more prompt to run let's go
+ahead and fire that
+off open up our bug analysis and so this
+is a really interesting one our bug
+analysis here ignore the syntax here
+that just looks like we clipped image a
+little bit there all we need to do here
+is paste in some code so I have this
+previous code base Beni from our live
+benchmarking uh repository and what I'll
+do here is I have this kind of
+pre-command loaded here I'll be sharing
+more on this tool in 2025 but what I can
+do here is basically pull together
+context files so if I run alo1 gather
+files yeah we can just see this command
+here basically all I'm doing here is I'm
+pulling all The View files in the source
+directory typescript files and every
+python file in the server okay so this
+is a simple client server application
+I'll also link the live benchmarking
+videos in the description if you're
+interested in checking out this code
+base and some of the cool live
+benchmarks we've done on the channel so
+I'll copy this and this is going to be
+really cool so I'll close this and now
+if I print this right if I paste this
+you can see um if I run Source or if I
+just search for Source here you can see
+every file from this code base
+right so this is really cool so we have
+every python file we have every
+typescript and every vue.js file that we
+need and this is great right so
+basically we have a bunch of code you
+can see we have have 20K token code base
+so I'm just going to take this paste it
+in our user prompt now our expert code
+analysis prompt is going to run an
+analysis on that code so as usual we'll
+copy this we'll start fresh sessions and
+then I'll just paste in both sides and
+let's see how 01 and 01 Pro mode reviews
+our code for us so I'll paste this in
+both sides um you know a decent size
+prompt there this is a 20K token prompt
+and let's go aad and scroll to the
+bottom here let's see what 01 promote is
+doing you can see it working through
+nice we have a decent chain of details
+here I have noticed that after a while
+01 Pro mode sometimes just stops
+outputting its details to you and you
+know just kind of keeps it to itself
+after a while but this is nice to see
+examining code managing async bugs it
+found a couple async bugs there after 32
+seconds so this is a more complex thing
+to work through 01 thinking for about 32
+seconds and it found a decent chunk of
+issues for right so let's go ahead and
+just copy this out everything's always
+easier to read in your own text editor
+so we can see here for 01 base a decent
+slew of responses from our bug analysis
+prompt we have a potential crash if
+messes. content is empty from our
+anthropic llm model yep that's super
+solid everyone just kind of assumes that
+this will always exist uh that was my
+bad to not you know place an if there so
+we have our is loading resetting
+prematurely due to an unawed a sync Loop
+okay so this is actually kind of
+interesting let me let me actually just
+pull this up thankfully we have this
+nice contr F that we can use and let's
+go and quick look for that what file was
+that it's it's in it's in both of these
+files so this is great right uh thanks
+to our meta prompt and our prompt it
+actually you know respected this output
+format we want to see every file and
+every instance of this issue and it
+found it in both of these files if we
+search for each async which it gave us
+here with a contrl f lookup um we can
+see both of these issues here right so
+we have this four each async Loop and
+yeah okay that's that's a bug that's a
+bug um you can see here we're not ever
+awaiting the results here and that means
+that is loading will arbitrarily just
+fire off so it found it there and it
+also found it I assume I just kind of
+blazed through this and so it also found
+it here probably just copy and paste it
+via an AI coding prompt so you can see
+here we are actually getting some
+concrete Val out of this prompt that was
+generated by our meta prompt that we
+then pass back into 01 um you can see
+here we have some smaller lower quality
+lower tier issues here lower severity um
+fantastic right let's hop back over to
+01 prom mode and let's work through
+everything that it gave us here you can
+see here uh we have quite a bit more
+information this took a minute 34
+seconds so this took about three times
+longer to run let's just copy out
+everything here and let's look at the o
+1 prom mode so we do have some js here
+let me just go ahead and do this we can
+see 01 prom mode picked up on that same
+message content issue picked up on the
+same for each async but so this is
+another issue that was caught here looks
+like an additional issue on an empty
+array when calculating okay recommended
+fix um or you want to check to see if
+the array is empty before calling
+math.min makes sense this is kind of
+nice it gave us more example code on how
+to fix the issue exactly if we look at
+our bug analysis prompt here that is
+kind of what we were looking for here
+right we didn't explicitly say in our
+examples you know show code as well but
+01 PR mode went ahead and generated
+output code for us the the theme Here of
+01 prom mode being just a little bit you
+know giving you a slight edge here um I
+think is continuing it's giving us some
+nice code breakdown couple other issues
+there fantastic we don't need to you
+know dig too much into
+this in terms of which model is better
+and if you need chat GPT Pro to me the
+answer is very clear if you are a kind
+of super pro user of compute reasoning
+models large language models like myself
+then 01 Pro mode is kind of a no-brainer
+must have this puts you closer to the
+edge of what's possible even if it's
+just marginal gains right an important
+thing to call out here as well openai
+did explicitly mention that they're
+going to be uh adding more powerful
+compute intensive productivity features
+to this plan the first version of
+something is always a little rougher on
+the edges it always kind of seems like
+uh it's good but is the value really
+there they will be adding more to this
+right so that's something important to
+highlight the question of whether you
+should really buy chbt Pro is really you
+know how far are you really pushing
+compute and do you understand what it
+can do for you this is something that I
+that I try to aim to reveal and Aid
+other Engineers like yourself with is
+really trying to push what you can do
+with compute with llms with prompts
+there's so much value so much untapped
+value here with all these incredible
+releases coming out from open AI the
+question is can you tap into it do you
+know how to write highquality prompts do
+you know how to use Advanced Techniques
+like prompt chaining and meta prompts do
+you know which model do you need to do
+the job are you constantly pushing your
+capabilities are you constantly asking
+okay I know how I would do this but can
+I pass off to an llm what's the prompt
+look like what if I built it into an AI
+agent what if I made this part of my
+collection of prompts and tools and
+accessed it all through a single unified
+personal AI assistant right what if I
+made this entirely agentic what if this
+worked on its own by itself without my
+intervention these are all ideas we
+discuss on the channel quite a bit this
+is where we're headed on the channel um
+it's all about building up these larger
+pieces of of compute and of prompts
+right The Prompt is the fundamental unit
+of knowledge work right this is kind of
+our theme tagline for the indid dev Dan
+Channel and for the generative AI age as
+a whole The Prompt is everything you
+know in this video we've discussed the
+meta prompt we've compared you know two
+new Innovations from open AI the full 01
+model 01 Pro mode it's all building up
+it's all stacking on top of each other
+the only question is can you use the
+compute video after video we focus on
+how can we best use this compute I have
+a ton of exciting content um focusing on
+that key idea The Meta prompt is a
+really really key concept because it
+allows your AI agents to write prompts
+for you based on specific scenarios
+right so this is a really big uh
+Advanced idea I wanted to share that
+with you here on the channel I think
+Chach bt01 Pro mode is definitely worth
+it if you're really pushing what you can
+do with generative AI I think for
+probably 9 95% of Engineers product
+Builders 01 will suffice for most of
+your cases there will be some gains that
+will be left on the table by not having
+01 prom mode and I think that's okay as
+long as you understand the trade-off
+right the way I measure it 01 prom mode
+is anywhere from 0o to about 20% better
+on a prompt by prompt basis that's my
+understanding of prom mode thus far
+after just 3 days of using it so we'll
+see where this goes I'll be of course
+reporting on all of the releases from
+open AI over this week and the next week
+I'm super super excited about every
+release that they have coming um it's an
+incredible time to be an engineer and to
+be plugged into the generative AI space
+like we are here on the channel if
+you're not and you made it to the end
+definitely subscribe I'm super stoked to
+share new AI coding patterns based on
+these powerful reasoning models I'm sure
+we're going to get 01 through the API
+really soon here exciting news I am
+nearly complete with the AI coding
+course I've been building for engineers
+like you and viewers of the channel um I
+can't wait to share this with you we do
+have to wait for all the Innovation
+coming out of open AI to complete before
+I can ship this so you know maybe on the
+13th day I'll be able to launch this
+foundational AI coding course but we'll
+see what open AI releases I have to make
+sure that I incorporate all the latest
+and greatest uh Technologies and more
+importantly ideas and patterns that may
+come out of their release so I have to
+wait for them to you know finish
+shipping everything finish re shaping
+the industry and then I can fully launch
+the AI coding course stay tuned for that
+we'll have more AI coding coming on the
+channel that's it long one I hope you
+enjoyed this one if you made it to the
+end drop the like drop the sub this is
+an incredible time we're living in it's
+a great time to be an engineer and a
+builder stay focused keep building and
+I'll see you next week

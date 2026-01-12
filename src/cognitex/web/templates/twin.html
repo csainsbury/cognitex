@@ -2,296 +2,220 @@
 {% block title %}Digital Twin - Cognitex{% endblock %}
 
 {% block content %}
-<h1>Digital Twin Review</h1>
+<h1>Digital Twin Configuration</h1>
+<p style="color: #666; margin-bottom: 1.5rem;">
+    Configure how your agent represents you in communications and actions.
+    For reviewing agent suggestions, use the <a href="/inbox">Inbox</a>.
+</p>
 
 <div class="stats">
     <div class="stat">
-        <div class="stat-value">{{ drafts|length }}</div>
-        <div class="stat-label">Email Drafts</div>
+        <div class="stat-value">{{ approved_drafts }}</div>
+        <div class="stat-label">Emails Approved</div>
     </div>
     <div class="stat">
-        <div class="stat-value">{{ packs|length }}</div>
-        <div class="stat-label">Context Packs</div>
+        <div class="stat-value">{{ approved_tasks }}</div>
+        <div class="stat-label">Tasks Approved</div>
     </div>
     <div class="stat">
-        <div class="stat-value">{{ blocks|length }}</div>
-        <div class="stat-label">Suggested Blocks</div>
+        <div class="stat-value">{{ learning_samples }}</div>
+        <div class="stat-label">Learning Samples</div>
     </div>
 </div>
 
-<!-- Email Drafts Section -->
+<!-- Voice & Tone Settings -->
 <div class="card">
     <div class="card-header">
-        <h2>Pending Email Drafts</h2>
+        <h2>Voice & Tone</h2>
     </div>
+    <p style="color: #666; margin-bottom: 1rem;">
+        The agent learns your communication style from approved emails. These settings provide baseline guidance.
+    </p>
 
-    {% if drafts %}
-    <div id="drafts-list">
-        {% for draft in drafts %}
-        <div class="draft-card" id="draft-{{ draft.id }}">
-            <div class="draft-header">
-                <span class="badge badge-pending">Pending Review</span>
-                <span class="draft-date">{{ draft.created_at }}</span>
-            </div>
-            <div class="draft-meta">
-                <strong>To:</strong> {{ draft.to }}<br>
-                <strong>Subject:</strong> {{ draft.subject }}<br>
-                <strong>Replying to:</strong> {{ draft.original_subject }}
-            </div>
-            <div class="draft-body">
-                <pre>{{ draft.body }}</pre>
-            </div>
-            <div class="draft-reason">
-                <em>Reason: {{ draft.reason }}</em>
-            </div>
-            <div class="draft-actions">
-                <button class="btn btn-success"
-                        hx-post="/api/twin/drafts/{{ draft.id }}/approve"
-                        hx-target="#draft-{{ draft.id }}"
-                        hx-swap="outerHTML">
-                    Approve & Send
-                </button>
-                <button class="btn btn-primary"
-                        hx-get="/api/twin/drafts/{{ draft.id }}/edit"
-                        hx-target="#draft-{{ draft.id }}"
-                        hx-swap="innerHTML">
-                    Edit
-                </button>
-                <button class="btn btn-secondary btn-sm"
-                        hx-get="/api/twin/drafts/{{ draft.id }}/context"
-                        hx-target="#context-{{ draft.id }}"
-                        hx-swap="innerHTML"
-                        title="Show full email, thread history, related docs and tasks">
-                    Deep Context
-                </button>
-                <div class="dropdown" style="display: inline-block; position: relative;">
-                    <button class="btn btn-danger btn-sm dropdown-toggle"
-                            onclick="this.nextElementSibling.classList.toggle('show')"
-                            title="Reject & Learn">
-                        Reject
-                    </button>
-                    <div class="dropdown-menu" id="reject-menu-{{ draft.id }}" style="display: none; position: absolute; right: 0; background: white; border: 1px solid #ddd; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); z-index: 100; min-width: 280px;">
-                        <form id="reject-form-{{ draft.id }}"
-                              hx-post="/api/twin/drafts/{{ draft.id }}/reject"
-                              hx-target="#draft-{{ draft.id }}"
-                              hx-swap="outerHTML">
-                            <div class="reason-select" id="reason-select-{{ draft.id }}">
-                                <div style="padding: 0.5rem; font-size: 0.75rem; color: #666; border-bottom: 1px solid #eee;">
-                                    Why reject? (helps learning)
-                                </div>
-                                <button type="button" onclick="selectRejectReason('{{ draft.id }}', 'spam_marketing', 'Spam/Marketing')" class="dropdown-item">Spam/Marketing email</button>
-                                <button type="button" onclick="selectRejectReason('{{ draft.id }}', 'automated_email', 'Automated notification')" class="dropdown-item">Automated notification</button>
-                                <button type="button" onclick="selectRejectReason('{{ draft.id }}', 'not_actionable', 'No reply needed')" class="dropdown-item">No reply needed</button>
-                                <button type="button" onclick="selectRejectReason('{{ draft.id }}', 'wrong_timing', 'Wrong timing')" class="dropdown-item">Wrong timing</button>
-                                <button type="button" onclick="selectRejectReason('{{ draft.id }}', 'bad_suggestion', 'Poor draft quality')" class="dropdown-item">Poor draft quality</button>
-                                <button type="button" onclick="selectRejectReason('{{ draft.id }}', 'wrong_recipient', 'Wrong recipient/context')" class="dropdown-item">Wrong recipient/context</button>
-                                <button type="button" onclick="selectRejectReason('{{ draft.id }}', 'will_handle_manually', 'I will handle manually')" class="dropdown-item">I'll handle manually</button>
-                            </div>
-                            <div class="feedback-prompt" id="feedback-prompt-{{ draft.id }}" style="display: none; padding: 0.75rem;">
-                                <input type="hidden" name="reason" id="reason-{{ draft.id }}" value="">
-                                <p style="margin: 0 0 0.5rem 0; font-size: 0.85rem; color: #333;">
-                                    <strong id="reason-label-{{ draft.id }}"></strong>
-                                </p>
-                                <p style="margin: 0 0 0.5rem 0; font-size: 0.8rem; color: #666;">
-                                    Want to add details? <span style="color: #999;">(helps improve suggestions)</span>
-                                </p>
-                                <textarea name="reason_text" placeholder="e.g., 'This sender is actually a colleague' or 'I never respond to this type of email'" style="width: 100%; min-height: 60px; font-size: 0.85rem; padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px; resize: vertical;"></textarea>
-                                <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
-                                    <button type="submit" class="btn btn-danger btn-sm">Reject with Feedback</button>
-                                    <button type="submit" class="btn btn-secondary btn-sm" onclick="document.querySelector('#reject-form-{{ draft.id }} textarea').value = ''">Skip Details</button>
-                                </div>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-            </div>
-            <div id="context-{{ draft.id }}"></div>
+    <form hx-post="/api/twin/settings" hx-swap="none" class="twin-settings-form">
+        <div class="form-group">
+            <label for="formality">Formality Level</label>
+            <select name="formality" id="formality">
+                <option value="casual" {% if settings.formality == 'casual' %}selected{% endif %}>Casual - Friendly and informal</option>
+                <option value="balanced" {% if settings.formality == 'balanced' or not settings.formality %}selected{% endif %}>Balanced - Professional but approachable</option>
+                <option value="formal" {% if settings.formality == 'formal' %}selected{% endif %}>Formal - Business professional</option>
+            </select>
         </div>
-        {% endfor %}
-    </div>
-    {% else %}
-    <div class="empty">No pending email drafts</div>
-    {% endif %}
+
+        <div class="form-group">
+            <label for="brevity">Response Length</label>
+            <select name="brevity" id="brevity">
+                <option value="concise" {% if settings.brevity == 'concise' %}selected{% endif %}>Concise - Get to the point</option>
+                <option value="balanced" {% if settings.brevity == 'balanced' or not settings.brevity %}selected{% endif %}>Balanced - Adequate detail</option>
+                <option value="detailed" {% if settings.brevity == 'detailed' %}selected{% endif %}>Detailed - Thorough explanations</option>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="signature">Email Signature</label>
+            <textarea name="signature" id="signature" rows="3" placeholder="Best regards,&#10;Chris">{{ settings.signature or '' }}</textarea>
+        </div>
+
+        <button type="submit" class="btn btn-primary">Save Settings</button>
+    </form>
 </div>
 
-<!-- Context Packs Section -->
+<!-- Communication Patterns -->
 <div class="card">
     <div class="card-header">
-        <h2>Context Packs</h2>
+        <h2>Learned Patterns</h2>
     </div>
+    <p style="color: #666; margin-bottom: 1rem;">
+        Patterns learned from your approved emails and rejected suggestions.
+    </p>
 
-    {% if packs %}
-    <div id="packs-list">
-        {% for pack in packs %}
-        <div class="context-pack" id="pack-{{ pack.id }}">
-            <div class="context-pack-header">
-                {{ pack.title }}
-                <span class="badge badge-active">Ready</span>
-            </div>
-
-            {% if pack.summary %}
-            <div class="context-pack-section">
-                <div class="context-pack-section-title">Summary</div>
-                <p>{{ pack.summary }}</p>
-            </div>
-            {% endif %}
-
-            {% if pack.key_points %}
-            <div class="context-pack-section">
-                <div class="context-pack-section-title">Key Points</div>
-                <ul>
-                    {% for point in pack.key_points %}
-                    <li>{{ point }}</li>
-                    {% endfor %}
-                </ul>
-            </div>
-            {% endif %}
-
-            {% if pack.documents %}
-            <div class="context-pack-section">
-                <div class="context-pack-section-title">Related Documents ({{ pack.documents|length }})</div>
-                {% for doc in pack.documents %}
-                <span class="topic-tag">{{ doc.name }}</span>
-                {% endfor %}
-            </div>
-            {% endif %}
-
-            {% if pack.tasks %}
-            <div class="context-pack-section">
-                <div class="context-pack-section-title">Related Tasks ({{ pack.tasks|length }})</div>
-                {% for task in pack.tasks %}
-                <span class="concept-tag">{{ task.title }}</span>
-                {% endfor %}
-            </div>
-            {% endif %}
-
-            <div class="draft-actions" style="margin-top: 0.75rem;">
-                <button class="btn btn-secondary btn-sm"
-                        hx-delete="/api/twin/packs/{{ pack.id }}"
-                        hx-target="#pack-{{ pack.id }}"
-                        hx-swap="outerHTML"
-                        hx-confirm="Archive this context pack?">
-                    Archive
-                </button>
+    {% if patterns %}
+    <div class="patterns-list">
+        {% for pattern in patterns %}
+        <div class="pattern-item">
+            <div class="pattern-type">{{ pattern.type }}</div>
+            <div class="pattern-desc">{{ pattern.description }}</div>
+            <div class="pattern-examples">
+                <em>Examples: {{ pattern.examples | join(', ') }}</em>
             </div>
         </div>
         {% endfor %}
     </div>
     {% else %}
-    <div class="empty">No context packs prepared</div>
+    <div class="empty">
+        No patterns learned yet. Approve or reject some agent suggestions to start building your profile.
+    </div>
     {% endif %}
 </div>
 
-<!-- Suggested Blocks Section -->
+<!-- Recent Approved Emails (examples of learned style) -->
 <div class="card">
     <div class="card-header">
-        <h2>Suggested Focus Blocks</h2>
+        <h2>Recent Approved Emails</h2>
     </div>
+    <p style="color: #666; margin-bottom: 1rem;">
+        Examples the agent uses to match your communication style.
+    </p>
 
-    {% if blocks %}
-    <table>
-        <thead>
-            <tr>
-                <th>Title</th>
-                <th>Duration</th>
-                <th>When</th>
-                <th>Project</th>
-                <th>Reason</th>
-                <th>Actions</th>
-            </tr>
-        </thead>
-        <tbody id="blocks-list">
-            {% for block in blocks %}
-            <tr id="block-{{ block.id }}">
-                <td><strong>{{ block.title }}</strong></td>
-                <td>{{ block.duration_hours }}h</td>
-                <td>{{ block.suggested_day }}</td>
-                <td>{{ block.project_title or '-' }}</td>
-                <td class="desc-preview" title="{{ block.reason }}">{{ block.reason[:50] }}{% if block.reason|length > 50 %}...{% endif %}</td>
-                <td class="actions">
-                    <button class="btn btn-success btn-sm"
-                            hx-post="/api/twin/blocks/{{ block.id }}/approve"
-                            hx-target="#block-{{ block.id }}"
-                            hx-swap="outerHTML">
-                        Add to Calendar
-                    </button>
-                    <button class="btn btn-danger btn-sm"
-                            hx-delete="/api/twin/blocks/{{ block.id }}"
-                            hx-target="#block-{{ block.id }}"
-                            hx-swap="outerHTML">
-                        Dismiss
-                    </button>
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+    {% if recent_emails %}
+    <div class="recent-emails-list">
+        {% for email in recent_emails[:5] %}
+        <div class="email-example">
+            <div class="email-example-header">
+                <strong>To:</strong> {{ email.to }}
+                <span class="email-date">{{ email.approved_at }}</span>
+            </div>
+            <div class="email-example-subject">
+                <strong>Subject:</strong> {{ email.subject }}
+            </div>
+            <div class="email-example-preview">
+                {{ email.body[:150] }}{% if email.body|length > 150 %}...{% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
     {% else %}
-    <div class="empty">No suggested focus blocks</div>
+    <div class="empty">
+        No approved emails yet. When you approve email drafts from the <a href="/inbox?type=email_draft">Inbox</a>, they'll appear here as style examples.
+    </div>
     {% endif %}
 </div>
 
 <style>
-    .draft-card {
-        background: #fff;
-        border: 1px solid #e5e7eb;
-        border-radius: 5px;
-        padding: 1rem;
-        margin-bottom: 1rem;
-    }
-    .draft-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 0.75rem;
-    }
-    .draft-date {
-        font-size: 0.8rem;
-        color: #666;
-    }
-    .draft-meta {
-        font-size: 0.9rem;
-        margin-bottom: 0.75rem;
-        padding: 0.5rem;
-        background: #f9fafb;
-        border-radius: 3px;
-    }
-    .draft-body {
-        background: #fafafa;
-        border: 1px solid #eee;
-        border-radius: 3px;
-        padding: 0.75rem;
-        margin-bottom: 0.75rem;
-    }
-    .draft-body pre {
-        white-space: pre-wrap;
-        font-family: inherit;
-        margin: 0;
-        font-size: 0.9rem;
-    }
-    .draft-reason {
-        font-size: 0.85rem;
-        color: #666;
-        margin-bottom: 0.75rem;
-    }
-    .draft-actions {
-        display: flex;
-        gap: 0.5rem;
-    }
-    .draft-edit-form textarea {
-        width: 100%;
-        min-height: 150px;
-        font-family: inherit;
-    }
-</style>
-
-<script>
-function selectRejectReason(draftId, reason, label) {
-    // Hide the reason selection, show the feedback prompt
-    document.getElementById('reason-select-' + draftId).style.display = 'none';
-    document.getElementById('feedback-prompt-' + draftId).style.display = 'block';
-    document.getElementById('reason-' + draftId).value = reason;
-    document.getElementById('reason-label-' + draftId).textContent = label;
+.twin-settings-form {
+    max-width: 500px;
 }
-</script>
+
+.form-group {
+    margin-bottom: 1rem;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 0.25rem;
+    font-weight: 500;
+    color: #333;
+}
+
+.form-group select,
+.form-group textarea {
+    width: 100%;
+    padding: 0.5rem;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 0.9rem;
+}
+
+.form-group textarea {
+    font-family: inherit;
+    resize: vertical;
+}
+
+.patterns-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.pattern-item {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    padding: 0.75rem;
+}
+
+.pattern-type {
+    font-weight: 600;
+    color: var(--primary);
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    margin-bottom: 0.25rem;
+}
+
+.pattern-desc {
+    color: #333;
+    margin-bottom: 0.25rem;
+}
+
+.pattern-examples {
+    font-size: 0.8rem;
+    color: #666;
+}
+
+.recent-emails-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.email-example {
+    background: #fafafa;
+    border: 1px solid #eee;
+    border-radius: 4px;
+    padding: 0.75rem;
+}
+
+.email-example-header {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.85rem;
+    margin-bottom: 0.25rem;
+}
+
+.email-date {
+    color: #888;
+    font-size: 0.8rem;
+}
+
+.email-example-subject {
+    font-size: 0.9rem;
+    margin-bottom: 0.5rem;
+}
+
+.email-example-preview {
+    font-size: 0.85rem;
+    color: #555;
+    font-style: italic;
+}
+</style>
 {% endblock %}

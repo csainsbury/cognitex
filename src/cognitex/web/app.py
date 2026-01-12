@@ -2499,20 +2499,141 @@ async def get_suggested_blocks() -> list[dict]:
 
 @app.get("/twin", response_class=HTMLResponse)
 async def twin_page(request: Request):
-    """Digital Twin review page - review and approve agent outputs."""
-    drafts = await get_pending_drafts()
-    packs = await get_context_packs()
-    blocks = await get_suggested_blocks()
+    """Digital Twin configuration page - configure agent persona and voice."""
+    from cognitex.db.postgres import get_session
+    from cognitex.db.neo4j import get_neo4j_session
+    from sqlalchemy import text
+
+    # Get approval stats
+    approved_drafts = 0
+    approved_tasks = 0
+    learning_samples = 0
+
+    async for session in get_session():
+        try:
+            # Count approved emails from inbox feedback
+            result = await session.execute(text("""
+                SELECT COUNT(*) FROM inbox_feedback
+                WHERE item_type = 'email_draft' AND action = 'approved'
+            """))
+            row = result.fetchone()
+            approved_drafts = row[0] if row else 0
+
+            # Count approved tasks
+            result = await session.execute(text("""
+                SELECT COUNT(*) FROM inbox_feedback
+                WHERE item_type = 'task_proposal' AND action = 'approved'
+            """))
+            row = result.fetchone()
+            approved_tasks = row[0] if row else 0
+
+            # Count total learning samples
+            result = await session.execute(text("""
+                SELECT COUNT(*) FROM inbox_feedback
+            """))
+            row = result.fetchone()
+            learning_samples = row[0] if row else 0
+        except Exception as e:
+            logger.debug("Could not get twin stats", error=str(e))
+        break
+
+    # Get twin settings from preferences
+    settings = {}
+    async for session in get_session():
+        try:
+            result = await session.execute(text("""
+                SELECT rule_value FROM preference_rules
+                WHERE rule_type = 'twin_settings'
+                LIMIT 1
+            """))
+            row = result.fetchone()
+            if row and row[0]:
+                import json
+                settings = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+        except Exception:
+            pass
+        break
+
+    # Get recent approved emails from Neo4j
+    recent_emails = []
+    async for neo_session in get_neo4j_session():
+        try:
+            result = await neo_session.run("""
+                MATCH (d:EmailDraft)
+                WHERE d.status = 'approved'
+                RETURN d.to as to, d.subject as subject, d.body as body,
+                       d.approved_at as approved_at
+                ORDER BY d.approved_at DESC
+                LIMIT 5
+            """)
+            records = await result.data()
+            recent_emails = records
+        except Exception:
+            pass
+        break
+
+    # Patterns would come from learning system - placeholder for now
+    patterns = []
 
     return templates.TemplateResponse(
         "twin.html",
         {
             "request": request,
-            "drafts": drafts,
-            "packs": packs,
-            "blocks": blocks,
+            "approved_drafts": approved_drafts,
+            "approved_tasks": approved_tasks,
+            "learning_samples": learning_samples,
+            "settings": settings,
+            "patterns": patterns,
+            "recent_emails": recent_emails,
         },
     )
+
+
+@app.post("/api/twin/settings")
+async def save_twin_settings(
+    formality: str = Form("balanced"),
+    brevity: str = Form("balanced"),
+    signature: str = Form(""),
+):
+    """Save digital twin voice/tone settings."""
+    from cognitex.db.postgres import get_session
+    from sqlalchemy import text
+    import json
+    import uuid
+
+    settings = {
+        "formality": formality,
+        "brevity": brevity,
+        "signature": signature,
+    }
+
+    async for session in get_session():
+        try:
+            # Upsert settings
+            await session.execute(text("""
+                INSERT INTO preference_rules (id, rule_type, rule_value, source, created_at)
+                VALUES (:id, 'twin_settings', :value, 'user', NOW())
+                ON CONFLICT (rule_type) WHERE rule_type = 'twin_settings'
+                DO UPDATE SET rule_value = :value, updated_at = NOW()
+            """), {"id": f"pref_{uuid.uuid4().hex[:12]}", "value": json.dumps(settings)})
+            await session.commit()
+            logger.info("Twin settings saved", settings=settings)
+        except Exception as e:
+            # Try simpler update if constraint doesn't exist
+            try:
+                await session.execute(text("""
+                    DELETE FROM preference_rules WHERE rule_type = 'twin_settings'
+                """))
+                await session.execute(text("""
+                    INSERT INTO preference_rules (id, rule_type, rule_value, source, created_at)
+                    VALUES (:id, 'twin_settings', :value, 'user', NOW())
+                """), {"id": f"pref_{uuid.uuid4().hex[:12]}", "value": json.dumps(settings)})
+                await session.commit()
+            except Exception as e2:
+                logger.warning("Failed to save twin settings", error=str(e2))
+        break
+
+    return {"success": True}
 
 
 @app.post("/api/twin/drafts/{draft_id}/approve")
@@ -4717,12 +4838,20 @@ async def api_capture_status():
 
 
 # ========================================================================
-# Proposals Management
+# Proposals Management (redirects to unified inbox)
 # ========================================================================
 
-@app.get("/proposals", response_class=HTMLResponse)
-async def proposals_page(request: Request):
-    """Task proposals management page."""
+@app.get("/proposals")
+async def proposals_redirect():
+    """Redirect to unified inbox filtered to task proposals."""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/inbox?type=task_proposal", status_code=302)
+
+
+# Legacy proposals page routes kept for API compatibility
+@app.get("/proposals-legacy", response_class=HTMLResponse)
+async def proposals_page_legacy(request: Request):
+    """Task proposals management page (legacy - use /inbox instead)."""
     from cognitex.db.postgres import get_session
     from cognitex.db.neo4j import get_neo4j_session
     from sqlalchemy import text

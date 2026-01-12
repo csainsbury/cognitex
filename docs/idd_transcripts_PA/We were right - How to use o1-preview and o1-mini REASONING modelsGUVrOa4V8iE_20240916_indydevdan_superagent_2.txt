@@ -1,0 +1,314 @@
+welcome back Engineers Andy Dev Dan here well we were right prompt chaining AKA
+Chain of Thought is the key for improved Model results on the channel we've
+released three big prompt chaining videos over the past year emphasizing the importance and the power that promp
+chaining gives your tools products and ultimately your users this pattern was so spot on that the geni leader open AI
+embedded the pattern into their new 01 series with this release open AI reset
+the counter because it's such a powerful difference in the way the model performs
+by now you've seen all the click baity highlevel videos you know what this is about and if you're a subscriber to the
+channel you know what we're about here let's really dive in to the value proposition of the new 01 Series in this
+video we're going to walk through three viable examples showing how exactly to
+use these new reasoning models let me be super straightforward with you this model is not easy to use properly as
+open AI explicitly mentions the array of prompt engineering abilities you and I have been building up don't all apply
+here we'll be using two tools from one of my favorite engineers in the Gen AI space and we're going to work through
+these examples so you can know exactly when it's time to double click into the
+new 01 reasoning models so you can maximize the value they give you
+content generation is a killer obvious use case of large language models one
+more difficult interesting example of content generation is generating YouTube
+chapters you can see here on our previous a coding video we have these chapters generated and they have the
+simple form minutes seconds title this problem is simple to understand but
+harder to implement so let's use chapter generation to show off a concrete example of 01 beating out the previous
+state-of-the-art model Claude 3.5 let's look at a concrete example of what this
+looks like so I have the transcript for that YouTube video right here and it looks like this right I also have a
+prompt here that generates the YouTube chapters based on the transcription with a Tim stamp so you can see here I have
+the entire transcript pasted here and this is a block in this prompt so this
+is a great use case for llms but this is also a use case where llms typically
+fall short so let's go ahead and use a tool from one of my favorite Engineers Simon W he's built a CLI based llm tool
+that lets you run prompts directly in your terminal so if I type lm- M1 mini ping and we'll just get a simple
+response back for Ping so nothing special happening here I'll link this library in the
+description the key value proposition of this library is that it allows us to do something like this so if we CD into to
+YouTube chapters and focus in on this specific prompt so we can see we have the transcript and we have the prompt
+here llm DM Claude 3.5 Sonet redirect
+this prompt into the llm so now we're just going to run Cloud 3.5 Sonet with this
+entire prompt so let's just go ahead and fire this off Cloud 3.5 Sonet is running through this it's generating results
+generating chapters for US based on this prompt here right and you can see some of the instructions right we're just
+being detailed time stamps are in minut seconds use the example output so we have a couple examples right here and
+then we have some SEO keywords we're trying to hit and then we have a couple additional instructions I can tell you that claw 3.5 Sonet performs okay here
+it's not the best if you watch that video you know we don't actually reveal the secret sauce of AI coating at the
+beginning of the video it's something like it's minute 5 or I think minute 14 this is good what we can do here with
+this tool is redirect this output to a new text file so I'll just say YouTube chapter Sonet results.txt run the prompt
+again generate the output save it to this text file so let's go ahead and run the brand new 01 reasoning models I'll
+just hit up and then I'll make a couple tweaks here right I'm going to do the exact same thing except we want to run the topof thee line 01 preview model and
+then we're just going to update the name of the output file 01 preview results okay so we're going to fire that off and
+let's go and take a look at our Sonic results right so you can see here we got this clean chapter generation here and
+now let's go ahead and get the results for 01 preview so this is going to take some time I'm going to go ahead and cut
+this part out all right so we got a result let's go ahead and take a look side by side so here's the 01 results
+and here's the Sonet 3.5 results so we still have the unveiling secret sauce
+right at o29 um but we do also get the correct
+time stamp at about 1354 right so revealing the secret sauce effective coding patterns we can see that that
+pattern is revealed there you know we have some more options here we can see that Sonic gave us fewer chapters
+whereas 01 gave us quite a few more I'm curious what you think about this do you prefer more chapters or fewer it's
+easier to trim chapters down than to add chapters but if we just look through here I would come in I would delete this
+item here I do like the mentioning of Aer and cursor there's a really
+important block here SEO keywords to hit and you know we can just kind of go
+through and make sure you know we can see everything that's match we can say AI devlog um AI coding devlog that's there
+we can see Andy Dev Dan that's there what else do we have here we have of course ader cursor a devlog and then we
+have you know Secret Sauce that does get mentioned so you know that's good there if we search this on the Sonic 3.5 side
+uh you you'll see something really interesting right we're actually missing a lot of our keywords even if you you
+know drop this down to 12 lines just to match of this reg search that we're doing here uh Sonet actually missed out
+a ton on our SEO keywords that we're asking for in our prompt so this is a
+pretty big deal and it hints at one of the key value propositions when you're wondering if you should pull up the big
+guns and use the new 01 reasoning model series one of the questions you should ask yourself is do you need the model to
+follow your instructions to a T is precision and accuracy important for
+your prompts if I had to explain the value proposition of the 01 reasoning models in one sentence it would be the
+01 reasoning models are profoundly exceptional at instruction following and iterating on proposed Solutions based on
+your instructions and of course we know why it's better it's because it's thinking over and over it's creating
+drafts and then it's outputting the results after thinking about the solution and iterating on it so this is
+one example where we can see although claw 3.5 Sonic performs well enough you can simply swap out the model in this
+case and you'll get a lot more performance and instruction following out of the new 01 reasoning models we
+can also dial directly into the transcript and just search to verify right so we have the secret sauce
+revealed if we go ahead and search this timestamp you can see that it's following the instructions really really
+well at the 1354 minute mark this is where I explicitly say this is the secret sauce of AI coding right our code
+is automatically getting validated for us this is a secret sa of coding I've run 01 versus Sonic 3.5 in many cases
+and the typical trend is 01 models although they really make you appreciate
+how fast claw 3.5 and GPT 40 mini are the 01 models will outclass most of your
+previous prompts especially the ones with more
+[Music] detail so let's look at another really interesting use case for these models
+there are some things that are just too hard to do for the current stateof the art let's look at an example related to
+AI coding so let's go ahead and crack open this prompt here we have this prompt here that given a diff
+automatically looks for bugs and provides solutions to an AI coding assistant llm to automatically fix the
+code there's a lot of value here in this prompt if we look at the output format you can see that we're specifying in
+typescript using interfaces the AI assistant fix so we want a list of fixes
+and then you can see here and we can go ahead and just pull these out into a quick uh typescript format so it's
+easier to read right so you can see here that uh we have oh that's actually a
+good catch here I didn't see that so you can see here that we have a simple structure we want the file we want the
+starting line and then we want the AI coding resolution prompt so this is really important this is getting kind of
+meta right we have a prompt here that is going to run on your code on your diff
+and then it's going to tell the LM how to fix the problem right we want a description of the bug and we want a
+severity right and that's going to be the output format for this prompt so what we need to do is get a diff of
+whatever code changes that we want checked and then we want the code files so let's look at the code files first
+this this really cool tool from s W and he has this tool that converts files to
+prompts and he just added this really great flag cxml so this is a CLA XML
+format this converts your files from a directory that also respects your you
+know ignore and your hidden files and it converts that into a prompt that you can use inside of prompts right so let's go
+ahead I'm just going to copy this and all I'm going to do is open up the terminal here and to paste this in I'm
+going to change the directory so I just want it in this you know I want every file here copy that to the clipboard
+right so we'll just say cop it's going to skip the bond lock file that's totally fine and now I'm just going to
+add this as a file in this code base in API wrapper code bundle I'll just call
+that txt and then we'll just paste this and actually we can do axml file okay so
+you can see here this tool is really powerful what it's done here is it's gone through and it's pulled all the
+files in this code base and you can see here we have our notion utils we have our modules notion. TS constant and you
+can see right those are the contents we had in the previous video and it's basically pulled all of our content into
+a single file right so we can save this copy all this go back to our prompt and paste this in our code files right so
+I'll just go ahead and paste that and what I'll actually do is before I paste I'll use a uh C data block just to
+prevent any formatting from happening so I'll save that and let's go back up to code files
+collapse that now let's get the diff right so I'll just create a simple diff um we'll say get diff uh head one and
+we'll just copy that and you can see that's just one commit backward so I'll just paste that
+diff in and so this is just all the changes made and now what we have is a let me actually wrap this in the C data
+as well so now what we have is a diff of
+our current code changes and all the related files right so you can see here 22,000 token prompt larger medium siiz
+prompt and what we can do now is open up our terminal check our files and let's
+just go ahead and run this prompt right this is one of the prompts that is much harder for the previous generation
+models to run so I'm just going to go ahead and go right for gold so I'll say llm DM topof the line o1 preview and
+then once again we're going to redirect the file F of our AI coding diff prompt
+and let's go ahead and get this solution redirected into a AI coding o1 preview
+Json right because we're getting a Json file back here so you can see that file got generated there so while we're
+waiting for this to complete just want to you know mention the prompt format we're using here we're using the classic
+XML prompt format this is really powerful we did a video all Link in the description where we created some
+benchmarks to see what is the best prompt format this is one of the things that the open AI team explicitly
+mentions in their reasoning page to be valuable when using the new reasoning models right so it says use delimiters
+for clarity triple quotes XML tags section titles so this is one of our learnings from our prompt engineering
+Journey on the channel that can definitely stick around I don't see this going anywhere over the Long Haul so this is a really important Discovery
+really important pattern to separate portions of your prompt using specifically XML and we'll put out a
+video in the future validating that for the reasoning models we're going to get about the same results using the XML
+tags versus markdown format or just plain text format right so let's go ahead and look at our preview model so
+that's completed let's go ahead and look at the results right so what we should see here is a uh you know Json file
+which is good we did get the markdown syntax there that's fine but this is really cool right so what you can see
+here is a list of fixes and the AI coding resolution prompt right we now
+have a highly effective reasoning model looking at our code looking at the diff
+it's telling us the exact issue of our code base right so we're getting a nice kind of clean code review from our
+language model but it's also giving us let's go ahead and do a multi-line wrap we're also getting the solution to pass
+back into our AI coding assistant right so whether it's AER cursor continue
+whatever you're using uh you can use a prompt like this with the 01 reasoning series to work through a bunch of code
+remember we just you know we just ran this prompt on 20K tokens at the 01
+preview prices uh you know hit the like hit the sub support the channel we are definitely lighting some money on fire
+here but it is well worth it to show you the value of these models again we have the output format we're specifying
+typescript interfaces we're getting really detailed here with what we want the output to look like we're placing
+all of our code files right so this could be a lot larger this is kind of an anti- pattern because opening ey does
+explicitly mention um you know you do want to avoid rag as much as possible so pulling in a bunch of content but at the
+same time this is super relevant for um the model to perform so you know we're
+kind of on the line there but we have our code files thanks to Simon W's files to prompt library and then we also have
+just a raw diff right so we're just using get diff here and then we have some detailed instructions on how things
+work that's the secret SCE of the prom promp and then of course just a highle purpose so that gives us this great
+result thanks to the 01 preview model so if this is all making sense and you're understanding how and when to use the 01
+series drop the like drop the sub show your appreciation it helps the channel grow and helps other Engineers like you
+find this content so you can kind of work through these things uh readability this doesn't matter who cares minor who
+cares minor who cares but it did detect a major bug for us right and it said
+that Imports should be place at the top of the file uh this can cause issues with module loading definitely if your
+Imports are in the wrong place there are some issues that can arise so if we go ahead and look at this this file here in
+this code base we just quickly search this and we just look for import yes so we can see this import is happening in a
+wrong location it's really interesting to see 01 giving us High Fidelity answers like this on our code so this
+kind of hits at that same reoccurring theme the 01 series is really really great at following your instructions why
+because it's iterating over potential answers and you've seen this inside of chat GPT right if we just let it fire
+off here it's going to think and all the value here is in the fact that it's
+looking over things it's thinking things through step by step and it's iterating
+over potential results right this is the whole thing step- bystep effectively you know prompt chaining inside the model
+it's really really cool to see the actual thinking portion although as we know some of the reasoning is actually
+hidden on the open AI server so this is really cool this is going to keep running and you know create some result we don't have to wait for that let's
+[Music] continue all right so let's focus in on our last use case here so let's take a
+look at a sentiment analysis prompt let me show you the purpose of this prompt here and then we'll change the language
+mode to XML and recollapse analyze the aggregate sentiment of a list of
+comments from hacker news right so this is a Hacker News sentiment analysis and we're actually looking at this post here
+which you know directly discuss open ai's new 01 Chain of Thought models uh again big shout out to Simon W he's the
+author of The linked content and what we're going to do is just do a sentiment analysis on this post this prompt is
+likely an entire product in itself but what we're going to do here is lean on the reasoning iterative capabilities of
+the 01 preview model we're going to create three segments of sentiment analysis and let me just show you what
+the response format looks like right so we have we have this kind of wild um two format sentiment right so let me again
+pull these into separate files we have both the markdown format of this analysis and then we have the aggregate
+sentiment right so we have this Json structure you can see here we have positive negative and nuanced and so
+this is really interesting right we have an entire sentiment analysis for more complex positive negative or neither
+content right and if we open this up we can see we have themes a list of themes we have an idea that describes the
+nuanced sentiment we have the number of times themes like this was uh hinted at or mentioned and then we have a couple
+standout comments so let's pull down this post we're going to use a tool called algolia and they have the
+responses here essentially cached so we have all this Json we're just going to go ahead and just copy this
+down and we're going to paste this here this is going to be
+hn1 model discussion and we're going to make this a Json file P that in and you
+can see here we have a 100K we have 130,000 tokens so I have a massive prompt here 130k tokens let's go ahead
+and dial this prompt down a little bit we're going to use a classic Tool uh JQ
+we're going to run JQ uh dot on hn model discussion so that's the entire thing
+and now what we want to do is dial this down right so let's just get the children and so you know children
+contains all the comments so what we want to do here is just get children and let's get the first
+uh three children right let's see what that looks like and let's go ahead and output that to a new file we'll say
+hn1 iter children. Json so we have that new file it's just the children and you
+can see there we're down to 10K tokens so much more manageable let's go ahead and just work on a you know smaller
+segmented version of this and let's operate on these 10K tokens right so if we line collapse we can see we're still
+getting a lot of decent comments here um a lot of good stuff happening right so let's go ahead and run our sentiment analysis prompt on this file if we go
+ahead close this go back to our prompt here you can see that we have hn. Json
+so we're going to pass in our Json here paste in our new set of results
+here right so now we have all those comments if we open up the instructions here we can kind of reveal some of the
+secret sauce here basically we're saying respond in this you know specific response format I'm referring to the block there and what we want to do is
+you know basically create the Nuance sentiment and the the you know positive
+and negative as well and again the great part about the 01 series is that it's
+going to run the prompt it's going to iterate on it and it's going to continue reflecting on the results based on my
+instructions right so let's go ahead and just fire this off using Simon W's llm tool so we have the prompt here let's go
+ahead and just kick that off we'll say lm- M1 preview left direct our sentiment
+prompt and let's go ahead and pipe the results out results 01 Json and this is going to give us a Json
+file back so we'll go ahead let that prompt kick off and that should generate a brand new sentiment analysis for us
+automatically and you know we can reuse this it's all about what you're passing into the hn. Json and again you know one
+of the great Parts about structuring your prompt like this and having them in text and using a great tool like llm
+from the CLI is that everything is reproducible I have the static prompt that I can improve over time I can run
+benchmarks against it I can run a test Library like prompt Fu on this prompt and compare to others and we can know
+with certainty that this prompt is going to outperform other prompts I'm really excited to you know share more about
+this model this video is already getting really long I'm going to try to edit it down a lot for you guys but there are so
+many new things so many new ideas to cover with the 01 reasoning models the capabilities here are super off the
+charts you know drop the like drop the sub if you're seeing a lot of the value that these models can give you part of
+the complexity in this prompt is that this response format is asking for a lot right I can guarantee you this is going
+to run for you know two maybe 3 minutes based on all my work with this model so
+far I'm asking for a lot here right think about what this is asking first off do a sentiment analysis with both
+positive negative and Nuance right so this is new or or it's a newer idea
+right comments on each one of these I probably could have pulled it out into a separate type but you know I just place
+it all here and you know I want some standout comments that you know reflect the idea that creates the theme and it
+has to be positive right so this is an action-packed prompt normally I would create my own prompt chain to you know
+do segments of what this is doing so not only am I asking for three perspectives
+with multiple themes I'm also asking 01 to give me a entire markdown version of
+this right so you can see here it's still spinning while I'm yapping off um but this is really really incredible
+right so you know you can see we have this instruction and the markdown response respond with your results from
+you know this object type right but in human readable markdown format right so
+there's a lot going on in this prompt this is something that you just absolutely could not give to a previous
+generation model and expect great results out of but you know for my testing from some benchmarking I can
+guarantee you this is going to give us some really incredible results and you know this is why I said in the beginning
+um it is hard to use the new 01 reasoning models properly and what do I
+mean by properly I mean you can really push these models to do incredible things and you can you know actionpack
+your instructions and your rules and you know some of the content right some of your XML or formatted blocks you can
+really pack it in and while it's working while it's iterating it's going to keep looking back at your prompt and it's
+going to you know keep analyzing the results that it's iteratively building up behind the scen scenes and check it
+against what you're asking you know there's a much simpler version of this prompt where it's already returned with
+the result right because it's just simpler I'm not asking a lot from it but you know that's that's kind of a good
+way to phrase it you can ask a lot more from these reasoning models because again they have some version of thinking
+step by step of reasoning so on and so forth so there we go we just got our result let's go ahead and take a
+look okay so here's our sentiment analysis right so first off let's check the structure Perfect Right Json
+markdown let's first browse through the Json and just make sure we have all of our section so great we have negative
+nuance and positive right so let's just dial into one of these you can see here we have our themes so this is really
+great right we have let's see how many themes we have here right we have two concrete themes let's see what the theme
+is right so there's a positive theme excitement about advancements and potential of GPT models right including
+GPT 5 there's some really great comments in here we can you know validate I know some Engineers you might be one of them
+that are always worried about hallucinations you can easily double check this we just search right we have a great response here right and we can
+see that response is here in The Hacker News thread that's great you we have another one here I know sometimes sketch
+if AI can do this on 64k tokens iteratively full multi loal I don't
+think I've actually been scared of super intelligence singularly until just now now this is AI yeah totally right great
+take completely agree right so you know we have some positive Stand Out comments with this theme um let's go ahead and
+look at another positive theme right what was our other theme Here Right anticipation on ai's impact uh totally
+yeah that makes sense so you know this this user uh the homie
+L he's talking about the data shortage problem this is true iterative development these models are going to
+get deeply embedded into idees like cursor heads right so you know this is something that's happening right now
+they already have this model and you know you can already run it on cursor and AER if we just search this you know you can just kind of see that there
+we've already taken a look at that um and then we can dig into more Nuance takes right so this is kind of cool
+right so we have positive negative and then we have nuance and let's go ahead and format our markdown this is pretty
+gnarly right I asked for a sentiment analysis with positive nuance and negative in Json format then I ask for a
+markdown version of that in the same prompt right so let's go ahead and just take a look at this let's go a and move
+this to markdown and let me go ahead and format this and just get that formatted so this is
+really great right let me goad and open up a preview and move that here so you know you know we could almost just take
+this and post it to a blog or something right you know we have our positive sentiment go ahead and look for our
+Nuance sentiment right so mixed feelings about hidden reasoning tokens with concerns about transparency and
+debugging okay so you know that makes sense right as a developer This is highly concerning harder to debug uh
+what went wrong pricing is silly totally makes sense right as a user I really don't care okay also makes sense LMS can
+be magic black boxes and I only care about the end result itself not the end path it'll be interesting to see how
+this progresses a great take definitely more nuanced right it's not just as straightforward as this is a good thing
+or a bad thing but uh it is true you know as a developer we would like to see into what's going on under the hood how
+can I change my inputs to get different outputs but um you know this definitely makes it harder you know we can't really
+see into the model at the same time this is more my perspective especially as time goes on I care more about user
+output related things right as a user I don't really care um llms are already
+magical black boxes we only truly care about the end result I think that's super true but so you know we hop back
+here so that's you know a great Nuance take we have a couple more here and then of course at the end here we have our
+negative sentiments um we don't have to go through all these you know go on Hacker News read this yourself digest it
+um this is just a really interesting use case for you know these 01 reasoning models again just really really kind of
+gnarly that it was able to do everything I'm asking for here then create a
+markdown format version of it right really really powerful stuff Let's uh let's wrap up let's talk about some
+ending thoughts here let's talk about where this is going what we're going to do next here on the channel based on this model and this new paradigm of
+models so like I mentioned if I had to really explain the value proposition in one sentence it's that the 01 reasoning
+models are profoundly exceptional at instruction following and iterating on
+proposed Solutions based on your instructions so you know let me just compress that again for you the real
+value here is instruction following plus iteration and all of the results that
+they mention all the benchmarks they all back that up all my time so far has revealed the exact same thing that the
+more complex The Prompt is the more steps there are the better results you're going to get it is a stem focused
+set of models it's focused on reasoning is focusing on you know problem solving so that's something to take into account
+although I have to say most of the benchmarks and most of the experiments I've run show this model beating out
+Sonet almost across the board and I know that they do have a mentioning here of
+uh the fact that some people prefer the previous models for you know writing and editing text I think this is probably Up
+For Debate honestly whether this is actually functionally true this is this is just preference okay um I think that
+the reality is is that this new reasoning model can perform all these things at an accelerated level because
+it is thinking step by step but you know more details there more to kind of work through I don't know if that's actually
+true or if I'm just super high on this model right now right so you know a couple more things to note in terms of
+upcoming videos in terms of where the channel is going it's the same as always we have been predicting this we knew
+that better models were coming out we've been preparing for the 100x this is not a 100x so we're definitely overprepared
+but uh you know we have lots of interesting content coming up I'm really excited to share with you we're going to be AI coding with these models the
+creator of ader Paul just put out a brand new Benchmark showing that um the King has been usurped 01 preview does
+actually beat out Claude 3.5 Sonet of course it's not functionally going to be
+better it's one of those things things where in theory it's better but based on the speed no one's going to be firing
+off 01 prompts as much as they are claw 3.5 Sonic prompts right so we're getting there uh this is a massive Improvement
+there are many tricks that we can employ to push the performance of 01 even
+further as we mentioned in previous video hint hint promp chaining is still a great technique to use so they do say
+to avoid Chain of Thought prompts but they don't ever mention here prompt chaining and as we've explored on the
+channel prop chaining only gets better and scales with these new models so you can imagine we have three uh uh 01 mini
+or 301 preview calls chained together so these are some kind of you know deeper State bleeding edge ideas that we'll be
+exploring on the channel uh there's also the insane epic idea of the fusion chain
+um if you know you know we'll talk about that more in future videos so a couple interesting things to mention here about pricing if you look at claw 3 Opus we
+have 15 in 75 out per million the new 01 models the new 01 preview top of the
+line is actually cheaper than CLA 3 Opus so even though it seems expensive
+remember what Opus was like it's a great model but it is not doing anything like
+01 preview is it is nowhere near as great as 01 preview things are still getting cheaper which reiterates one of
+the themes we have been holding on to over the course of this channel so years now the price of llms is still going to
+zero this is a consistent Trend we're seeing even though this is a marked up model and you might be more hesitant to
+use this um you know keep in mind this is the first version of this of course it's the expensive version of this open
+aai and other providers are going to keep pushing these costs down there are a lot of cases and a lot of prompts that we ran today that 01 mini would have
+performed just as well as 01 preview but you know as we're testing out these models I highly recommend you focus on
+the state-of-the-art see what's really possible and then down size um and save
+you know some resources after you know that many can perform on the same level as1 preview so open AI has played their
+hand now it's time for anthropic to drop the new 3.5 Opus 3.5 H coup it's time
+for Google to you know drop Gemini 1.5 Ultra or two time to see what the other players do so you know in summary these
+new reasoning models open up a whole new world of possibilities for generative Ai
+and for you and I as Engineers with our boots on the ground building tools building products and building valuable
+software for ourselves and our users if you're not subscribed and you made it this far on the video Drop the sub drop
+the like drop a comment let me know what you think about these models do you see the value proposition in these models
+that I see do you see something else are there some aspects of these models that you think I missed drop a comment down
+below whatever comes next we'll cover it here on the Channel with useful in-depth guides like this where we really find
+the value of it all thanks for watching keep keep building stay focused and I'll see you in the next one

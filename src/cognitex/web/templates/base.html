@@ -885,13 +885,6 @@
             <a href="/" {% if request.url.path == "/" %}class="active"{% endif %}>Dashboard</a>
             <a href="/today" {% if "/today" in request.url.path %}class="active"{% endif %}>Today</a>
             <a href="/chat" {% if "/chat" in request.url.path %}class="active"{% endif %}>Chat</a>
-            <a href="/tasks" {% if "/tasks" in request.url.path %}class="active"{% endif %}>Tasks</a>
-            <a href="/projects" {% if "/projects" in request.url.path %}class="active"{% endif %}>Projects</a>
-            <a href="/goals" {% if "/goals" in request.url.path %}class="active"{% endif %}>Goals</a>
-            <a href="/documents" {% if "/documents" in request.url.path %}class="active"{% endif %}>Documents</a>
-            <a href="/ideas" {% if "/ideas" in request.url.path %}class="active"{% endif %}>Ideas</a>
-            <a href="/graph" {% if "/graph" in request.url.path %}class="active"{% endif %}>Graph</a>
-            <a href="/state" {% if "/state" in request.url.path %}class="active"{% endif %}>State</a>
             <a href="/inbox" {% if "/inbox" in request.url.path %}class="active"{% endif %} style="position: relative;">
                 Inbox
                 <span id="inbox-badge"
@@ -900,7 +893,13 @@
                       hx-swap="innerHTML"
                       style="position: absolute; top: -5px; right: -8px;"></span>
             </a>
-            <a href="/proposals" {% if "/proposals" in request.url.path %}class="active"{% endif %}>Proposals</a>
+            <a href="/tasks" {% if "/tasks" in request.url.path %}class="active"{% endif %}>Tasks</a>
+            <a href="/projects" {% if "/projects" in request.url.path %}class="active"{% endif %}>Projects</a>
+            <a href="/goals" {% if "/goals" in request.url.path %}class="active"{% endif %}>Goals</a>
+            <a href="/documents" {% if "/documents" in request.url.path %}class="active"{% endif %}>Documents</a>
+            <a href="/ideas" {% if "/ideas" in request.url.path %}class="active"{% endif %}>Ideas</a>
+            <a href="/graph" {% if "/graph" in request.url.path %}class="active"{% endif %}>Graph</a>
+            <a href="/state" {% if "/state" in request.url.path %}class="active"{% endif %}>State</a>
             <a href="/learning" {% if "/learning" in request.url.path %}class="active"{% endif %}>Learning</a>
             <a href="/agent-log" {% if "/agent-log" in request.url.path %}class="active"{% endif %}>Agent Log</a>
             <a href="/twin" {% if "/twin" in request.url.path %}class="active"{% endif %}>Twin</a>

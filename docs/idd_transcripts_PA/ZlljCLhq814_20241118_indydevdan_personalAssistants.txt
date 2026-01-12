@@ -1,0 +1,593 @@
+what's up Engineers Andy Dev Dan here
+it's time we talk about the crucial
+pieces to creating long running agentic
+workflows the North Star for this
+channel is to become agentic engineers
+Engineers that wield massive amounts of
+compute that work for us while we sleep
+if you want to build powerful long
+running multi-agent systems you need two
+things a slew of specialized battle
+tested AI agents that accomplish your
+domain specific tasks extraordinarily
+well and a reliable tool calling
+mechanism to take your prompts your
+plans and call not just one tool but 5
+10 30 plus Tools in one shot with zero
+mistakes to build powerful agentic
+workflows you need every single tool
+call to work in sequence in this video I
+want to break down which llms and which
+tool calling mechanisms is best for
+reliably calling massive long chains of
+tool calls doing this will give us a
+better understanding of how to build
+long running agentic
+[Music]
+systems this is a simple live tool
+calling prompt benchmarking tool it
+works like this you select your
+expectations for tools that you want
+called you then write a prompt which
+should trigger each one of your tools
+and then you see the results drip in one
+at a time where you can monitor the
+performance speed and cost let's run
+this with a simple example and build up
+to a massive chain of tools if I kick
+this off
+here you can see that all of our models
+are coming in one at a time here so this
+is really cool if I open up the tool
+call here everyone of our models called
+the right tool so this is going to be a
+comma separated list of ordered tool
+calls we have several valuable columns
+including execution time total time cost
+for the execution total costs we have
+the this really cool relative cost
+column and then of course we have the
+most important Benchmark here number
+correct and percentage correct let's run
+this again so we're just going to run
+our tool call Prompt once more this
+prompt is simple it's going to call one
+tool for each task and you can see here
+we got an error here claw 3.5 H coup
+latest returning Json could not complete
+the result for us so it got this
+incorrect let's go ahead and select
+another tool so let's say we want to run
+a git agent after their
+now we can add a new task to this tool
+calling prompt we'll say something like
+this get commit these changes and now we
+can rerun our tool call Prompt and we
+now expect all of our calls to return
+multiple tool calls right so we're
+taking a highlevel planning prompt and
+passing it off to a slew of models and
+model techniques and the idea here is
+that we want to understand which model
+and which techniques give us the best
+speed cost C and performance when it
+comes to calling long chains of tool
+calls let's keep building this up and
+see how the models really perform so I'm
+going to go ahead and kick this off
+again I always like running these
+prompts over and over just to see if
+there's any variance on individual runs
+LMS are non-deterministic so it's always
+important to run multiple runs multiple
+sessions of whatever prompts you're
+running so that it represents a more
+true real world scenario we can see here
+we have a bunch of models getting called
+with their various LM techniques let's
+pull over our number correct we can see
+IOU is not performing very well at all
+let me pull over percent correct as well
+if we sort percent correct here most of
+our models most of our model techniques
+are having no real problem here so let's
+go ahead and extend even further we want
+long chains of tool calls let's add
+another tool call so let's go ahead and
+ask for another coder agent and we'll
+update our prompt we'll say write code
+to update our utils
+py with a new parser for XML and so in
+these tasks in the prompts I'm really
+saying anything but it must make enough
+sense to kick off the tool we want
+called right so we're saying right code
+this should be pretty obvious for our
+llms what we want to happen here right
+and you can see here we have this Dash
+Json I'll explain that in a second not
+every one of these models has tool
+calling support so we needed to work
+around it by using structured outputs
+and Json schemas we have several models
+kicking off every single one of these
+tool calls in order this is what we want
+to see so far it looks like we have a
+lot of options for running tool calls up
+to length three let's add a docs agent
+and now our fourth task must discuss
+generating documentation right so I'll
+say create documentation XML parser
+let's kick this off and let's see our
+tool calls come in here now in order to
+be successful our llm and the llm
+technique we use must call all four of
+these tools in order we see things
+looking pretty great so far we do have
+the new Gemini experimental model here
+in Json mode um let's go and look at
+some of our execution time so far right
+let's kick this off again and um let's
+see how things are performing right so
+we have our relative cost on the right
+here and we have our individual cost
+there I want to see the execution time
+let me kick off another run here so we
+can get up to 10 okay nice so 10
+executions let's go ahead and sort by uh
+execution time so for this individual
+run we can see here our flash is
+performing really really well uh Gemini
+1.5 flash this is a model that's gone
+under my radar for quite some time we
+also have many right below that for
+Speed we have 40 in Json mode flash Json
+mode performing pretty well and then
+things kind of scale up from there right
+so interestingly here we can see gp24 is
+not performing well right let's just
+keep kicking off these prompts let's get
+some more data you really want tens and
+hundreds of runs when you're creating
+these benchmarks and when you're
+creating your tests and your evals ha
+cou just really can't pull it together
+here this is the old claw 3 H coup it's
+losing its crap on these tool calls it
+just can't figure this out I threw this
+in there just because I want to see how
+models have improved with the tool
+calling capabilities I am pretty shocked
+to see GPT 40 this low but you can see
+here if we sort by um percent correct we
+have a great variety of models that are
+performing and if we look at total time
+currently the winner here the the big
+winner frankly is Gemini 1.5 flash
+version 2 because it's gotten everything
+correct it's the fastest and it's also
+the cheapest right we we haven't even
+cracked uh a tenth of a scent yet not
+even a half of a tenth of a scent and uh
+it's it's running every single tool we
+need for our agentic system perfectly
+and that's the whole idea here that's
+the high level idea when you're building
+these long running agenic systems where
+you're passing in your own personal plan
+prompt or a plan prompt that a powerful
+reasoning model like 01 has
+automatically created based on some
+information you want it to be able to
+kick off long sequences of tasks so
+let's keep going I want to get this up
+to 10 15 plus and see which models are
+really calling the tools we need when we
+need them so let's add another we have
+code g coder docs you can see here we
+only have three tools obviously in
+production environments we'll have 10
+plus tools but three is enough obviously
+here to Showcase running long sequences
+in order so let's add another coder
+agent we'll say update the API for our
+XML parser let's let's go ah and kick
+this off so this looks good looks like
+we had a blip on latest hku and Json mod
+let's run this again so in previous
+videos we talked about moving from
+prompts to AI agents to personal AI
+assistants all the way to agentic
+systems we're starting to dip into the
+agentic 100x improvements we can get but
+in order to get there we need long
+chains of tool calls so that we can have
+this agentic system generate these long
+planning prompts and then hand them off
+to whatever AI agent it needs to to get
+the job done right and this can also be
+used in the personal AI assistant level
+as well but I hope you can see you know
+why this is so important if you want
+long running agenting systems you need
+long reliable tool calls so we're
+getting up there we have about 14 runs
+here let's just keep hammering our llms
+we want to see not just the individual
+results uh we want to see a you know a
+set of results over time we want to see
+who's really really performing over long
+run the experimental is performing well
+but we also just have a lot of great
+models performing really well here one
+thing I am missing from this Benchmark
+here obviously you can see these are
+only the top tier cloud provider models
+um I don't have any local or llama
+models that's something we can add in
+future benchmarks in future videos and
+you know comment down below you can see
+we're getting some really interesting
+results here comment down below what
+benchmarks and what information you want
+to see in a live benchmarking tool like
+this the ux of benchmarking has a ton of
+room for improvement let's go ahead and
+kick this off again in our previous
+video we benchmarked how models perform
+against each other in a live
+autocomplete scenario to test speed cost
+and performance and that was a great way
+to test out a small use case across
+multiple models in a kind of Benchmark
+that you can feel so we can see a lot of
+just top performing models here things
+are going really well let's keep adding
+our tool calls let's run a git agent and
+and then let's run another let's run
+another git agent so this is something
+that can often confuse models when you
+run the same tool back to back I'm sure
+we're going to lose some 100% here let's
+go ahe and try this out so I'll say uh
+get commit these changes and then I'll
+say get checkout a new Branch for a new
+feature so kick this off and let's see
+how our llms do here in order for our
+models to be correct they need to call
+every one of these tasks in in order so
+you can see this long chain of tool
+calls coming back in the response for
+some of these models this looks awesome
+I'm really I'm really happy to see this
+and uh I got to say once again I'm so
+impressed with the Gemini 1.5 flash
+model I think a lot of engineers in
+general are sleeping on Google uh
+because they're
+Google but they're building some really
+incredible llm technology here and the
+new experimental model although very
+slow if we sort by total run time let's
+sort descending this is the slowest
+model by far but it's performing quite
+well here I'm sure it's just not
+optimized or maybe there's something
+else going on under the hood maybe it's
+a more complex model not sure but it is
+performing well love to see that and for
+the costs you can see here I just priced
+it the same as 1.5 Pro um let's go ahead
+and keep kicking these off and see how
+things look very nice uh we can see here
+that 01 mini Json so this is a 01 model
+where we're asking it to return these
+tool calls and their respective prompt
+parameter in order is not too bad it's
+gotten too wrong so far across 18
+executions for the cost of 01 and for
+the speed of 01 which is you know not
+the best we can see here further down
+the list in total time execution we have
+40 in Json mode performing at 100% we
+have 40 mini Json 100% And then flash
+and flash really the the winner here so
+far is Flash right there's just there's
+just no debate about it it's our
+cheapest model you can see here our
+relative cost has 1.5 Flash as the
+cheapest model for the task of calling
+the right list of tools in sequence so
+really enjoying seeing that again this
+is a model that I think most people are
+sleeping on uh it's so powerful and it's
+so cheap look at the total cost again
+not not even a tenth of a scent yet
+whereas if we look at the top here uh
+Pro 01 mini right these have all cracked
+Ascent right we have the latest 3.5 high
+cou all costing us quite a bit and
+actually I didn't even realize this the
+Sonet model is costing us uh 10 cents
+here wow yeah let me get the relative
+cost on this yeah wow Sonet very very
+expensive and you can see I have Sonet
+with the function calls and then I have
+Sonet with just Json response and let me
+talk about the Json response a little
+bit more so that makes sense so let me
+save this and you can see here we have
+this Json prompt Tab and this is the
+prompt we're using to format our
+responses for models that don't have
+function calling support this is a hack
+that you may have you know come across
+and used yourself tool calling really is
+a list of objects that look like this
+right what's the tool name and then what
+are the parameters for us we're just
+using a single parameter prompt because
+we're effectively thinking about
+designing systems we're passing off
+prompts to uh fine-tuned specialized AI
+agents so that's the pattern we're using
+here and then we have the options for
+our tool name options right and you know
+there are some tools let's kick off
+another run there are some llm
+like gpg 40 Json that can run structured
+outputs same with 40 mini but then there
+are others that um like for instance the
+anthropic models you just ask for the
+right Json format and then they return
+the result right so that's what our Dash
+Json models are doing here it's either
+structured outputs or just raw pantic uh
+Json parsing and I got to say all the
+models are doing really well at that the
+question is are they actually returning
+the right list of tool calls in order
+right so we can see 40 for whatever
+reason um is just doing a terrible job
+it's having a really hard time with this
+long sequence of tasks so let's go ahead
+and just keep kicking these off and then
+let's add some more items here I'm kind
+of surprised to see let me pull back
+over this and let me pull back our
+number correct you know I'm really
+surprised to see Sonet is actually not
+doing well here uh down at 64% um so
+it's not doing well let me sort
+descending
+uh but we have a ton of great options
+for long chains of tool calls with the
+Gemini models you know performing here
+at the top which is really great to see
+so this is good let's keep pushing this
+these long running agenting systems must
+be able to do many many many tasks in
+sequence so again we're just going to
+keep pushing let's run a couple doc
+agents and then let's run a another
+coder agent the initial documentation
+Json Parson update this documentation
+support for yaml and we'll say now
+Implement now our new Json and yaml
+parsing features so again we're just
+kind of saying random tasks here
+obviously in your real agentic system
+these will be tasks that correspond to
+tools you have so I think this looks
+good 1 through 10 let's go ahead and
+kick this off and now things are
+interesting right now we have a tool
+call expectation of 10 Tools in a row
+and we need our llms to to give us all
+the results in order it looks like we've
+had some pretty great success here
+Gemini quite a bit of time here but yeah
+Gemini so reliable this new experimental
+model seems really really interesting
+it's running really slowly as we can see
+here sorting descending total time sort
+descending uh it's running extremely
+slow it's you know some 10 seconds
+slower than the previous pro version but
+um it's super accurate so I'm curious to
+see what's going on here with this new
+Gemini model we can see results continue
+to trickle in here let's go ahead and
+continue
+so this this Hau model just continuously
+is spinning out the Run coder agent so
+gbg4 has just completely given up you
+can see here it gets kind of close if we
+go Ahad and scroll here look at all
+these tool calls look at this massive
+chain right 10 Tools in a row we can see
+gb40 gets the second tool wrong so this
+is the trick right and this is why it's
+so important we need to get every tool
+call in order gp40 is having a lot of
+trouble with that we have Sonic in
+function calling mode having quite a bit
+of trouble and you know that's a kind of
+an interesting takeaway here if we
+collapse everything here so we can get
+the full view it looks like manually
+building a Json parsing prompt is going
+to outperform the function calling
+mechanism for the new Sonet model now
+that's kind of an interesting thing
+right because you would expect the
+models buil-in tool calling capabilities
+to be more accurate than a Json run
+right but that's not what we're seeing
+here it it looks like having a uh Json
+prompt structured like this is actually
+better very interesting to see that we
+have 01 mini running that same Json
+prompt it's interesting to see that um
+the performance here isn't a big deal
+right let's go and pull these columns
+back over the performance sort by model
+name here the reasoning models don't
+always perform better and even in a task
+like this where you would think it would
+help to have some reasoning looping
+Chain of Thought capabilities uh that's
+actually not the case right a One Mini
+Json is not performing better than some
+other models right we can just keep
+kicking this off a model probably
+fractions of the size gb40 mini in with
+that same prompt is performing uh you
+know a little bit better right 8% better
+here across 25 executions it's also
+doing it uh much faster so let's sort
+descending here and let's run up to 15
+tool calls so let's go ahead and add uh
+several more let's add two coder agents
+two G agents
+and then we'll add one document update
+the Json code update yaml to support
+yaml and yaml G commit these changes uh
+get push these changes document Json
+yaml capabilities okay so now we have a
+expected tool call list of length 15
+right we need all 15 of these tools to
+run in order we have what I like to call
+a planner prompt and you know the cool
+thing again just to call this out the
+great thing about the planner prompt is
+that you can have a reasoning model or a
+a a dedicated agent to generate this
+prompt for you given some inputs you
+know as we're thinking about Building
+agentic Systems you need to think about
+having an agent do the planning and do
+the setup work for your smaller
+specialized agents right and this is
+what long sequences of tool calls is
+helping us unlock so we have 15 let's go
+ahead and execute this and let's see
+which models can do the job wow I'm I'm
+so impressed with uh 1.5 flash here it's
+just such a great model it's performing
+so well here okay so we're getting all
+results trickling in and you know again
+uh we really have to open this up to see
+how complicated this actually is right
+you need to run 15 Tools in order based
+on the content of each task okay so this
+is not a trivial task and the longer and
+more complex your agentic workflows
+become and the more you can plan uh the
+more powerful and the more capable
+they'll become but also the more
+important it is to have these tool calls
+run in order top to bottom with the
+exact order you need let's get this up
+to 30 executions we can see Sonet 3.5 in
+Json mode taking a hit there we can see
+the new Gemini experimental this is
+going to come in it's just going to take
+some time yep very nice love to see the
+100% success rate here on so many models
+right because what what does that mean
+when many models can do a specific job
+that means you have options and that
+means there's likely a model here and
+we've pointed it out several times
+there's likely a model here that uh is
+the best option at the best speed at the
+lowest cost or there's going to be some
+opportunity for you to have a trade-off
+right do you want to optimize for Speed
+or cost in some scenario right this is
+why benchmarking writing tasks writing
+evals is so important if you don't know
+what options are available to you you
+might be stuck using a tool using a llm
+using a technique that is just lesser
+that is not performing as well as
+another technique could so it is
+interesting to see running this manual
+Json prompting mode is actually quite
+powerful it allows llms without function
+calling capabilities to have you know
+function calling capabilities let's go
+ahead and run one more and round out
+here at 30 correct tool calls so so this
+is really impressive for these models
+performing at 100% success rate here 30
+test cases where we have an expected
+tool call length of 15 it's fairly
+significant right like this is actual
+useful information you can pull from a
+live benchmarking tool like this so
+again comment down below let me know
+what other types of benchmarks you want
+to see in a live interactive fashion
+where we can dive in and understand
+performance speed and cost at a more you
+know intimate uh you know in-depth level
+so it looks like as you and I are
+building out personal AI assistant AI
+tools AI agents and fullon a agentic
+workflows that are self-operating it
+looks like we have quite a few options
+here right that's what this Benchmark
+that's what this test is telling us if
+we sort execution time here 1.5 flash
+this is a killer model very
+underappreciated very underhyped and
+it's performing insanely well we can see
+the relative cost here flash is the best
+model for long chains of tool calls in
+this Benchmark hands down no questions
+this is running using Gemini's API with
+their function calling capabilities this
+is the highest performing function
+calling llm in this Benchmark this is
+really incredible it's not using any
+Json formatting at all we're passing
+just this prompt in here and you can see
+it's the fastest on average by almost 20
+seconds it's the cheapest by at least by
+uh quite a bit here I haven't even spent
+a single scent on this and I've used 14
+cents with 27 % accuracy on claw 3.5
+Sonet for Tool calling this is why you
+Benchmark right everyone you know you
+might initially think as I did that claw
+3.5 Sonet is going to smash tool calling
+out of the box no 27% only8 correct 14
+cents down the drain okay this is why we
+Benchmark this is why we test this is
+why we dig deeper we are Engineers we
+don't follow the hype we don't take news
+at face value we don't take hype at face
+value we don't care about others
+opinions that isn't backed by stats data
+and raw information right if you want to
+make data driven decisions and get the
+highest Roi look at the tests look at
+the evals look at the data and most
+importantly run your own benchmarks are
+flawed this Benchmark is flawed we can
+see here by running tests we understand
+with prompts we can see I can now make
+better decisions about how to build
+multi-agent agentic applications if you
+enjoy this video and you want to see
+more benchmarks like this like drop a
+comment and subscribe I'm really excited
+to be wrapping up the AI coding course
+that's going to ship in December this is
+going to be a foundational AI coding
+course that I've been working on all
+year for you I'm really excited to share
+that with you stay tuned for that in
+December stay focused and keep building

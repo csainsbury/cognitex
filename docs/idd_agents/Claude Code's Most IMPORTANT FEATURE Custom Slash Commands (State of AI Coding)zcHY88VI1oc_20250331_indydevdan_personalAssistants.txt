@@ -1,0 +1,320 @@
+what's up engineers indie Dev Dan here fast and easy access to compute is the
+winning condition for engineers like you and I in the generative AI age why
+because when you scale your compute you scale your impact at the pace of twice a
+year a new Gen AI tool is released that changes the game very rarely is this
+ever done by a single company not to mention twice in just 3 months as you
+know cloud code and MCP servers are reshaping the engineering game why is
+that it's because they allow us to consume massive amounts of compute and
+do things like this if we run get status you can see I have a modified file let's
+scale our impact with a comprehensive code review using compute let's clear
+open cloud and we're going to run a single command slash project and we're going to run jprompt
+ultra diff review right now cloud code is going to run a multi-step workflow
+from a single prompt first Claude wants to create a diff let's go ahead and accept it just created this file
+fantastic now it's running git diff and attaching it to this diff file we'll of course accept now claude is reading that
+it's creating this brand new directory for our ultra diff view and now it's prompting us with a brand new tool call
+you can see here this multi-step prompt is asking cloud code to run the big three model providers each with their
+own powerful reasoning model when we hit yes we're going to kick off a comprehensive code review from the big
+three model providers openai Enthropic and Gemini running powerful reasoning
+models we'll hit yes and now in parallel we are scaling up our compute i'm quite
+literally using 3x compute not counting the reasoning tokens to gain a
+multi-perspective code review see how incredible this is we have three different code reviews one from OpenAI
+one from Enthropic and one from Gemini now we have a comprehensive code review
+based on all three of those results you can see we have a another parallel read
+another single read and now a comprehensive file write to a fusion ultra diff markdown file claude wants to
+create this comprehensive code review based on our 3x reasoning parallel
+compute run if we scroll to the bottom here we'll of course say yes we do want this fantastic code review and now cloud
+code is going to wrap up by pulling me in it's running a human in the loop process here by giving a recommendation
+of what we should do next based on the code review cloud code fused the results
+from the big three model providers using claw 3.7 in reasoning mode in max mode
+with a thinking budget and it created this finalized comprehensive code review
+you can see it's giving us a analysis of what it recommends let's go ahead and
+take a look at this comprehensive analysis right so you can see here the biggest concern here is the hardcoded
+DeepSeek API key of course it caught that you can imagine every single reasoning model caught that let's go
+ahead and look at this file exactly i'll open up the cursor and we are now in the gist prompt codebase if I open the file
+explorer you can see two new things we have that diff that cloud code created for us and we have the ultra diff review
+we have the individual code reviews by some of the best reasoning models in existence right now and then we fused
+them all into one comprehensive code review and we did this in a single
+prompt here's the code review we have a nice risk assessment table at the bottom you can see the biggest issue here is
+the deepseek API key leaked inside this file and we have recommendations from
+cloud code aka claude 3.7 sonnet with thinking tokens okay so this is
+incredible let's backtrack a little bit and let's talk about what just happened
+i just ran a single slash command let's hit up again you can see exactly what I just ran i ran one prompt and triggered
+more than 10 tool calls that then triggered multiple models to run in
+parallel and then I fused the responses using cloud code into a single finalized
+comprehensive markdown file so how was I able to scale my impact with such little
+effort a single slash command allow me to share with you one of the greatest
+features inside cloud code and really one of the greatest features any
+engineer can utilize to scale their impact by scaling their compute this is
+none other than prompt templates you can see here we have a new directory
+called/commands if we look at this we can see several commands and if we go back to claude clear and if we type
+/clear to clean up the chat history we can run slash project and you can see
+every one of these custom commands so what are these custom commands what are they actually doing let's start with the
+fundamentals and then work our way up to our ultra diff view if we open up project hello you can see we have a very
+simple prompt hi how are you okay so let's just run this flash hello project
+hello let's run this and of course cloud code is going to respond with I'm doing
+well thank you how can I help you with this codebase okay so what are
+custom/comands from cloud code it's a prompt right we're just running prompts
+okay if we look at the documentation here if you go to cloud code tutorials and then click create custom/comands you
+can see one of the newest features from cloud code create project specific commands this feature deserves an entire
+section an entire blog post an entire video uh to itself and of course that's
+why I'm here covering this for you let's push this further so we have this new directory here that we can add to all of
+our code bases that we can commit to all of our code bases and have these reusable prompts let's figure out how
+far we can push this what can we really do with our custom/comands with our prompt templates let's work our way up
+toward the ultra diff view let's look at project hello with name so another great
+feature built by the cloud code team you can pass in of course variables this
+gives you the ability to create dynamic prompts now we can have dynamic variables inside of our prompts let's go
+ahead and run this inside cloud code we'll of course clear and we'll run slash project and we'll look for that
+project hello with name instead of enter I'm going to hit tab and now I'm going to give a name right so I'm going to say
+indeed devan and we're going to kick this off hi Indie Deb Dan i'm doing well blah blah blah blah blah okay so this is
+a variable we can now pass in variables into arbitrary prompts okay are you
+following are are you seeing where this is going the alarm bell should be going off at least a little bit let's let's
+scale this up right let's let's uh let's play with this so we can of course add multiple arguments if I hit new line and
+say I am arguments years old and save this we can come back let's go ahead and
+reset claude and run clear slash project hello with name i'm going to hit tab
+andydev dan space and 32 okay so if I hit this you can see hi indepan I'm
+running the here's a command with your name and age how can I help you so cloud code really just wants to build doesn't
+really care who we are or what our age is but you can see here you know I just want to express the point we have
+dynamic variables multiple dynamic variables going into prompts that we can now commit and use as reusable assets in
+our codebase okay this is this is big this is big let's keep pushing this
+let's showcase some more realistic value accreative examples okay let's close these and let's look at context prime so
+context priming is something that we've talked about in previous videos definitely check those out but you can see here we have our basic context
+priming prompt so instead of placing this in the readme or anywhere else we can now just come into cloud code clear
+slashcontext prime hit enter and cloud code is going to now execute the
+commands is going to execute the task it needs to accomplish this prompt now whenever I need to reset my cloud code
+instance and get it caught up with my codebase this is just a single command
+away okay Massive Compute is now one slashcomand away this is big the Cloud
+Code engineers the anthropic PMS they're cooking okay they're cooking you can see
+here cloud code also picked up on the fact that uh we are designing this codebase in the atomic design structure
+with atoms and molecules as described in our previous video where we talked about the best codebase architectures for AI
+coding tools and AI agents i'll link that in the description as well so this is incredible right um we now have
+compute one/comand away we now have a great place to build reusable prompts
+let's keep pushing we're not at the alter diff view yet but we're working up toward it okay let's run context prime
+with lead all right so what does this prompt template look like it looks very similar to context prime except we have
+an argument here okay read read me then run get ls files to understand the
+context of the project be sure to also read argument and nothing else i'm being
+precise with my instructions here with cloud code and I'm saying you know only do this so let's grab another file let's
+open up the spec sometimes you want to pass in your spec files your specification prompts into cloud code to
+help prime it to help it understand how a feature was built this is a great way to use your plans as assets for your AI
+coding tools right this plan here is a package i use this spec prompt to
+oneshot uh the entire just prompt codebase which we're going to dive into um in just a moment here this is great
+context this is a great package of information for claw to have as it's going to help us build out an AI code
+this codebase okay so we can of course um reset the context right let's go ahead and clear again and run slash
+context prime with lead we're hitting tab and now I can pass in another file right so let me go ahead and get the
+reference to this initialization spec file i'm going to use my file reference
+hotkey definitely set something like this up for yourself for me it's command shiftr and I'm just going to paste this
+claude now has an additional argument that references this file and this prompt is going to pick it up right so
+it's as if we prompted this right this is a classic dynamic variable if you've
+taken principled ed coding lesson six you know exactly what this prompt
+structure is you know exactly what's going on here this is an ADW let's keep
+moving here let's go ahead and run this so we're going to kick this off this is our context prime with lead so you can
+see there we have our read read me we have the get ls command uh letting Claude know the structure of the
+codebase context priming is super powerful because it allows us to focus on the tokens that matter right so we
+don't chew up tons of tokens looking at files that don't matter for the features that we want to ship right it gives
+Cloud Code a big overview of what we want to accomplish and then you can see here with our dynamic variable Cloud
+Code is reading this file and only this file and this gives Cloud Code additional context so that it's
+perfectly primed and good to go so you know you can see here quite literally this is um you know we're operating in
+the just prompt codebase which we use to run the ultra diff review prompt this is
+fantastic you can see how one variable here can make a massive difference and
+you know just like we saw here with hello with name you can place as many arguments as you want throughout your
+custom slash commands aka prompt templates this is super powerful we're
+just scratching the surface let me say it again so that it's absolutely clear
+massive compute is now one slashcomand away if there are any claw
+code engineers you know listening to this if you guys need a slogan for this go ahead you know you
+can use it i give you permission um but no seriously this command is absolutely incredible it is
+one of the most important commands one of the most important features coming
+out of cloud code there's a reason I keep coming back to cloud code why I keep covering it over and over and over
+when you intersect it with 3.7 sonnie and MCP servers we're getting something
+incredible we're pushing into a clear picture a clear vision of what agentic coding looks like we now have an agent
+Cloud Code that can run a prompt and execute a span of tools a prompt chain
+of tools right a gentic workflow of tools okay let me nail this point home
+by showing you just prompt ultra diffview right what does this prompt look like how were we able to run a
+multi-step workflow calling 10 plus tools in a single prompt let's break it down what's up engineers a quick
+intermission here this is an ad for a really important free resource for you
+that I've been working on in the background for quite some time i'm super excited to share with you the state of
+AI coding this is a comprehensive essay of the current state and the upcoming
+state of AI coding in this blog in this essay I've gone indepth on what you need
+to focus on to win in the current state and the current configuration of AI
+coding we talk about what's here and we talk about what's coming link's going to be in the description for you we talk
+about some really key essential big ideas of course the most important idea
+is compute equals success this is a big idea that we echo on the channel and
+inside the state of AI coding we go indepth into what exactly it's all about
+couple things to highlight we know that software engineering has changed we're going to talk about how exactly and why
+and what the implications are there is a AI coding skill tier list in here for
+you to get a rough estimate of your AI coding skill level this is the first ever AI coding skill tier list so kind
+of fun kind of exciting and then you know we go into deeper topics the most important thing we talk about of course
+is compute and engineering with exponentials i even share my AI tooling
+investments i talk about what I'm adding what I'm removing what I'm tweaking to my portfolio of AI tools so definitely
+check this out this is going to be here for you link in the description part one is completely free and part two and
+three is exclusive for principled AI coding members that have completed the
+course a little bit more incentive a little bit more bonus for every engineer to take this course and get ahead while
+you still can inside of this file you can see this look at how clean this is
+right we have the high level we have a subcomand and then we have a list of
+tasks okay this is a workflow it's a prompt chain right and every prompt
+chain here is going to call one or more tools we're at a major intersection
+between many topics we've discussed on the channel in the past right we're looking at spec prompts we're looking at
+prompt chains we're looking at agentic workflows we're looking at agents okay
+it's all coming together we've been discussing these topics these ideas for over a year now on the channel and in
+principled AI coding these are big ideas these are essential ideas as you can see
+here one of the big three Anthropic is saying "This is the right path this is
+where things are going this is where our teams are finding value and this is the road we're going down right once again
+on the channel we are right on track so what do these tasks look like let's start with task one okay so at the
+beginning we created a diff here's the prompt for that right we effectively have five prompts inside of this larger
+prompt right here's the prompt for that we create a new file called diff.md at the top add this markdown so
+we're having claude create this file and you saw that right it quite literally created this file and open up diff md
+and there's the top right if we get rid of this this is exactly what we have here okay so that's task one task two is
+get diff and append to the file right so we can be pretty concise with this prompt and notice the prompt structure
+here we have a highle prompt and then we have a low-level prompt going into detail we have the task name and then we
+have the task details so this adds the git diff right so here's our you know
+git diff there's all the changes that happened in that file looks like you know roughly 130 line file change and
+that's task two that creates the completed diff task three just prompt
+multi LM tool call so here I am scaling up the compute I am able to use even
+further i don't want a single model to review my code that's full of bias and
+error even the best models will hallucinate right what I want is a set of powerful reasoning models to give me
+their perspective right i'm using 3x compute to gain a multi-perspective result on this prompt
+okay and we just happen to be doing a you know code review using diffs this can quite literally be anything you want
+okay so this is the new MCP server that we're operating in right now um I am sharing this with you this is going to
+be linked in the description if you want to check out this MCP server we're going to talk about the capabilities at the
+end here but for now let's continue with our prompt this is going to create a directory you can see here we're reading
+this file and then we're going to have every one of these models execute and then output their respective results in
+the subdirectory we're being super clear here you can see this is a clear concise low-level prompt we're quite literally
+saying the tool right the name of the tool inside the just prompt MCP server that we want cloud code to execute okay
+fantastic that's task three so now we have a directory right we can go ahead and just open that up now we have this
+right so we don't quite have our fusion result yet but we have these three files so task four I'm now having claw code
+read the output file and think hard super important information keyword
+encoded by the claw code team right if we hop back to claw code we type release notes you can see here version 0.2.44
+ask claw to make a plan with thinking mode right what does this do it enables reasoning we used think hard to trigger
+the reasoning capabilities of claude 3.7 sonnet okay so that's important to
+synthesize the results into a single file called ultra diff so in that same
+directory fusion ultra review file okay following the original instructions up
+here okay plus any additional instructions or call outs that you think are needed to
+create the best possible review so this is the evaluator inside of our fusion
+prompt chain so we're having cloud code 3.7 with reasoning tokens pull together
+three different perspectives from anthropics cloud 3.7 from Gemini 2.0
+flash and from 03 mini right this is creating a comprehensive result we scale
+their impact it's very likely Gemini caught something Claude missed or 03
+caught something Claude missed and Claude found something both these models missed right we are scaling our compute
+we want multiple perspectives we want multiple versions and then we're taking the best of them all this is the fusion
+prop chain we've covered this on the channel 6 months plus ago definitely check that out if you're interested in
+this prop chain all right and then finally we trigger a human in the loop is where we want to come in and you know
+say exactly what we want to have happen next right then let me know which issues you think are worth resolving and we'll
+proceed from there okay five tasks inside of a prompt template that we can
+now commit and reuse right we can reuse this compute scaling asset inside of
+this codebase over and over and over right this problem is solved and of
+course principal ad coding members you already know what this is you've seen this coming we've discussed this type of
+workflow inside of ADWs in lesson six this is the next evolution of that right
+we can now have an agentic tool take our large prompt and call multiple tools
+right it can create a prompt chain right an aentic flow a graph based on a single
+prompt okay this is why from the beginning I have always said focus on
+the prompt focus on the prompt chain focus on the agent right master the fundamentals don't let anyone take the
+prompt away from you don't let anyone hide the prompt that's getting executed the prompt is the new fundamental unit
+of knowledge work this is the most important piece of the generative AI age
+if you give this away you give away everything okay master the prompt master
+knowledge work this is going to come up over and over and over you need to be in control of the prompts because the
+prompts give you the compute all right so this is fantastic the cloud pro team
+is absolutely cracked you can see here you know once again just to look at that fused result uh it is vastly more
+comprehensive obviously this is a simpler uh issue you know I I fabricated
+this diff this is going to be a great tool for obtaining comprehensive reviews but you know the important piece here is
+in the pattern we're setting up reusable prompt templates that we can use in this
+codebase in other codebases over and over and over we're scaling our compute
+with prompt templates with cloud code with powerful models okay so this
+command is ultra powerful i hope you can see why it's so important uh there are two levels to this so you can have
+project level custom slashcomands and you can have userle custom slashcomands
+the only difference is in where you place this okay so if you want user level you'll place this folder
+structure.cloud/commands inside your home directory if you want project level of course you'll place it here so let me
+share with you the capabilities of just prompt this is another tool that I'm building that can help you scale up your
+compute usage let me show you how you saw here in task three we're running this prompts from file to file tool with
+multiple models and then saving it back to this directory this is all handled inside just prompt in a single tool call
+we can call any one of I think five model providers let me share this with you quickly and give you some more value
+while I have time let's go ahead and run this prompt i'm saying read read me describe the tools and their args and
+nested bullet points for just prompt okay so this is just embedded inside the readme i'm just having cloud code uh
+reveal this information to us it's going to run one read and then present for us here are the tools available in the just
+prompt MTP server you can see we can run the plain prompt we can run prompt from file and then prompt from file to file
+that's what you saw here and then we can run list providers and list models let's go ahead and run list providers so now
+that Claude is primed with this context we can just quickly run list providers and it knows exactly what we're talking
+about you can see here this is what the codebase supports feel free to port this fork it add whatever you want change
+whatever you want this is a v1 that I created to help me get up and running with more compute with LLMs as an MCP
+server okay there are many other MCP tools that do this use whatever one you want now I'm going to say list uh let me
+show you my Olama models list models sweet so you can see you know there's
+the top list of my Alama models we have the new Gemma 3 we have uh QWQ32 and of
+course Mistro small and then we have some of the DeepCar ones let's go ahead and do the same for OpenAI and then
+let's say you know GP TTS for transcribe or pro or for I think it's 4.5 we're
+running multi-tools here we're having cloud code do the work for us there's the pattern search and you know here we
+can see those new models okay always think from the perspective of your AI tool think about what it can see right
+it it has all this information now available to it so now we can leverage that we're going to run a random prompt
+here let's say just prompt so let's go ahead and run that tool again let's say from file to file just going to write a
+random prompt here so let's do something kind of difficult i want view belt react vanilla build start time format also a
+number is a component information dense keyphrase and then we'll say with let's use 4.5 preview we can use open AI or we
+can just use o colon let's have this run and then we can also do you know mini okay so let's go ahead and
+light some money on fire and run this prompt and so you can see here this is pretty cool claude picked up on my
+prompts slash directory now it wants to create a new text file because it needs
+to do that to run this tool to run prompt from file to file so we're going to go ahead and let it do that you can see it ran an expansion of the prompt
+that I gave it into a nice prompt format i'll hit yes and then it's going to
+reference this file so you can see that file here right countdown component.txt with the models I gave it
+right so it's going to run O T Gp45 preview and OpenAI 03 Mini right fantastic let's go and run that it'll
+also run with the default output directory which is uh the current directory okay so the cool part about
+this tool you know a lot of these LLM provider tools uh they're great but they hardcode the models um this is not great
+for being able to scale and move quickly with uh models so if you open up the
+read me you can see here you know I have that list providers and list models for
+every provider we have this is actually just going to call their list models endpoint so whenever OpenAI releases a
+new model whenever Grock releases a new model DeepSeek Enthropic Gemini you'll be able to just come in run list models
+see it and have cloud code use it access it and run prompts against it via these
+you know other uh tools here right so let's see the result here you can see we're still spinning uh this is quite
+the run for running a uh incredible model like GPT4.5 you can see here it's
+uh so intense here that we we actually just timed out for whatever reason GPT4.5 preview having a hard time
+running that prompt um let's go ahead and just paste this command you can always just copy out whatever command
+you wanted to run and then adjust it and then paste it back in right so this is going to be an absolute perfect crystal
+clear instruction for cloud code let's just go ahead and swap out the model so instead of GP4.5 preview let's go ahead
+and run uh let's run a Grock model so let's run Grock what's the Grock model say list let's go ahead and get Grock
+models from just prompt there we go and I'm looking for There it is quinn with
+questions let's go ahead and run this and that looks good and since we're here I mean we can just grab some more models
+right deepseek R1 spec decode and that should be good so let's go ahead and run this again and Grock we can run with G
+colon and I think that's right list providers yep let's run this and no we
+need Q because Gemini is using G so we use uh Q as the short code for this
+fantastic and then we can just go ahead and paste this in right so now we're going to let uh one of the questions 03
+Mini and Deepsee R1 70 billion from Grock um run our countdown component
+okay so we're going to go ahead and hit yes and now these three models are running in parallel against this
+countdown component prompt and you know this is what this looks like this is something that claude automatically
+generated for us which was pretty sweet and now we have you know gros are already going to be complete here we're
+just probably waiting on OpenAI 03 Mini there we go so we have these three
+responses saved to their respective files we can now go ahead and check out these files so if we scroll down you can
+see we have our outputs oh and we did actually get a 4.5 preview output fantastic so there it is uh let's go
+ahead and look at uh what do we want to look at here let's look at the 4.5 right this is probably the most comprehensive
+answer here let's go into markdown mode and you know we can see the different versions so it looks like 4.5 preview
+created a nice web component for us very nice there's our you know classic
+countdown there's the usage so fantastic we have the view 3 composition API
+version right classic countdown timer looks great then we have spelt and then
+of course at the bottom we're going to have react and it's all good right so we have all three versions this is
+fantastic and you know why am I showing this to you why is this important because here with just prompt and with
+cloud code we can run multiple tools against multiple LLMs to get multiple
+versions of results this is a powerful way to scale up your compute you can get multiple perspectives and then using
+something like the fusion prompt chain you can combine them all into one or you can just you know get multiple
+perspectives we can hop into QW's results here let's look at what we got here out of a great local model coming
+out of Grock we have that long thinking block here you can see all the thought
+that's going into this to create these four versions pretty incredible actually
+there's so much content here wowers look at this this is a 17k prompt response
+wow okay it's funny a model like this is just not runnable without something like
+Grock right because it outputs 17k tokens so let me just try to find uh
+some of the implementation there's spelt we got some dot dot dots here it did skip some stuff but overall the
+implementation looks great we can of course look at other models deepseek R1 create a nice answer for us there's the
+Vue.js implementation spelt implementation React implementation this
+all looks great and then of course vanillajs in a web component okay so
+this is a way you can scale your compute link for this codebase link for just prompt is going to be in the description
+when you combine this with Anthropics brand new custom slashcomands that you
+can now embed inside your code bases what we're getting here the picture that's getting drawn is we can use more
+compute we can use it faster right like I mentioned fast easy access to compute
+enthropic also released codebase specific MCP servers so if you click on
+this MCP.json JSON you can see I have a nice default here you can use to just
+quickly get started if you just open up this codebase and type clawed you'll automatically get started with these
+default models just prompt also lets you run with default models so if you wanted to you could do something like this just
+prompt hello okay and now it's going to run all three of these models sonnet 03
+and flash and give me responses these are my default models as you can see uh
+you know just classic stuff right response response response i highly recommend you set up something like this even if you don't use my MCP server or
+you want to adapt it fork it do your thing it's there for you link in the description there are efficiency gains
+and productivity gains all over the place but they're easy to miss if you're not plugged in to the right information
+channels allow me to be one of your key sources all you have to do is like subscribe and drop a comment let me know
+how you're leveraging cloud code and the model context protocol we're scaling up
+our compute further than ever before the next question is where do we go from
+here how can we push this further i have a lot of big ideas to share with you
+many of these ideas are going to be detailed in the state of AI coding link is going to be in the description for
+that you know where to find me every single week every Monday stay focused
+and keep building
