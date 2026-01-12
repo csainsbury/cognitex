@@ -149,7 +149,6 @@ class LLMService:
             logger.warning("Together API key not set - embeddings will not work")
         self.embedding_model = settings.together_model_embedding
 
-    @with_retry(max_attempts=3, base_delay=1.0)
     async def complete(
         self,
         prompt: str,
@@ -159,7 +158,7 @@ class LLMService:
         response_format: dict | None = None,
     ) -> str:
         """
-        Generate a completion from the LLM.
+        Generate a completion from the LLM with automatic fallback.
 
         Args:
             prompt: The prompt to send
@@ -172,6 +171,42 @@ class LLMService:
             Generated text response
         """
         model = model or self.primary_model
+
+        try:
+            return await self._complete_internal(
+                prompt=prompt,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                response_format=response_format,
+            )
+        except Exception as e:
+            # For Anthropic, try fallback to Sonnet on overload
+            if self.provider == "anthropic" and _is_overloaded_error(e) and model != self.fast_model:
+                logger.warning(
+                    "Primary model overloaded after retries, falling back to Sonnet",
+                    primary_model=model,
+                    fallback_model=self.fast_model,
+                )
+                return await self._complete_internal(
+                    prompt=prompt,
+                    model=self.fast_model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    response_format=response_format,
+                )
+            raise
+
+    @with_retry(max_attempts=3, base_delay=1.0)
+    async def _complete_internal(
+        self,
+        prompt: str,
+        model: str,
+        max_tokens: int = 8192,
+        temperature: float = 0.3,
+        response_format: dict | None = None,
+    ) -> str:
+        """Internal completion method with retry logic."""
 
         if self.provider == "google":
             # Gemini API with minimal safety settings for work content analysis
