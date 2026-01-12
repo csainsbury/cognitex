@@ -761,6 +761,201 @@ Return ONLY valid JSON. Use null for fields you cannot reasonably infer."""
                 "urgency_tendency": None,
             }
 
+    async def analyze_with_skills(
+        self,
+        prompt: str,
+        files: list[tuple[str, bytes, str]],  # (filename, content, mime_type)
+        skills: list[str] | None = None,
+    ) -> dict:
+        """
+        Analyze content using Anthropic Skills with code execution.
+
+        This method uses Anthropic's beta Skills API to analyze documents
+        with specialized capabilities (DOCX, PDF, XLSX, PPTX processing).
+
+        Args:
+            prompt: Analysis prompt describing what to extract
+            files: List of (filename, content_bytes, mime_type) tuples
+            skills: List of skill IDs to use (e.g., ["docx", "pdf"])
+                   Defaults to ["docx", "pdf"] if not specified
+
+        Returns:
+            Dict with analysis results parsed from the response
+
+        Raises:
+            ValueError: If provider is not Anthropic or Skills are not enabled
+            Exception: If Skills API call fails
+        """
+        settings = get_settings()
+
+        if self.provider != "anthropic":
+            raise ValueError("Skills analysis requires Anthropic provider")
+
+        if not settings.skills_enabled:
+            raise ValueError("Skills are disabled in configuration")
+
+        skills = skills or ["docx", "pdf"]
+
+        try:
+            # Upload files to Anthropic Files API
+            file_ids = []
+            for filename, content, mime_type in files:
+                # Use beta files API to upload
+                file_response = await self.client.beta.files.upload(
+                    file=(filename, content, mime_type),
+                    betas=["files-api-2025-04-14"]
+                )
+                file_ids.append(file_response.id)
+                logger.debug("Uploaded file for Skills analysis", filename=filename, file_id=file_response.id)
+
+            # Build message content with files
+            message_content = [{"type": "text", "text": prompt}]
+            for file_id in file_ids:
+                message_content.append({"type": "file", "file_id": file_id})
+
+            # Call with Skills and code execution
+            response = await self.client.beta.messages.create(
+                model=self.primary_model,
+                max_tokens=8192,
+                betas=["code-execution-2025-08-25", "skills-2025-10-02"],
+                container={
+                    "skills": [
+                        {"type": "anthropic", "skill_id": skill, "version": "latest"}
+                        for skill in skills
+                    ]
+                },
+                messages=[{
+                    "role": "user",
+                    "content": message_content
+                }],
+                tools=[{"type": "code_execution_20250825", "name": "code_execution"}]
+            )
+
+            # Handle pause_turn for long-running operations
+            max_continuations = 5
+            for _ in range(max_continuations):
+                if response.stop_reason != "pause_turn":
+                    break
+
+                logger.debug("Skills operation paused, continuing...")
+                response = await self.client.beta.messages.create(
+                    model=self.primary_model,
+                    max_tokens=8192,
+                    betas=["code-execution-2025-08-25", "skills-2025-10-02"],
+                    container={
+                        "id": response.container.id,
+                        "skills": [
+                            {"type": "anthropic", "skill_id": skill, "version": "latest"}
+                            for skill in skills
+                        ]
+                    },
+                    messages=[
+                        {"role": "user", "content": message_content},
+                        {"role": "assistant", "content": response.content}
+                    ],
+                    tools=[{"type": "code_execution_20250825", "name": "code_execution"}]
+                )
+
+            # Parse response content
+            result = self._parse_skills_response(response)
+
+            # Clean up uploaded files
+            for file_id in file_ids:
+                try:
+                    await self.client.beta.files.delete(
+                        file_id=file_id,
+                        betas=["files-api-2025-04-14"]
+                    )
+                except Exception as e:
+                    logger.warning("Failed to delete uploaded file", file_id=file_id, error=str(e))
+
+            return result
+
+        except Exception as e:
+            logger.error("Skills analysis failed", error=str(e), skills=skills)
+            raise
+
+    def _parse_skills_response(self, response) -> dict:
+        """
+        Parse response from Skills API call.
+
+        Extracts text content and any structured data from the response.
+        """
+        result = {
+            "raw_text": "",
+            "summary": "",
+            "changes": [],
+            "review_items": [],
+            "questions": [],
+            "method": "skills",
+        }
+
+        for block in response.content:
+            if hasattr(block, "text"):
+                result["raw_text"] += block.text + "\n"
+            elif hasattr(block, "type") and block.type == "tool_result":
+                # Handle code execution results
+                if hasattr(block, "content"):
+                    result["raw_text"] += str(block.content) + "\n"
+
+        # Parse structured sections from raw text
+        raw = result["raw_text"]
+
+        # Extract SUMMARY section
+        if "SUMMARY:" in raw:
+            summary_start = raw.index("SUMMARY:") + len("SUMMARY:")
+            summary_end = raw.find("\n\n", summary_start)
+            if summary_end == -1:
+                summary_end = raw.find("CHANGES:", summary_start)
+            if summary_end == -1:
+                summary_end = len(raw)
+            result["summary"] = raw[summary_start:summary_end].strip()
+
+        # Extract CHANGES section
+        if "CHANGES:" in raw:
+            changes_start = raw.index("CHANGES:") + len("CHANGES:")
+            changes_end = raw.find("REVIEW_ITEMS:", changes_start)
+            if changes_end == -1:
+                changes_end = raw.find("QUESTIONS:", changes_start)
+            if changes_end == -1:
+                changes_end = raw.find("\n\n", changes_start + 10)
+            if changes_end == -1:
+                changes_end = len(raw)
+            changes_text = raw[changes_start:changes_end].strip()
+            # Parse bullet points
+            for line in changes_text.split("\n"):
+                line = line.strip()
+                if line.startswith(("-", "*", "•")):
+                    result["changes"].append(line.lstrip("-*• ").strip())
+
+        # Extract REVIEW_ITEMS section
+        if "REVIEW_ITEMS:" in raw:
+            items_start = raw.index("REVIEW_ITEMS:") + len("REVIEW_ITEMS:")
+            items_end = raw.find("QUESTIONS:", items_start)
+            if items_end == -1:
+                items_end = raw.find("\n\n", items_start + 10)
+            if items_end == -1:
+                items_end = len(raw)
+            items_text = raw[items_start:items_end].strip()
+            for line in items_text.split("\n"):
+                line = line.strip()
+                if line.startswith(("-", "*", "•", "1", "2", "3", "4", "5")):
+                    result["review_items"].append(line.lstrip("-*•0123456789. ").strip())
+
+        # Extract QUESTIONS section
+        if "QUESTIONS:" in raw:
+            questions_start = raw.index("QUESTIONS:") + len("QUESTIONS:")
+            questions_end = len(raw)
+            questions_text = raw[questions_start:questions_end].strip()
+            for line in questions_text.split("\n"):
+                line = line.strip()
+                if line.startswith(("-", "*", "•", "?")):
+                    result["questions"].append(line.lstrip("-*•? ").strip())
+                elif "?" in line and len(line) > 5:
+                    result["questions"].append(line.strip())
+
+        return result
+
 
 # Singleton instance
 _llm_service: LLMService | None = None

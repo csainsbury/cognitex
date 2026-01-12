@@ -73,10 +73,114 @@
         <strong>Issue:</strong> {{ item.payload.issue }}
         {% endif %}
     </div>
+
+    {% elif item.item_type == 'email_review' %}
+    <!-- Email review with document analysis -->
+    <div class="inbox-item-payload email-review-payload">
+        <div class="email-review-header">
+            <strong>From:</strong> {{ item.payload.from_name or item.payload.from }}<br>
+            <strong>Subject:</strong> {{ item.payload.subject }}<br>
+            {% if item.payload.deadline %}
+            <span class="deadline-badge">Deadline: {{ item.payload.deadline }}</span>
+            {% endif %}
+        </div>
+
+        {% if item.payload.key_ask %}
+        <div class="key-ask">
+            <strong>What they're asking:</strong> {{ item.payload.key_ask }}
+        </div>
+        {% endif %}
+
+        {% if item.payload.response_requirements and item.payload.response_requirements | length > 0 %}
+        <div class="response-requirements">
+            <strong>To respond substantively:</strong>
+            <ul>
+            {% for req in item.payload.response_requirements %}
+                <li>{{ req }}</li>
+            {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        {% if item.payload.document_analysis and item.payload.document_analysis | length > 0 %}
+        <div class="document-analysis-section">
+            <h4>Document Analysis</h4>
+            {% for doc in item.payload.document_analysis %}
+            <div class="analyzed-doc">
+                <div class="doc-header">
+                    <span class="doc-filename">{{ doc.filename }}</span>
+                    <span class="doc-method">({{ doc.method }})</span>
+                </div>
+
+                {% if doc.summary %}
+                <div class="doc-summary">{{ doc.summary }}</div>
+                {% endif %}
+
+                {% if doc.changes and doc.changes | length > 0 %}
+                <details class="doc-section changes-section">
+                    <summary>Changes Found ({{ doc.changes | length }})</summary>
+                    <ul>
+                    {% for change in doc.changes[:10] %}
+                        <li>{{ change }}</li>
+                    {% endfor %}
+                    {% if doc.changes | length > 10 %}
+                        <li class="more-items">...and {{ doc.changes | length - 10 }} more</li>
+                    {% endif %}
+                    </ul>
+                </details>
+                {% endif %}
+
+                {% if doc.review_items and doc.review_items | length > 0 %}
+                <details class="doc-section review-items-section" open>
+                    <summary>Items Needing Review ({{ doc.review_items | length }})</summary>
+                    <ul>
+                    {% for item_text in doc.review_items[:10] %}
+                        <li>{{ item_text }}</li>
+                    {% endfor %}
+                    {% if doc.review_items | length > 10 %}
+                        <li class="more-items">...and {{ doc.review_items | length - 10 }} more</li>
+                    {% endif %}
+                    </ul>
+                </details>
+                {% endif %}
+
+                {% if doc.questions and doc.questions | length > 0 %}
+                <details class="doc-section questions-section">
+                    <summary>Questions/Comments ({{ doc.questions | length }})</summary>
+                    <ul>
+                    {% for q in doc.questions[:10] %}
+                        <li>
+                            {% if q.author %}<em>{{ q.author }}:</em> {% endif %}
+                            {{ q.text }}
+                        </li>
+                    {% endfor %}
+                    </ul>
+                </details>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
     {% endif %}
 
     <div class="inbox-item-actions">
-        <!-- Approve button -->
+        {% if item.item_type == 'email_review' and item.payload.decision_options %}
+        <!-- Decision buttons for email review -->
+        <div class="decision-buttons">
+            {% for option in item.payload.decision_options %}
+            <button class="btn btn-sm {% if loop.first %}btn-primary{% else %}btn-secondary{% endif %}"
+                    hx-post="/api/inbox/{{ item.id }}/decide"
+                    hx-vals='{"decision": "{{ option.id }}"}'
+                    hx-target="#inbox-item-{{ item.id }}"
+                    hx-swap="outerHTML"
+                    title="{{ option.description }}">
+                {{ option.label }}
+            </button>
+            {% endfor %}
+        </div>
+        {% else %}
+        <!-- Standard approve button -->
         <button class="btn btn-success btn-sm"
                 hx-post="/api/inbox/{{ item.id }}/approve"
                 hx-target="#inbox-item-{{ item.id }}"
@@ -137,6 +241,7 @@
                 title="Dismiss (no longer relevant)">
             Dismiss
         </button>
+        {% endif %}
 
         <!-- Helpful buttons for context packs -->
         {% if item.item_type == 'context_pack' %}

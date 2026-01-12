@@ -1278,19 +1278,14 @@ class TriggerSystem:
     # =========================================================================
 
     async def _on_new_email(self, email_data: dict) -> None:
-        """Handle new email event from Gmail push notification.
+        """Handle new email event with deep semantic analysis.
 
-        Only surfaces emails that are truly actionable:
-        - Require a response/reply
-        - Have deadlines or time-sensitive content
-        - Are from important contacts
-        - Result in task creation
-
-        Filters out:
-        - FYI/informational emails
-        - Newsletters/marketing
-        - Auto-generated notifications
-        - Calendar invites (handled separately)
+        Pipeline:
+        1. Sync new emails from Gmail
+        2. For each actionable email, classify intent deeply
+        3. If review_request with attachments -> analyze documents, create inbox item
+        4. If quick_reply -> use existing agent chat workflow
+        5. If archive/fyi -> silently process, no notification
         """
         history_id = email_data.get("history_id")
         email_address = email_data.get("email_address")
@@ -1302,14 +1297,11 @@ class TriggerSystem:
             from cognitex.services.ingestion import run_incremental_sync
 
             # Deduplicate: Skip if we've already processed this history_id recently
-            # Use atomic SET NX to prevent race condition between check and set
             if history_id:
                 redis = get_redis()
                 dedup_key = f"cognitex:email:processed:{history_id}"
-                # Atomic set-if-not-exists with 5-minute TTL
                 was_set = await redis.set(dedup_key, "1", ex=300, nx=True)
                 if not was_set:
-                    # Key already existed - another process is handling this
                     logger.debug("Skipping duplicate email notification", history_id=history_id)
                     return
 
@@ -1319,21 +1311,20 @@ class TriggerSystem:
 
                 if sync_result.get("first_sync"):
                     logger.info("First sync - history ID stored, waiting for next email")
-                    return  # First sync just stores the baseline
+                    return
 
                 if sync_result.get("error"):
                     logger.warning("Incremental sync failed", error=sync_result.get("error"))
-                    return  # Will retry on next push
+                    return
 
                 if sync_result.get("total", 0) == 0:
                     logger.info("No new emails found in history")
-                    return  # No new emails, nothing to notify about
+                    return
 
                 # Check if any tasks were auto-completed from sent emails
                 auto_completed = sync_result.get("auto_completed_tasks", [])
                 if auto_completed:
                     logger.info("Tasks auto-completed from sent emails", task_ids=auto_completed)
-                    # Only notify for task completions - this IS actionable feedback
                     await self._send_notification(
                         f"**Tasks Auto-Completed**\n\n"
                         f"I detected that you replied to emails related to {len(auto_completed)} task(s). "
@@ -1341,81 +1332,28 @@ class TriggerSystem:
                         urgency="low"
                     )
 
-                # We have new emails - filter to only actionable ones
+                # Filter to actionable emails
                 emails = sync_result.get("emails", [])
                 actionable_emails = self._filter_actionable_emails(emails)
 
                 if not actionable_emails:
                     logger.info("No actionable emails in batch", total=len(emails))
-                    return  # All emails were filtered as non-actionable
+                    return
 
                 logger.info("Found actionable emails", actionable=len(actionable_emails), total=len(emails))
 
-                # Build email summary for agent (only actionable ones)
-                email_summaries = []
-                for email in actionable_emails[:5]:  # Limit to 5 most recent
-                    sender = email.get("sender_email", "unknown")
-                    subject = email.get("subject", "(no subject)")[:80]
-                    snippet = email.get("snippet", "")[:150]
-                    email_summaries.append(f"- From: {sender}\n  Subject: {subject}\n  Preview: {snippet}")
+                # Process each actionable email with deep semantic analysis
+                await self._process_emails_with_deep_analysis(actionable_emails)
 
-                email_list = "\n\n".join(email_summaries)
-
-                # Ask the agent to analyze ONLY if we have actionable emails
-                response = await self.agent.chat(
-                    f"I received {len(actionable_emails)} email(s) that may need action. Here are the details:\n\n"
-                    f"{email_list}\n\n"
-                    "Please analyze these emails:\n"
-                    "1. Which ones require a reply? (be specific about what to reply)\n"
-                    "2. Should any tasks be created? (create them if so)\n"
-                    "3. Are any truly urgent (deadline within 24h)?\n\n"
-                    "If none of these require immediate action, just say 'No action needed' and I won't notify."
-                )
             else:
-                # No history ID - skip notification (this shouldn't happen often)
                 logger.debug("Email notification without history ID, skipping")
                 return
-
-            # STRICT filter: Only notify if agent explicitly found action items
-            # Look for concrete action indicators, not just general keywords
-            if response:
-                response_lower = response.lower()
-                # Skip if agent explicitly says no action needed
-                if any(phrase in response_lower for phrase in [
-                    "no action needed", "no action required", "nothing urgent",
-                    "no immediate action", "none of these require", "no tasks to create",
-                    "fyi only", "informational only"
-                ]):
-                    logger.info("Agent determined no action needed, skipping notification")
-                    return
-
-                # Only notify if there are concrete action items
-                action_indicators = [
-                    "should reply", "need to reply", "reply to", "respond to",
-                    "created task", "creating task", "task created",
-                    "deadline", "due by", "due date", "urgent",
-                    "action required", "please", "waiting for your",
-                    "follow up", "follow-up"
-                ]
-                if any(indicator in response_lower for indicator in action_indicators):
-                    await self._send_notification(
-                        f"**Email Action Needed**\n\n{response}",
-                        urgency="normal"
-                    )
-                    await log_action("email_analysis", "email",
-                                   summary=f"Action needed: {response[:150]}",
-                                   details={"email_count": len(actionable_emails), "notified": True})
-                else:
-                    logger.info("No concrete action items found, skipping notification")
-                    await log_action("email_analysis", "email",
-                                   summary=f"No action needed for {len(actionable_emails)} email(s)",
-                                   details={"email_count": len(actionable_emails), "notified": False})
 
             # Trigger context pack refresh for related events
             try:
                 from cognitex.agent.context_pack import get_context_pack_triggers
                 pack_triggers = get_context_pack_triggers()
-                for email in emails[:3]:  # Check first 3 emails
+                for email in emails[:3]:
                     await pack_triggers.on_email_received({
                         "sender": email.get("sender_email", ""),
                         "subject": email.get("subject", ""),
@@ -1425,6 +1363,472 @@ class TriggerSystem:
 
         except Exception as e:
             logger.error("Email processing failed", error=str(e))
+
+    async def _process_emails_with_deep_analysis(self, emails: list[dict]) -> None:
+        """Process emails with deep semantic analysis using intent classification.
+
+        For each email:
+        1. Classify intent (review_request, question, action_request, fyi, etc.)
+        2. If requires document analysis, download and analyze attachments
+        3. Create appropriate inbox item based on workflow type
+        """
+        from cognitex.agent.action_log import log_action
+        from cognitex.services.email_intent import (
+            get_email_intent_classifier,
+            EmailIntent,
+            SuggestedWorkflow,
+        )
+        from cognitex.services.gmail import GmailService, extract_email_body
+        from cognitex.services.document_analyzer import get_document_analyzer
+
+        intent_classifier = get_email_intent_classifier()
+        gmail = GmailService()
+        doc_analyzer = get_document_analyzer()
+
+        for email in emails[:5]:  # Process up to 5 emails
+            try:
+                gmail_id = email.get("gmail_id")
+                sender = email.get("sender_email", "unknown")
+                sender_name = email.get("sender_name", "")
+                subject = email.get("subject", "(no subject)")
+                snippet = email.get("snippet", "")
+
+                # Get full email body for better classification
+                if gmail_id:
+                    try:
+                        full_message = gmail.get_message(gmail_id, format="full")
+                        body = extract_email_body(full_message)
+                    except Exception:
+                        body = snippet
+                else:
+                    body = snippet
+
+                # Get attachment metadata without downloading yet
+                attachment_metadata = []
+                if gmail_id:
+                    try:
+                        attachment_metadata = gmail.get_attachment_metadata(gmail_id)
+                    except Exception as e:
+                        logger.warning("Failed to get attachment metadata", error=str(e))
+
+                # Step 1: Deep intent classification
+                logger.info(
+                    "Classifying email intent",
+                    subject=subject[:50],
+                    has_attachments=len(attachment_metadata) > 0,
+                )
+
+                intent_result = await intent_classifier.classify(
+                    sender=f"{sender_name} <{sender}>" if sender_name else sender,
+                    subject=subject,
+                    body=body,
+                    attachments=attachment_metadata,
+                )
+
+                logger.info(
+                    "Email intent classified",
+                    intent=intent_result.intent.value,
+                    workflow=intent_result.suggested_workflow.value,
+                    requires_doc_analysis=intent_result.requires_document_analysis,
+                    confidence=intent_result.confidence,
+                )
+
+                # Step 2: Handle based on suggested workflow
+                if intent_result.suggested_workflow == SuggestedWorkflow.ARCHIVE:
+                    # FYI only - silently archive, no action needed
+                    logger.info("Email is FYI only, archiving silently", subject=subject[:50])
+                    await log_action(
+                        "email_classified",
+                        "email",
+                        summary=f"FYI email archived: {subject[:50]}",
+                        details={"intent": intent_result.intent.value, "gmail_id": gmail_id},
+                    )
+                    continue
+
+                elif intent_result.suggested_workflow == SuggestedWorkflow.ANALYZE_THEN_RESPOND:
+                    # Need to analyze attachments before responding
+                    await self._handle_review_request_email(
+                        email=email,
+                        gmail_id=gmail_id,
+                        intent_result=intent_result,
+                        gmail=gmail,
+                        doc_analyzer=doc_analyzer,
+                    )
+
+                elif intent_result.suggested_workflow == SuggestedWorkflow.CREATE_TASK:
+                    # Create a task and possibly acknowledge
+                    await self._handle_task_creation_email(
+                        email=email,
+                        intent_result=intent_result,
+                    )
+
+                elif intent_result.suggested_workflow == SuggestedWorkflow.SCHEDULE:
+                    # Calendar-related - use agent to handle
+                    await self._handle_scheduling_email(
+                        email=email,
+                        intent_result=intent_result,
+                    )
+
+                else:
+                    # QUICK_REPLY or fallback - use existing agent workflow
+                    await self._handle_quick_reply_email(
+                        email=email,
+                        intent_result=intent_result,
+                    )
+
+            except Exception as e:
+                logger.error(
+                    "Failed to process email with deep analysis",
+                    subject=email.get("subject", "")[:50],
+                    error=str(e),
+                )
+
+    async def _handle_review_request_email(
+        self,
+        email: dict,
+        gmail_id: str,
+        intent_result,
+        gmail,
+        doc_analyzer,
+    ) -> None:
+        """Handle emails that require document analysis before responding.
+
+        Downloads attachments, analyzes them for changes/highlights/comments,
+        and creates a rich inbox item with decision options.
+        """
+        from cognitex.agent.action_log import log_action
+        from cognitex.db.postgres import get_session
+        from cognitex.db.models import InboxItem
+
+        sender = email.get("sender_email", "unknown")
+        sender_name = email.get("sender_name", "")
+        subject = email.get("subject", "(no subject)")
+        thread_id = email.get("thread_id")
+
+        logger.info(
+            "Processing review request email with attachments",
+            subject=subject[:50],
+            gmail_id=gmail_id,
+        )
+
+        # Download and analyze attachments
+        analysis_results = []
+        try:
+            attachments = gmail.get_email_attachments(gmail_id)
+            logger.info("Downloaded attachments", count=len(attachments))
+
+            for att in attachments:
+                filename = att.get("filename", "unknown")
+                mime_type = att.get("mime_type", "")
+                content = att.get("data")
+
+                if not content:
+                    continue
+
+                # Check if document type is supported
+                if doc_analyzer.is_supported(filename, mime_type):
+                    logger.info("Analyzing document", filename=filename)
+                    try:
+                        analysis = await doc_analyzer.analyze_for_review(
+                            filename=filename,
+                            content=content,
+                            context=f"Email subject: {subject}. Key ask: {intent_result.key_ask}",
+                            mime_type=mime_type,
+                        )
+                        analysis_results.append(analysis.to_dict())
+                        logger.info(
+                            "Document analyzed",
+                            filename=filename,
+                            changes=len(analysis.changes),
+                            review_items=len(analysis.review_items),
+                        )
+                    except Exception as e:
+                        logger.warning("Document analysis failed", filename=filename, error=str(e))
+                else:
+                    logger.debug("Unsupported document type, skipping", filename=filename, mime_type=mime_type)
+
+        except Exception as e:
+            logger.error("Failed to download/analyze attachments", error=str(e))
+
+        # Generate decision options based on intent
+        decision_options = self._generate_decision_options(intent_result, analysis_results)
+
+        # Create rich inbox item
+        inbox_payload = {
+            "email_id": gmail_id,
+            "thread_id": thread_id,
+            "from": sender,
+            "from_name": sender_name,
+            "subject": subject,
+            "intent": intent_result.intent.value,
+            "intent_confidence": intent_result.confidence,
+            "key_ask": intent_result.key_ask,
+            "deadline": intent_result.deadline,
+            "response_requirements": intent_result.response_requirements,
+            "document_analysis": analysis_results,
+            "decision_options": decision_options,
+            "would_acknowledgment_be_unhelpful": intent_result.would_acknowledgment_be_unhelpful,
+        }
+
+        async for session in get_session():
+            inbox_item = InboxItem(
+                item_type="email_review",
+                title=f"Review: {subject[:80]}",
+                summary=intent_result.key_ask or f"Document review request from {sender_name or sender}",
+                payload=inbox_payload,
+                priority="high" if intent_result.deadline else "normal",
+                source="email",
+                source_id=gmail_id,
+            )
+            session.add(inbox_item)
+            await session.commit()
+            await session.refresh(inbox_item)
+
+            logger.info(
+                "Created email_review inbox item",
+                inbox_id=inbox_item.id,
+                documents_analyzed=len(analysis_results),
+            )
+
+            # Send notification about the review request
+            doc_summary = ""
+            if analysis_results:
+                total_changes = sum(len(a.get("changes", [])) for a in analysis_results)
+                total_items = sum(len(a.get("review_items", [])) for a in analysis_results)
+                doc_summary = f"\n\n**Document Analysis:**\n- {len(analysis_results)} document(s) analyzed\n- {total_changes} change(s) found\n- {total_items} item(s) flagged for review"
+
+            await self._send_notification(
+                f"**Document Review Request**\n\n"
+                f"**From:** {sender_name or sender}\n"
+                f"**Subject:** {subject}\n"
+                f"**Ask:** {intent_result.key_ask}"
+                f"{doc_summary}\n\n"
+                f"_Check your inbox to review and decide on your response._",
+                urgency="high" if intent_result.deadline else "normal",
+            )
+
+            await log_action(
+                "email_review_created",
+                "email",
+                summary=f"Review request: {subject[:50]} ({len(analysis_results)} docs)",
+                details={
+                    "gmail_id": gmail_id,
+                    "inbox_item_id": str(inbox_item.id),
+                    "documents_analyzed": len(analysis_results),
+                    "intent": intent_result.intent.value,
+                },
+            )
+            break
+
+    def _generate_decision_options(self, intent_result, analyses: list[dict]) -> list[dict]:
+        """Generate decision options based on email intent and document analysis."""
+        from cognitex.services.email_intent import EmailIntent
+
+        options = []
+
+        if intent_result.intent == EmailIntent.REVIEW_REQUEST:
+            options = [
+                {
+                    "id": "approve",
+                    "label": "Approve changes",
+                    "description": "Confirm the changes look good",
+                    "response_template": "Thanks for sending this over - the changes look good to me. [Add specific feedback if needed]",
+                },
+                {
+                    "id": "revisions",
+                    "label": "Request revisions",
+                    "description": "Ask for specific changes",
+                    "response_template": "Thanks for this. A few items need adjustment:\n\n- [Item 1]\n- [Item 2]\n\nLet me know if you have any questions.",
+                },
+                {
+                    "id": "discuss",
+                    "label": "Schedule discussion",
+                    "description": "Set up a call to discuss",
+                    "response_template": "Thanks for sharing this. I have some thoughts I'd like to discuss - can we find 15-30 minutes this week to chat?",
+                },
+                {
+                    "id": "custom",
+                    "label": "Custom response",
+                    "description": "Write your own response",
+                    "response_template": "",
+                },
+            ]
+        elif intent_result.intent == EmailIntent.QUESTION:
+            options = [
+                {
+                    "id": "answer",
+                    "label": "Answer question",
+                    "description": "Provide the requested information",
+                    "response_template": "",
+                },
+                {
+                    "id": "defer",
+                    "label": "Need to check",
+                    "description": "Let them know you'll follow up",
+                    "response_template": "Good question - let me look into this and get back to you by [date].",
+                },
+                {
+                    "id": "redirect",
+                    "label": "Redirect to someone else",
+                    "description": "Point them to the right person",
+                    "response_template": "I think [Name] would be the best person to answer this - copying them here.",
+                },
+            ]
+        elif intent_result.intent == EmailIntent.ACTION_REQUEST:
+            options = [
+                {
+                    "id": "will_do",
+                    "label": "Will do",
+                    "description": "Confirm you'll handle it",
+                    "response_template": "Got it - I'll take care of this and let you know when it's done.",
+                },
+                {
+                    "id": "need_info",
+                    "label": "Need more info",
+                    "description": "Ask clarifying questions",
+                    "response_template": "Happy to help with this. Before I get started, could you clarify:\n\n- [Question 1]\n- [Question 2]",
+                },
+                {
+                    "id": "cant_do",
+                    "label": "Can't do this",
+                    "description": "Decline or redirect",
+                    "response_template": "Thanks for thinking of me for this. Unfortunately, [reason]. Perhaps [alternative suggestion]?",
+                },
+            ]
+        else:
+            # Generic options
+            options = [
+                {
+                    "id": "reply",
+                    "label": "Reply",
+                    "description": "Send a response",
+                    "response_template": "",
+                },
+                {
+                    "id": "archive",
+                    "label": "Archive",
+                    "description": "No response needed",
+                    "response_template": None,
+                },
+            ]
+
+        return options
+
+    async def _handle_task_creation_email(self, email: dict, intent_result) -> None:
+        """Handle emails that should result in task creation."""
+        from cognitex.agent.action_log import log_action
+
+        sender = email.get("sender_email", "unknown")
+        subject = email.get("subject", "(no subject)")
+
+        # Use agent to create task
+        task_prompt = (
+            f"An email from {sender} with subject '{subject}' needs a task created.\n"
+            f"Key ask: {intent_result.key_ask}\n"
+            f"Deadline: {intent_result.deadline or 'None specified'}\n\n"
+            f"Please create an appropriate task for this. If it's urgent, set high priority."
+        )
+
+        response = await self.agent.chat(task_prompt)
+
+        if response:
+            await self._send_notification(
+                f"**Task Created from Email**\n\n"
+                f"**From:** {sender}\n"
+                f"**Subject:** {subject}\n\n"
+                f"{response}",
+                urgency="normal",
+            )
+
+        await log_action(
+            "email_task_created",
+            "email",
+            summary=f"Task from email: {subject[:50]}",
+            details={"intent": intent_result.intent.value, "key_ask": intent_result.key_ask},
+        )
+
+    async def _handle_scheduling_email(self, email: dict, intent_result) -> None:
+        """Handle calendar/scheduling related emails."""
+        from cognitex.agent.action_log import log_action
+
+        sender = email.get("sender_email", "unknown")
+        subject = email.get("subject", "(no subject)")
+
+        # Use agent to handle scheduling
+        schedule_prompt = (
+            f"An email from {sender} about scheduling: '{subject}'\n"
+            f"Key ask: {intent_result.key_ask}\n\n"
+            f"Please check my calendar and suggest available times or handle this scheduling request."
+        )
+
+        response = await self.agent.chat(schedule_prompt)
+
+        if response:
+            await self._send_notification(
+                f"**Scheduling Request**\n\n"
+                f"**From:** {sender}\n"
+                f"**Subject:** {subject}\n\n"
+                f"{response}",
+                urgency="normal",
+            )
+
+        await log_action(
+            "email_scheduling",
+            "email",
+            summary=f"Scheduling: {subject[:50]}",
+            details={"intent": intent_result.intent.value},
+        )
+
+    async def _handle_quick_reply_email(self, email: dict, intent_result) -> None:
+        """Handle emails that can be processed with a quick reply workflow."""
+        from cognitex.agent.action_log import log_action
+
+        sender = email.get("sender_email", "unknown")
+        sender_name = email.get("sender_name", "")
+        subject = email.get("subject", "(no subject)")
+        snippet = email.get("snippet", "")
+
+        # Skip notification if acknowledgment would be unhelpful
+        if intent_result.would_acknowledgment_be_unhelpful:
+            logger.info("Skipping quick reply - acknowledgment would be unhelpful", subject=subject[:50])
+            return
+
+        # Use existing agent workflow for simple emails
+        response = await self.agent.chat(
+            f"I received an email that may need a quick response:\n\n"
+            f"**From:** {sender_name or sender}\n"
+            f"**Subject:** {subject}\n"
+            f"**Preview:** {snippet[:200]}\n"
+            f"**Intent:** {intent_result.intent.value}\n"
+            f"**Key Ask:** {intent_result.key_ask}\n\n"
+            f"Please analyze: Does this need a reply? If so, what should I say? "
+            f"If no action is needed, just say 'No action needed'."
+        )
+
+        if response:
+            response_lower = response.lower()
+            # Only notify if action is needed
+            if not any(phrase in response_lower for phrase in [
+                "no action needed", "no action required", "nothing urgent",
+                "no immediate action", "fyi only",
+            ]):
+                await self._send_notification(
+                    f"**Email Action Needed**\n\n{response}",
+                    urgency="normal",
+                )
+                await log_action(
+                    "email_quick_reply",
+                    "email",
+                    summary=f"Quick reply: {subject[:50]}",
+                    details={"intent": intent_result.intent.value, "notified": True},
+                )
+            else:
+                await log_action(
+                    "email_quick_reply",
+                    "email",
+                    summary=f"No action needed: {subject[:50]}",
+                    details={"intent": intent_result.intent.value, "notified": False},
+                )
 
     async def _on_calendar_change(self, event_data: dict) -> None:
         """Handle calendar change event.

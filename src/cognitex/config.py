@@ -70,6 +70,16 @@ class Settings(BaseSettings):
         description="Claude model for execution (faster for structured tasks)",
     )
 
+    # Anthropic Skills (beta features)
+    skills_enabled: bool = Field(
+        default=True,
+        description="Enable Anthropic Skills for document analysis",
+    )
+    skills_document_types: list = Field(
+        default=["docx", "pdf", "xlsx", "pptx"],
+        description="Document types to process with Skills",
+    )
+
     # OpenAI
     openai_api_key: SecretStr = Field(default=SecretStr(""))
     openai_model_planner: str = Field(

@@ -44,6 +44,9 @@
     <a href="/inbox?type=flagged_item" class="btn {% if filter_type == 'flagged_item' %}btn-primary{% else %}btn-secondary{% endif %}">
         Flagged ({{ counts.by_type.flagged_item }})
     </a>
+    <a href="/inbox?type=email_review" class="btn {% if filter_type == 'email_review' %}btn-primary{% else %}btn-secondary{% endif %}">
+        Reviews ({{ counts.by_type.email_review or 0 }})
+    </a>
 </div>
 
 <!-- Pending items -->
@@ -107,6 +110,165 @@
 .badge-context_pack { background: #d1fae5; color: #065f46; border: 1px solid #a7f3d0; }
 .badge-email_draft { background: #fef3c7; color: #92400e; border: 1px solid #fde68a; }
 .badge-flagged_item { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
+.badge-email_review { background: #dbeafe; color: #1e40af; border: 1px solid #93c5fd; }
+
+/* Email review specific styles */
+.email-review-payload {
+    padding: 0;
+}
+
+.email-review-header {
+    padding: 0.75rem;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.deadline-badge {
+    display: inline-block;
+    background: #fef3c7;
+    color: #92400e;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    margin-top: 0.25rem;
+}
+
+.key-ask {
+    padding: 0.75rem;
+    background: #f0fdf4;
+    border-left: 3px solid #22c55e;
+    font-size: 0.9rem;
+}
+
+.response-requirements {
+    padding: 0.75rem;
+    font-size: 0.85rem;
+}
+
+.response-requirements ul {
+    margin: 0.25rem 0 0 1.25rem;
+    padding: 0;
+}
+
+.response-requirements li {
+    margin-bottom: 0.25rem;
+}
+
+.document-analysis-section {
+    padding: 0.75rem;
+    background: #f8fafc;
+    border-top: 1px solid #e5e7eb;
+}
+
+.document-analysis-section h4 {
+    margin: 0 0 0.75rem 0;
+    font-size: 0.9rem;
+    color: #374151;
+}
+
+.analyzed-doc {
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 0.75rem;
+    margin-bottom: 0.75rem;
+}
+
+.analyzed-doc:last-child {
+    margin-bottom: 0;
+}
+
+.doc-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+
+.doc-filename {
+    font-weight: 600;
+    color: #1e40af;
+}
+
+.doc-method {
+    font-size: 0.75rem;
+    color: #6b7280;
+}
+
+.doc-summary {
+    font-size: 0.85rem;
+    color: #4b5563;
+    margin-bottom: 0.5rem;
+    line-height: 1.5;
+}
+
+.doc-section {
+    margin-top: 0.5rem;
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+}
+
+.doc-section summary {
+    padding: 0.5rem 0.75rem;
+    cursor: pointer;
+    background: #f9fafb;
+    font-weight: 500;
+    font-size: 0.85rem;
+}
+
+.doc-section summary:hover {
+    background: #f3f4f6;
+}
+
+.doc-section ul {
+    margin: 0;
+    padding: 0.5rem 0.75rem 0.5rem 2rem;
+    font-size: 0.8rem;
+}
+
+.doc-section li {
+    margin-bottom: 0.25rem;
+    color: #374151;
+}
+
+.changes-section {
+    border-color: #fde68a;
+}
+
+.changes-section summary {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.review-items-section {
+    border-color: #fecaca;
+}
+
+.review-items-section summary {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.questions-section {
+    border-color: #c7d2fe;
+}
+
+.questions-section summary {
+    background: var(--primary-light);
+    color: var(--primary-text);
+}
+
+.more-items {
+    color: #6b7280;
+    font-style: italic;
+}
+
+/* Decision buttons */
+.decision-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
 
 /* Priority indicators */
 .priority-urgent {

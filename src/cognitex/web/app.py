@@ -5230,6 +5230,181 @@ async def approve_inbox_item(item_id: str):
     """)
 
 
+@app.post("/api/inbox/{item_id}/decide", response_class=HTMLResponse)
+async def decide_inbox_item(
+    item_id: str,
+    decision: str = Form(...),
+    custom_notes: str = Form(""),
+):
+    """Handle user decision on email_review inbox item.
+
+    Creates a draft response based on the selected decision and document analysis,
+    then presents it for final approval.
+    """
+    from cognitex.services.inbox import get_inbox_service
+    from cognitex.agent.action_log import log_action
+    from cognitex.db.postgres import get_session
+    from cognitex.db.models import InboxItem as InboxItemModel
+    import structlog
+
+    logger = structlog.get_logger()
+    inbox = get_inbox_service()
+    item = await inbox.get_item(item_id)
+
+    if not item:
+        return HTMLResponse(content="<div class='inbox-item'>Item not found</div>", status_code=404)
+
+    if item.item_type != "email_review":
+        return HTMLResponse(content="<div class='inbox-item'>Invalid item type for decision</div>", status_code=400)
+
+    payload = item.payload or {}
+
+    # Find the selected decision option
+    decision_options = payload.get("decision_options", [])
+    selected_option = next(
+        (opt for opt in decision_options if opt.get("id") == decision),
+        None
+    )
+
+    if not selected_option and decision != "archive":
+        return HTMLResponse(content="<div class='inbox-item'>Invalid decision option</div>", status_code=400)
+
+    # Handle archive decision - just mark as decided, no draft needed
+    if decision == "archive":
+        await inbox.approve_item(item_id, decision_reason=f"Decision: {decision}")
+
+        await log_action(
+            "email_review_decided",
+            "web_ui",
+            summary=f"Archived email review: {item.title[:50]}",
+            details={"item_id": item_id, "decision": decision}
+        )
+
+        return HTMLResponse(content=f"""
+            <div class="inbox-item" style="background: #f3f4f6; border-color: #d1d5db; opacity: 0.8;">
+                <div class="inbox-item-title" style="color: #4b5563;">
+                    ✓ Archived: {item.title}
+                </div>
+            </div>
+        """)
+
+    # Generate a draft response based on decision + document analysis
+    from cognitex.agent.core import get_agent
+
+    agent = get_agent()
+
+    # Build context for draft generation
+    doc_analysis_summary = ""
+    doc_analyses = payload.get("document_analysis", [])
+    if doc_analyses:
+        analysis_parts = []
+        for doc in doc_analyses:
+            parts = [f"**{doc.get('filename', 'Document')}**"]
+            if doc.get("summary"):
+                parts.append(f"Summary: {doc['summary'][:200]}")
+            if doc.get("changes"):
+                parts.append(f"Changes found: {len(doc['changes'])}")
+            if doc.get("review_items"):
+                parts.append(f"Review items: {', '.join(doc['review_items'][:3])}")
+            analysis_parts.append("\n".join(parts))
+        doc_analysis_summary = "\n\n".join(analysis_parts)
+
+    response_template = selected_option.get("response_template", "") if selected_option else ""
+
+    draft_prompt = f"""Please draft an email response based on the following:
+
+**Original Email:**
+- From: {payload.get('from_name') or payload.get('from', 'Unknown')}
+- Subject: {payload.get('subject', 'No subject')}
+- Key Ask: {payload.get('key_ask', 'Unknown')}
+
+**User's Decision:** {selected_option.get('label') if selected_option else decision}
+{f"**User's Notes:** {custom_notes}" if custom_notes else ""}
+
+**Response Template to use as starting point:**
+{response_template}
+
+**Document Analysis Summary:**
+{doc_analysis_summary if doc_analysis_summary else "No documents analyzed."}
+
+Please draft a professional, concise response that:
+1. Uses the template as a starting point but makes it specific
+2. References specific findings from the document analysis if relevant
+3. Is appropriate for the decision made ({decision})
+
+Return ONLY the email body text, no subject line or headers."""
+
+    try:
+        draft_body = await agent.chat(draft_prompt)
+    except Exception as e:
+        logger.error("Failed to generate draft response", error=str(e))
+        draft_body = response_template or f"[Draft generation failed - please write manually]"
+
+    # Create a new email_draft inbox item for final approval
+    draft_payload = {
+        "original_email_id": payload.get("email_id"),
+        "thread_id": payload.get("thread_id"),
+        "to": payload.get("from"),
+        "to_name": payload.get("from_name"),
+        "subject": f"Re: {payload.get('subject', '')}",
+        "body": draft_body,
+        "body_preview": draft_body[:150] if draft_body else "",
+        "based_on_decision": decision,
+        "original_review_item_id": item_id,
+        "document_analysis": doc_analyses,
+    }
+
+    async for session in get_session():
+        draft_item = InboxItemModel(
+            item_type="email_draft",
+            title=f"Draft: Re: {payload.get('subject', '')[:60]}",
+            summary=f"Draft response ({selected_option.get('label') if selected_option else decision}) to {payload.get('from_name') or payload.get('from', 'sender')}",
+            payload=draft_payload,
+            priority=item.priority,
+            source="email_review",
+            source_id=item_id,
+        )
+        session.add(draft_item)
+        await session.commit()
+        await session.refresh(draft_item)
+
+        logger.info(
+            "Created email draft from decision",
+            draft_id=draft_item.id,
+            original_item_id=item_id,
+            decision=decision,
+        )
+
+        # Mark the original review item as decided
+        await inbox.approve_item(item_id, decision_reason=f"Decision: {decision}")
+
+        await log_action(
+            "email_review_decided",
+            "web_ui",
+            summary=f"Decided on review ({decision}): {item.title[:50]}",
+            details={
+                "item_id": item_id,
+                "decision": decision,
+                "draft_id": str(draft_item.id),
+            }
+        )
+
+        # Return success message with link to see draft
+        return HTMLResponse(content=f"""
+            <div class="inbox-item" style="background: #dbeafe; border-color: #93c5fd;">
+                <div class="inbox-item-title" style="color: #1e40af;">
+                    ✓ Draft created: Re: {payload.get('subject', '')[:50]}
+                </div>
+                <div class="inbox-item-summary" style="margin-top: 0.5rem;">
+                    Decision: <strong>{selected_option.get('label') if selected_option else decision}</strong><br>
+                    <small>Check the Emails filter to review and send the draft.</small>
+                </div>
+            </div>
+        """)
+
+    return HTMLResponse(content="<div class='inbox-item'>Error creating draft</div>", status_code=500)
+
+
 @app.post("/api/inbox/{item_id}/reject", response_class=HTMLResponse)
 async def reject_inbox_item(
     item_id: str,

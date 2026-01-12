@@ -157,6 +157,109 @@ class GmailService:
 
         return self.service.users().history().list(**kwargs).execute()
 
+    def get_email_attachments(self, message_id: str) -> list[dict]:
+        """
+        Extract attachments from a Gmail message.
+
+        Downloads attachment data for each attachment in the message.
+
+        Args:
+            message_id: The Gmail message ID
+
+        Returns:
+            List of dicts with: filename, mime_type, size, data (bytes)
+        """
+        message = self.get_message(message_id, format="full")
+        attachments = []
+
+        def process_parts(parts: list[dict]) -> None:
+            """Recursively process message parts to find attachments."""
+            for part in parts:
+                filename = part.get("filename")
+                body = part.get("body", {})
+                attachment_id = body.get("attachmentId")
+
+                # If this part has a filename and attachment ID, it's an attachment
+                if filename and attachment_id:
+                    try:
+                        # Download the attachment data
+                        attachment = self.service.users().messages().attachments().get(
+                            userId="me",
+                            messageId=message_id,
+                            id=attachment_id,
+                        ).execute()
+
+                        # Decode the attachment data
+                        data = base64.urlsafe_b64decode(attachment["data"])
+
+                        attachments.append({
+                            "filename": filename,
+                            "mime_type": part.get("mimeType", "application/octet-stream"),
+                            "size": body.get("size", len(data)),
+                            "data": data,
+                        })
+
+                        logger.debug(
+                            "Extracted attachment",
+                            filename=filename,
+                            mime_type=part.get("mimeType"),
+                            size=body.get("size"),
+                        )
+                    except Exception as e:
+                        logger.error(
+                            "Failed to download attachment",
+                            filename=filename,
+                            message_id=message_id,
+                            error=str(e),
+                        )
+
+                # Recurse into nested parts
+                if part.get("parts"):
+                    process_parts(part["parts"])
+
+        payload = message.get("payload", {})
+        if payload.get("parts"):
+            process_parts(payload["parts"])
+
+        return attachments
+
+    def get_attachment_metadata(self, message_id: str) -> list[dict]:
+        """
+        Get metadata about attachments without downloading the data.
+
+        Useful for checking what attachments exist before deciding
+        whether to download them.
+
+        Args:
+            message_id: The Gmail message ID
+
+        Returns:
+            List of dicts with: filename, mime_type, size (no data)
+        """
+        message = self.get_message(message_id, format="full")
+        attachments = []
+
+        def process_parts(parts: list[dict]) -> None:
+            for part in parts:
+                filename = part.get("filename")
+                body = part.get("body", {})
+
+                if filename and body.get("attachmentId"):
+                    attachments.append({
+                        "filename": filename,
+                        "mime_type": part.get("mimeType", "application/octet-stream"),
+                        "size": body.get("size", 0),
+                    })
+
+                if part.get("parts"):
+                    process_parts(part["parts"])
+
+        payload = message.get("payload", {})
+        if payload.get("parts"):
+            process_parts(payload["parts"])
+
+        return attachments
+
 
 def parse_email_address(raw: str) -> tuple[str, str]:
     """
