@@ -237,9 +237,22 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Failed to set up Gmail watch", error=str(e))
 
+    # Start real-time notification subscriber for web UI
+    global _notification_subscriber_task
+    _notification_subscriber_task = asyncio.create_task(_notification_subscriber())
+    logger.info("Real-time notification subscriber started for web UI")
+
     yield
 
     # Cleanup
+    # Cancel notification subscriber
+    if _notification_subscriber_task:
+        _notification_subscriber_task.cancel()
+        try:
+            await _notification_subscriber_task
+        except asyncio.CancelledError:
+            pass
+
     try:
         await stop_triggers()
     except Exception:
@@ -278,8 +291,63 @@ from cognitex.web.auth import (
 from cognitex.config import get_settings
 from cognitex.db.redis import get_redis
 import structlog
+import asyncio
+import json
+from asyncio import Queue
 
 auth_logger = structlog.get_logger("auth")
+
+# -------------------------------------------------------------------
+# Real-time Notification System (SSE)
+# -------------------------------------------------------------------
+# Connected SSE clients for real-time notifications
+_notification_clients: set[Queue] = set()
+_notification_subscriber_task: asyncio.Task | None = None
+
+
+async def _notification_subscriber():
+    """Background task that subscribes to Redis notifications and broadcasts to SSE clients."""
+    logger = structlog.get_logger("notifications")
+    redis = get_redis()
+    pubsub = redis.pubsub()
+
+    try:
+        await pubsub.subscribe("cognitex:notifications")
+        logger.info("Web notification subscriber started")
+
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                try:
+                    data = message["data"]
+                    if isinstance(data, bytes):
+                        data = data.decode("utf-8")
+
+                    # Broadcast to all connected clients
+                    disconnected = set()
+                    for client_queue in _notification_clients:
+                        try:
+                            client_queue.put_nowait(data)
+                        except asyncio.QueueFull:
+                            disconnected.add(client_queue)
+
+                    # Clean up disconnected clients
+                    for q in disconnected:
+                        _notification_clients.discard(q)
+
+                    logger.debug(
+                        "Notification broadcast",
+                        clients=len(_notification_clients),
+                        data_preview=data[:100] if data else None
+                    )
+                except Exception as e:
+                    logger.warning("Failed to broadcast notification", error=str(e))
+    except asyncio.CancelledError:
+        logger.info("Notification subscriber cancelled")
+    except Exception as e:
+        logger.error("Notification subscriber error", error=str(e))
+    finally:
+        await pubsub.unsubscribe("cognitex:notifications")
+        await pubsub.close()
 
 
 async def get_current_user(request: Request) -> dict:
@@ -5116,6 +5184,52 @@ async def inbox_page(request: Request, type: str | None = None):
             "items": items,
             "recent_decisions": recent_decisions,
             "filter_type": type,
+        }
+    )
+
+
+# -------------------------------------------------------------------
+# Real-time Notifications SSE Endpoint
+# -------------------------------------------------------------------
+
+@app.get("/api/notifications/stream")
+async def notification_stream(request: Request):
+    """SSE endpoint for real-time notifications.
+
+    Clients connect here to receive notifications as they happen.
+    This provides real-time updates matching what Discord receives.
+    """
+    from fastapi.responses import StreamingResponse
+
+    # Create a queue for this client
+    client_queue: Queue = Queue(maxsize=50)
+    _notification_clients.add(client_queue)
+
+    async def generate():
+        try:
+            # Send initial connection confirmation
+            yield "event: connected\ndata: {\"status\": \"connected\"}\n\n"
+
+            while True:
+                try:
+                    # Wait for notifications with timeout for keepalive
+                    data = await asyncio.wait_for(client_queue.get(), timeout=30.0)
+                    yield f"event: notification\ndata: {data}\n\n"
+                except asyncio.TimeoutError:
+                    # Send keepalive ping
+                    yield "event: ping\ndata: {}\n\n"
+                except asyncio.CancelledError:
+                    break
+        finally:
+            _notification_clients.discard(client_queue)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
         }
     )
 

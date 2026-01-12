@@ -889,7 +889,7 @@
                 Inbox
                 <span id="inbox-badge"
                       hx-get="/api/inbox/count"
-                      hx-trigger="load, every 15s"
+                      hx-trigger="load, every 15s, refresh from:body"
                       hx-swap="innerHTML"
                       style="position: absolute; top: 5px; right: -8px;"></span>
             </a>
@@ -1218,6 +1218,138 @@
 
     document.addEventListener('DOMContentLoaded', initPeoplePickers);
     document.body.addEventListener('htmx:afterSwap', initPeoplePickers);
+
+    // -------------------------------------------------------------------
+    // Real-time Notifications (SSE)
+    // -------------------------------------------------------------------
+    let notificationSource = null;
+    let reconnectAttempts = 0;
+    const maxReconnectAttempts = 5;
+
+    function connectNotifications() {
+        if (notificationSource) {
+            notificationSource.close();
+        }
+
+        notificationSource = new EventSource('/api/notifications/stream');
+
+        notificationSource.addEventListener('connected', function(e) {
+            console.log('Notifications connected');
+            reconnectAttempts = 0;
+        });
+
+        notificationSource.addEventListener('notification', function(e) {
+            try {
+                const data = JSON.parse(e.data);
+                showNotificationToast(data);
+                // Also refresh inbox badge
+                refreshInboxBadge();
+            } catch (err) {
+                console.error('Failed to parse notification:', err);
+            }
+        });
+
+        notificationSource.addEventListener('ping', function(e) {
+            // Keepalive - do nothing
+        });
+
+        notificationSource.onerror = function(e) {
+            console.warn('Notification connection error, reconnecting...');
+            notificationSource.close();
+
+            if (reconnectAttempts < maxReconnectAttempts) {
+                reconnectAttempts++;
+                setTimeout(connectNotifications, 2000 * reconnectAttempts);
+            }
+        };
+    }
+
+    function showNotificationToast(data) {
+        // Create toast container if it doesn't exist
+        let container = document.getElementById('notification-toast-container');
+        if (!container) {
+            container = document.createElement('div');
+            container.id = 'notification-toast-container';
+            container.style.cssText = 'position: fixed; top: 70px; right: 20px; z-index: 9999; display: flex; flex-direction: column; gap: 10px; max-width: 400px;';
+            document.body.appendChild(container);
+        }
+
+        // Create toast
+        const toast = document.createElement('div');
+        const urgency = data.urgency || 'normal';
+        const borderColor = urgency === 'urgent' ? 'var(--danger)' : 'var(--primary)';
+
+        toast.style.cssText = `
+            background: white;
+            border-radius: 8px;
+            padding: 12px 16px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            border-left: 4px solid ${borderColor};
+            animation: slideIn 0.3s ease-out;
+            cursor: pointer;
+            transition: opacity 0.3s;
+        `;
+
+        // Parse message content
+        const message = data.message || 'New notification';
+        toast.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: start;">
+                <div style="flex: 1;">
+                    <div style="font-size: 0.85rem; color: #333;">${escapeHtml(message)}</div>
+                </div>
+                <button onclick="this.parentElement.parentElement.remove()"
+                        style="background: none; border: none; color: #999; cursor: pointer; font-size: 1.2rem; line-height: 1; padding: 0 0 0 10px;">&times;</button>
+            </div>
+        `;
+
+        // Click to go to inbox
+        toast.onclick = function(e) {
+            if (e.target.tagName !== 'BUTTON') {
+                window.location.href = '/inbox';
+            }
+        };
+
+        container.appendChild(toast);
+
+        // Auto-remove after 10 seconds
+        setTimeout(() => {
+            toast.style.opacity = '0';
+            setTimeout(() => toast.remove(), 300);
+        }, 10000);
+    }
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    function refreshInboxBadge() {
+        const badge = document.getElementById('inbox-badge');
+        if (badge) {
+            htmx.trigger(badge, 'refresh');
+        }
+    }
+
+    // Add CSS animation
+    const style = document.createElement('style');
+    style.textContent = `
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+    `;
+    document.head.appendChild(style);
+
+    // Connect when page loads
+    document.addEventListener('DOMContentLoaded', connectNotifications);
+
+    // Reconnect when page becomes visible again
+    document.addEventListener('visibilitychange', function() {
+        if (!document.hidden && (!notificationSource || notificationSource.readyState === EventSource.CLOSED)) {
+            connectNotifications();
+        }
+    });
 
     // Task rejection feedback - two-stage UI
     function selectTaskRejectReason(taskId, reason, label) {
