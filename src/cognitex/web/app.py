@@ -2497,9 +2497,18 @@ async def get_suggested_blocks() -> list[dict]:
     return []
 
 
-@app.get("/twin", response_class=HTMLResponse)
-async def twin_page(request: Request):
-    """Digital Twin configuration page - configure agent persona and voice."""
+@app.get("/twin")
+async def twin_redirect():
+    """Redirect to settings Agent tab."""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/settings?tab=agent", status_code=302)
+
+
+@app.get("/twin_DEPRECATED", response_class=HTMLResponse)
+async def twin_page_deprecated(request: Request):
+    """Digital Twin configuration page - configure agent persona and voice.
+    DEPRECATED: Now part of unified Settings page.
+    """
     from cognitex.db.postgres import get_session
     from cognitex.db.neo4j import get_neo4j_session
     from sqlalchemy import text
@@ -2542,14 +2551,14 @@ async def twin_page(request: Request):
     async for session in get_session():
         try:
             result = await session.execute(text("""
-                SELECT rule_value FROM preference_rules
+                SELECT preference FROM preference_rules
                 WHERE rule_type = 'twin_settings'
                 LIMIT 1
             """))
             row = result.fetchone()
             if row and row[0]:
                 import json
-                settings = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+                settings = row[0] if isinstance(row[0], dict) else json.loads(row[0])
         except Exception:
             pass
         break
@@ -2609,28 +2618,19 @@ async def save_twin_settings(
 
     async for session in get_session():
         try:
-            # Upsert settings
+            # Delete existing then insert (simple approach)
             await session.execute(text("""
-                INSERT INTO preference_rules (id, rule_type, rule_value, source, created_at)
-                VALUES (:id, 'twin_settings', :value, 'user', NOW())
-                ON CONFLICT (rule_type) WHERE rule_type = 'twin_settings'
-                DO UPDATE SET rule_value = :value, updated_at = NOW()
-            """), {"id": f"pref_{uuid.uuid4().hex[:12]}", "value": json.dumps(settings)})
+                DELETE FROM preference_rules WHERE rule_type = 'twin_settings'
+            """))
+            await session.execute(text("""
+                INSERT INTO preference_rules (id, rule_type, rule_name, condition, preference, source_trace_ids, created_at)
+                VALUES (:id, 'twin_settings', 'Voice & Tone Settings', '{}'::jsonb, :pref, ARRAY['user'], NOW())
+            """), {"id": f"pref_{uuid.uuid4().hex[:12]}", "pref": json.dumps(settings)})
             await session.commit()
             logger.info("Twin settings saved", settings=settings)
         except Exception as e:
-            # Try simpler update if constraint doesn't exist
-            try:
-                await session.execute(text("""
-                    DELETE FROM preference_rules WHERE rule_type = 'twin_settings'
-                """))
-                await session.execute(text("""
-                    INSERT INTO preference_rules (id, rule_type, rule_value, source, created_at)
-                    VALUES (:id, 'twin_settings', :value, 'user', NOW())
-                """), {"id": f"pref_{uuid.uuid4().hex[:12]}", "value": json.dumps(settings)})
-                await session.commit()
-            except Exception as e2:
-                logger.warning("Failed to save twin settings", error=str(e2))
+            await session.rollback()
+            logger.warning("Failed to save twin settings", error=str(e))
         break
 
     return {"success": True}
@@ -4276,9 +4276,18 @@ async def reject_block_with_feedback(
 # -------------------------------------------------------------------
 
 
-@app.get("/state", response_class=HTMLResponse)
-async def state_page(request: Request):
-    """Operating state and mode management page."""
+@app.get("/state")
+async def state_redirect():
+    """Redirect to settings State tab."""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/settings?tab=state", status_code=302)
+
+
+@app.get("/state_DEPRECATED", response_class=HTMLResponse)
+async def state_page_deprecated(request: Request):
+    """Operating state and mode management page.
+    DEPRECATED: Now part of unified Settings page.
+    """
     estimator = get_state_estimator()
 
     # Infer fresh state based on current time and conditions
@@ -7030,36 +7039,39 @@ async def api_analyze_node(
 
 
 @app.get("/settings", response_class=HTMLResponse)
-async def settings_page(request: Request):
-    """Settings page for model configuration."""
+async def settings_page(request: Request, tab: str = "general"):
+    """Unified settings page with tabs for General, Agent, State, Integrations."""
     from cognitex.services.model_config import get_model_config_service
-    from cognitex.db.neo4j import get_driver
+    from cognitex.db.neo4j import get_driver, get_neo4j_session
+    from cognitex.db.postgres import get_session
+    from sqlalchemy import text
 
+    # Initialize all template variables
+    template_data = {
+        "request": request,
+        "tab": tab,
+    }
+
+    # --- General Tab Data ---
     service = get_model_config_service()
     config = await service.get_config()
-
-    # Get models for the current provider
     chat_models = service.get_chat_models_for_provider(config.provider)
     embedding_models = service.get_embedding_models_for_provider(config.embedding_provider)
-
-    # Get available providers with API key status
     providers = service.get_available_providers()
 
-    # Check if config is from Redis or defaults
     import redis.asyncio as aioredis
     from cognitex.config import get_settings
-    settings = get_settings()
-    redis = aioredis.from_url(settings.redis_url)
+    app_settings = get_settings()
+    redis_client = aioredis.from_url(app_settings.redis_url)
     try:
-        has_redis_config = await redis.exists("cognitex:model_config")
+        has_redis_config = await redis_client.exists("cognitex:model_config")
         config_source = "redis" if has_redis_config else "env"
     except Exception:
         config_source = "env"
     finally:
-        await redis.close()
+        await redis_client.close()
 
-    # Get sync API key and session stats
-    sync_api_key = settings.sync_api_key.get_secret_value()
+    sync_api_key = app_settings.sync_api_key.get_secret_value()
     sync_session_count = 0
     sync_machine_count = 0
 
@@ -7078,20 +7090,121 @@ async def settings_page(request: Request):
     except Exception:
         pass
 
-    return templates.TemplateResponse(
-        "settings.html",
-        {
-            "request": request,
-            "config": config,
-            "config_source": config_source,
-            "chat_models": chat_models,
-            "embedding_models": embedding_models,
-            "providers": providers,
-            "sync_api_key": sync_api_key,
-            "sync_session_count": sync_session_count,
-            "sync_machine_count": sync_machine_count,
+    template_data.update({
+        "config": config,
+        "config_source": config_source,
+        "chat_models": chat_models,
+        "embedding_models": embedding_models,
+        "providers": providers,
+        "sync_api_key": sync_api_key,
+        "sync_session_count": sync_session_count,
+        "sync_machine_count": sync_machine_count,
+    })
+
+    # --- Agent Tab Data ---
+    approved_drafts = 0
+    approved_tasks = 0
+    learning_samples = 0
+    twin_settings = {}
+    recent_emails = []
+
+    async for session in get_session():
+        try:
+            result = await session.execute(text("""
+                SELECT COUNT(*) FROM inbox_feedback
+                WHERE item_type = 'email_draft' AND action = 'approved'
+            """))
+            row = result.fetchone()
+            approved_drafts = row[0] if row else 0
+
+            result = await session.execute(text("""
+                SELECT COUNT(*) FROM inbox_feedback
+                WHERE item_type = 'task_proposal' AND action = 'approved'
+            """))
+            row = result.fetchone()
+            approved_tasks = row[0] if row else 0
+
+            result = await session.execute(text("""
+                SELECT COUNT(*) FROM inbox_feedback
+            """))
+            row = result.fetchone()
+            learning_samples = row[0] if row else 0
+
+            result = await session.execute(text("""
+                SELECT preference FROM preference_rules
+                WHERE rule_type = 'twin_settings'
+                LIMIT 1
+            """))
+            row = result.fetchone()
+            if row and row[0]:
+                twin_settings = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+        except Exception as e:
+            logger.debug("Could not get agent tab stats", error=str(e))
+        break
+
+    async for neo_session in get_neo4j_session():
+        try:
+            result = await neo_session.run("""
+                MATCH (d:EmailDraft)
+                WHERE d.status = 'approved'
+                RETURN d.to as to, d.subject as subject, d.body as body,
+                       d.approved_at as approved_at
+                ORDER BY d.approved_at DESC
+                LIMIT 5
+            """)
+            recent_emails = await result.data()
+        except Exception:
+            pass
+        break
+
+    template_data.update({
+        "agent_stats": {
+            "approved_drafts": approved_drafts,
+            "approved_tasks": approved_tasks,
+            "learning_samples": learning_samples,
         },
-    )
+        "twin_settings": twin_settings,
+        "recent_emails": recent_emails,
+    })
+
+    # --- State Tab Data ---
+    estimator = get_state_estimator()
+    calendar_events = await get_today_events()
+    state = await estimator.infer_state(calendar_events=calendar_events)
+
+    if not state:
+        state = UserState(
+            mode=OperatingMode.FRAGMENTED,
+            signals=ContinuousSignals(),
+        )
+
+    rules = ModeRules.get_rules(state.mode)
+    mode_description = rules.get("description", "")
+
+    firewall = get_interruption_firewall()
+    captured_items = await firewall.get_queued_items(limit=10)
+    switch_stats = await firewall.get_daily_switch_stats()
+
+    captured_dicts = [
+        {
+            "subject": item.subject,
+            "source": item.source,
+            "urgency": item.urgency.value,
+            "suggested_action": item.suggested_action,
+        }
+        for item in captured_items
+    ]
+
+    template_data.update({
+        "state": state,
+        "rules": rules,
+        "mode_description": mode_description,
+        "available_modes": list(OperatingMode),
+        "captured_items": captured_dicts,
+        "switch_stats": switch_stats,
+    })
+
+    return templates.TemplateResponse("settings.html", template_data)
 
 
 @app.post("/api/settings/models", response_class=HTMLResponse)

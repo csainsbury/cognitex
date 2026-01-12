@@ -5,302 +5,518 @@
 {% block content %}
 <h1>Settings</h1>
 
-<div class="two-col">
-    <div>
-        <div class="card">
-            <h2>LLM Provider</h2>
-            <p style="color: #666; font-size: 0.9rem; margin-bottom: 1rem;">
-                Select which AI provider to use for chat/reasoning tasks.
-            </p>
+<!-- Tab Navigation -->
+<div class="settings-tabs">
+    <a href="/settings?tab=general" class="tab {% if tab == 'general' or not tab %}active{% endif %}">General</a>
+    <a href="/settings?tab=agent" class="tab {% if tab == 'agent' %}active{% endif %}">Agent</a>
+    <a href="/settings?tab=state" class="tab {% if tab == 'state' %}active{% endif %}">State</a>
+    <a href="/settings?tab=integrations" class="tab {% if tab == 'integrations' %}active{% endif %}">Integrations</a>
+</div>
 
-            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem;">
-                {% for p in providers %}
-                <button class="btn {% if p.id == config.provider %}btn-primary{% else %}btn-secondary{% endif %}"
-                        {% if not p.has_api_key %}disabled title="No API key configured"{% endif %}
-                        hx-post="/api/settings/provider/{{ p.id }}"
-                        hx-target="body"
-                        hx-swap="outerHTML">
-                    {{ p.name }}
-                    {% if not p.has_api_key %}<span style="opacity: 0.6;">(no key)</span>{% endif %}
-                </button>
-                {% endfor %}
-            </div>
-        </div>
+<!-- General Tab -->
+{% if tab == 'general' or not tab %}
+<div class="tab-content">
+    <div class="two-col">
+        <div>
+            <div class="card">
+                <h2>LLM Provider</h2>
+                <p style="color: #666; font-size: 0.9rem; margin-bottom: 1rem;">
+                    Select which AI provider to use for chat/reasoning tasks.
+                </p>
 
-        <div class="card">
-            <h2>Model Configuration</h2>
-            <p style="color: #666; font-size: 0.9rem; margin-bottom: 1rem;">
-                Configure which models to use for different purposes. Changes take effect immediately.
-            </p>
-
-            <form id="model-form" hx-post="/api/settings/models" hx-swap="outerHTML" hx-target="#save-result">
-                <input type="hidden" name="provider" value="{{ config.provider }}">
-                <table>
-                    <tr>
-                        <td style="width: 150px; font-weight: 500;">Planner Model</td>
-                        <td>
-                            <select name="planner_model" style="width: 100%;">
-                                {% for model in chat_models %}
-                                <option value="{{ model.id }}" {% if model.id == config.planner_model %}selected{% endif %}>
-                                    {{ model.display_name }}
-                                    {% if model.context_length %}({{ (model.context_length / 1000)|int }}k ctx){% endif %}
-                                </option>
-                                {% endfor %}
-                            </select>
-                            <div style="font-size: 0.8rem; color: #666; margin-top: 0.25rem;">
-                                Used for reasoning, planning, and decision making
-                            </div>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td style="font-weight: 500;">Executor Model</td>
-                        <td>
-                            <select name="executor_model" style="width: 100%;">
-                                {% for model in chat_models %}
-                                <option value="{{ model.id }}" {% if model.id == config.executor_model %}selected{% endif %}>
-                                    {{ model.display_name }}
-                                    {% if model.context_length %}({{ (model.context_length / 1000)|int }}k ctx){% endif %}
-                                </option>
-                                {% endfor %}
-                            </select>
-                            <div style="font-size: 0.8rem; color: #666; margin-top: 0.25rem;">
-                                Used for email drafting, task execution, structured outputs
-                            </div>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td style="font-weight: 500;">Embedding Model</td>
-                        <td>
-                            <select name="embedding_model" style="width: 100%;">
-                                {% for model in embedding_models %}
-                                <option value="{{ model.id }}" {% if model.id == config.embedding_model %}selected{% endif %}>
-                                    {{ model.display_name }}
-                                </option>
-                                {% endfor %}
-                            </select>
-                            <div style="font-size: 0.8rem; color: #666; margin-top: 0.25rem;">
-                                Used for document/code embeddings and semantic search
-                                {% if config.embedding_provider != config.provider %}
-                                (via {{ config.embedding_provider|title }})
-                                {% endif %}
-                            </div>
-                        </td>
-                    </tr>
-                </table>
-
-                <div style="margin-top: 1rem; display: flex; gap: 0.5rem; align-items: center;">
-                    <button type="submit" class="btn btn-primary">Save Changes</button>
-                    <button type="button" class="btn btn-secondary"
-                            hx-post="/api/settings/models/reset"
+                <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem;">
+                    {% for p in providers %}
+                    <button class="btn {% if p.id == config.provider %}btn-primary{% else %}btn-secondary{% endif %}"
+                            {% if not p.has_api_key %}disabled title="No API key configured"{% endif %}
+                            hx-post="/api/settings/provider/{{ p.id }}"
                             hx-target="body"
                             hx-swap="outerHTML">
-                        Reset to Defaults
+                        {{ p.name }}
+                        {% if not p.has_api_key %}<span style="opacity: 0.6;">(no key)</span>{% endif %}
                     </button>
-                    <span id="save-result"></span>
-                </div>
-            </form>
-        </div>
-
-        <div class="card">
-            <h2>Current Configuration</h2>
-            <table>
-                <tr>
-                    <th>Setting</th>
-                    <th>Value</th>
-                    <th>Source</th>
-                </tr>
-                <tr>
-                    <td>Provider</td>
-                    <td><strong>{{ config.provider|title }}</strong></td>
-                    <td><span class="badge {% if config_source == 'redis' %}badge-active{% else %}badge-pending{% endif %}">{{ config_source }}</span></td>
-                </tr>
-                <tr>
-                    <td>Planner</td>
-                    <td><code style="font-size: 0.8rem;">{{ config.planner_model }}</code></td>
-                    <td></td>
-                </tr>
-                <tr>
-                    <td>Executor</td>
-                    <td><code style="font-size: 0.8rem;">{{ config.executor_model }}</code></td>
-                    <td></td>
-                </tr>
-                <tr>
-                    <td>Embedding</td>
-                    <td><code style="font-size: 0.8rem;">{{ config.embedding_model }}</code></td>
-                    <td></td>
-                </tr>
-            </table>
-            <p style="font-size: 0.8rem; color: #666; margin-top: 0.5rem;">
-                Source: <strong>redis</strong> = runtime override saved, <strong>env</strong> = using environment/config defaults
-            </p>
-        </div>
-    </div>
-
-    <div>
-        <div class="card">
-            <h2>Quick Presets</h2>
-            <p style="color: #666; font-size: 0.85rem; margin-bottom: 1rem;">
-                Common model configurations
-            </p>
-
-            <div style="display: flex; flex-direction: column; gap: 0.5rem;">
-                <strong style="font-size: 0.85rem; color: #666;">Together.ai</strong>
-                <button class="btn btn-secondary"
-                        hx-post="/api/settings/models/preset/together-performance"
-                        hx-target="body"
-                        hx-swap="outerHTML">
-                    DeepSeek V3 (Performance)
-                </button>
-                <button class="btn btn-secondary"
-                        hx-post="/api/settings/models/preset/together-reasoning"
-                        hx-target="body"
-                        hx-swap="outerHTML">
-                    DeepSeek R1 (Deep Reasoning)
-                </button>
-                <button class="btn btn-secondary"
-                        hx-post="/api/settings/models/preset/together-fast"
-                        hx-target="body"
-                        hx-swap="outerHTML">
-                    Llama 3.1 8B (Fast/Cheap)
-                </button>
-
-                <strong style="font-size: 0.85rem; color: #666; margin-top: 0.5rem;">Anthropic</strong>
-                <button class="btn btn-secondary"
-                        hx-post="/api/settings/models/preset/anthropic-sonnet"
-                        hx-target="body"
-                        hx-swap="outerHTML">
-                    Claude Sonnet 4
-                </button>
-                <button class="btn btn-secondary"
-                        hx-post="/api/settings/models/preset/anthropic-opus"
-                        hx-target="body"
-                        hx-swap="outerHTML">
-                    Claude Opus 4 (Most Capable)
-                </button>
-
-                <strong style="font-size: 0.85rem; color: #666; margin-top: 0.5rem;">OpenAI</strong>
-                <button class="btn btn-secondary"
-                        hx-post="/api/settings/models/preset/openai-gpt4o"
-                        hx-target="body"
-                        hx-swap="outerHTML">
-                    GPT-4o
-                </button>
-                <button class="btn btn-secondary"
-                        hx-post="/api/settings/models/preset/openai-o1"
-                        hx-target="body"
-                        hx-swap="outerHTML">
-                    o1 (Reasoning)
-                </button>
-
-                <strong style="font-size: 0.85rem; color: #666; margin-top: 0.5rem;">Google</strong>
-                <button class="btn btn-secondary"
-                        hx-post="/api/settings/models/preset/google-gemini"
-                        hx-target="body"
-                        hx-swap="outerHTML">
-                    Gemini 3 Flash (Fast)
-                </button>
-                <button class="btn btn-secondary"
-                        hx-post="/api/settings/models/preset/google-gemini-pro"
-                        hx-target="body"
-                        hx-swap="outerHTML">
-                    Gemini 3 Pro (Latest)
-                </button>
-            </div>
-        </div>
-
-        <div class="card">
-            <h2>API Keys</h2>
-            <p style="color: #666; font-size: 0.85rem; margin-bottom: 0.5rem;">
-                Configure API keys in your <code>.env</code> file:
-            </p>
-            <pre style="background: #f5f5f5; padding: 0.5rem; font-size: 0.75rem; overflow-x: auto;">
-TOGETHER_API_KEY=...
-ANTHROPIC_API_KEY=...
-OPENAI_API_KEY=...
-GOOGLE_AI_API_KEY=...</pre>
-            <p style="font-size: 0.8rem; color: #666; margin-top: 0.5rem;">
-                {% for p in providers %}
-                {{ p.name }}: {% if p.has_api_key %}<span style="color: #16a34a;">configured</span>{% else %}<span style="color: #dc2626;">not set</span>{% endif %}{% if not loop.last %} | {% endif %}
-                {% endfor %}
-            </p>
-        </div>
-
-        <div class="card">
-            <h2>Remote Session Sync</h2>
-            <p style="color: #666; font-size: 0.85rem; margin-bottom: 1rem;">
-                Sync coding sessions from other machines (laptop, workstation) to capture development context.
-            </p>
-
-            <div style="margin-bottom: 1rem;">
-                <strong style="font-size: 0.9rem;">Sync API Key</strong>
-                <div style="display: flex; gap: 0.5rem; align-items: center; margin-top: 0.25rem;">
-                    {% if sync_api_key %}
-                    <code style="background: #f5f5f5; padding: 0.25rem 0.5rem; font-size: 0.8rem;">
-                        {{ sync_api_key[:8] }}...{{ sync_api_key[-4:] }}
-                    </code>
-                    <button class="btn btn-secondary" style="font-size: 0.75rem; padding: 0.25rem 0.5rem;"
-                            onclick="navigator.clipboard.writeText('{{ sync_api_key }}'); this.textContent='Copied!'; setTimeout(() => this.textContent='Copy', 2000);">
-                        Copy
-                    </button>
-                    {% else %}
-                    <span style="color: #dc2626;">Not configured</span>
-                    <span style="font-size: 0.8rem; color: #666;">Set SYNC_API_KEY in .env</span>
-                    {% endif %}
+                    {% endfor %}
                 </div>
             </div>
 
-            <div style="margin-bottom: 1rem;">
-                <strong style="font-size: 0.9rem;">Sessions Synced</strong>
-                <div style="font-size: 0.85rem; color: #666;">
-                    {{ sync_session_count }} coding sessions from {{ sync_machine_count }} machine(s)
+            <div class="card">
+                <h2>Model Configuration</h2>
+                <p style="color: #666; font-size: 0.9rem; margin-bottom: 1rem;">
+                    Configure which models to use for different purposes.
+                </p>
+
+                <form id="model-form" hx-post="/api/settings/models" hx-swap="outerHTML" hx-target="#save-result">
+                    <input type="hidden" name="provider" value="{{ config.provider }}">
+                    <table>
+                        <tr>
+                            <td style="width: 150px; font-weight: 500;">Planner Model</td>
+                            <td>
+                                <select name="planner_model" style="width: 100%;">
+                                    {% for model in chat_models %}
+                                    <option value="{{ model.id }}" {% if model.id == config.planner_model %}selected{% endif %}>
+                                        {{ model.display_name }}
+                                        {% if model.context_length %}({{ (model.context_length / 1000)|int }}k ctx){% endif %}
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="font-weight: 500;">Executor Model</td>
+                            <td>
+                                <select name="executor_model" style="width: 100%;">
+                                    {% for model in chat_models %}
+                                    <option value="{{ model.id }}" {% if model.id == config.executor_model %}selected{% endif %}>
+                                        {{ model.display_name }}
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="font-weight: 500;">Embedding Model</td>
+                            <td>
+                                <select name="embedding_model" style="width: 100%;">
+                                    {% for model in embedding_models %}
+                                    <option value="{{ model.id }}" {% if model.id == config.embedding_model %}selected{% endif %}>
+                                        {{ model.display_name }}
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                            </td>
+                        </tr>
+                    </table>
+
+                    <div style="margin-top: 1rem; display: flex; gap: 0.5rem; align-items: center;">
+                        <button type="submit" class="btn btn-primary">Save Changes</button>
+                        <button type="button" class="btn btn-secondary"
+                                hx-post="/api/settings/models/reset"
+                                hx-target="body"
+                                hx-swap="outerHTML">
+                            Reset to Defaults
+                        </button>
+                        <span id="save-result"></span>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <div>
+            <div class="card">
+                <h2>Quick Presets</h2>
+                <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                    <strong style="font-size: 0.85rem; color: #666;">Together.ai</strong>
+                    <button class="btn btn-secondary" hx-post="/api/settings/models/preset/together-performance" hx-target="body" hx-swap="outerHTML">DeepSeek V3</button>
+                    <button class="btn btn-secondary" hx-post="/api/settings/models/preset/together-reasoning" hx-target="body" hx-swap="outerHTML">DeepSeek R1</button>
+
+                    <strong style="font-size: 0.85rem; color: #666; margin-top: 0.5rem;">Anthropic</strong>
+                    <button class="btn btn-secondary" hx-post="/api/settings/models/preset/anthropic-sonnet" hx-target="body" hx-swap="outerHTML">Claude Sonnet 4</button>
+                    <button class="btn btn-secondary" hx-post="/api/settings/models/preset/anthropic-opus" hx-target="body" hx-swap="outerHTML">Claude Opus 4</button>
+
+                    <strong style="font-size: 0.85rem; color: #666; margin-top: 0.5rem;">OpenAI</strong>
+                    <button class="btn btn-secondary" hx-post="/api/settings/models/preset/openai-gpt4o" hx-target="body" hx-swap="outerHTML">GPT-4o</button>
+
+                    <strong style="font-size: 0.85rem; color: #666; margin-top: 0.5rem;">Google</strong>
+                    <button class="btn btn-secondary" hx-post="/api/settings/models/preset/google-gemini" hx-target="body" hx-swap="outerHTML">Gemini 3 Flash</button>
                 </div>
             </div>
 
-            <details style="margin-top: 1rem;">
-                <summary style="cursor: pointer; font-weight: 500; color: #2563eb;">
-                    Setup Instructions
-                </summary>
-                <div style="margin-top: 0.75rem; padding: 0.75rem; background: #f8fafc; border-radius: 4px;">
-                    <p style="font-size: 0.85rem; margin-bottom: 0.75rem;">
-                        <strong>1. Install cognitex-sync on your local machine:</strong>
-                    </p>
-                    <pre style="background: #1e293b; color: #e2e8f0; padding: 0.5rem; font-size: 0.75rem; border-radius: 4px; overflow-x: auto;">
-# Download and install
-curl -sSL {{ request.url_for('download_sync_installer') }} | bash
+            <div class="card">
+                <h2>API Keys</h2>
+                <p style="color: #666; font-size: 0.85rem; margin-bottom: 0.5rem;">
+                    Configure API keys in your <code>.env</code> file.
+                </p>
+                <p style="font-size: 0.8rem; color: #666;">
+                    {% for p in providers %}
+                    {{ p.name }}: {% if p.has_api_key %}<span style="color: #16a34a;">configured</span>{% else %}<span style="color: #dc2626;">not set</span>{% endif %}{% if not loop.last %} | {% endif %}
+                    {% endfor %}
+                </p>
+            </div>
 
-# Or manually with pip
-pip install cognitex-sync</pre>
-
-                    <p style="font-size: 0.85rem; margin: 0.75rem 0;">
-                        <strong>2. Configure with your server:</strong>
-                    </p>
-                    <pre style="background: #1e293b; color: #e2e8f0; padding: 0.5rem; font-size: 0.75rem; border-radius: 4px; overflow-x: auto;">
-cognitex-sync configure \
-  --server {{ request.base_url }} \
-  --api-key {{ sync_api_key or 'YOUR_API_KEY' }}</pre>
-
-                    <p style="font-size: 0.85rem; margin: 0.75rem 0;">
-                        <strong>3. Sync your sessions:</strong>
-                    </p>
-                    <pre style="background: #1e293b; color: #e2e8f0; padding: 0.5rem; font-size: 0.75rem; border-radius: 4px; overflow-x: auto;">
-# One-time sync
-cognitex-sync push
-
-# Or run as background daemon
-cognitex-sync daemon --interval 30</pre>
-
-                    <p style="font-size: 0.8rem; color: #666; margin-top: 0.75rem;">
-                        Supports: Claude Code, with more CLI tools coming soon.
-                    </p>
+            <div class="card">
+                <h2>Remote Session Sync</h2>
+                <p style="color: #666; font-size: 0.85rem; margin-bottom: 0.5rem;">
+                    {{ sync_session_count }} sessions from {{ sync_machine_count }} machine(s)
+                </p>
+                {% if sync_api_key %}
+                <div style="display: flex; gap: 0.5rem; align-items: center;">
+                    <code style="background: #f5f5f5; padding: 0.25rem 0.5rem; font-size: 0.75rem;">{{ sync_api_key[:8] }}...{{ sync_api_key[-4:] }}</code>
+                    <button class="btn btn-secondary" style="font-size: 0.7rem; padding: 0.2rem 0.4rem;"
+                            onclick="navigator.clipboard.writeText('{{ sync_api_key }}'); this.textContent='Copied!';">Copy</button>
                 </div>
-            </details>
-
-            <div style="margin-top: 1rem;">
-                <a href="{{ request.url_for('download_sync_package') }}" class="btn btn-secondary" style="font-size: 0.85rem;">
-                    Download cognitex-sync Package
-                </a>
+                {% endif %}
             </div>
         </div>
     </div>
 </div>
+{% endif %}
+
+<!-- Agent Tab -->
+{% if tab == 'agent' %}
+<div class="tab-content">
+    <p style="color: #666; margin-bottom: 1.5rem;">
+        Configure how your agent represents you in communications and actions.
+    </p>
+
+    <div class="stats">
+        <div class="stat">
+            <div class="stat-value">{{ agent_stats.approved_drafts }}</div>
+            <div class="stat-label">Emails Approved</div>
+        </div>
+        <div class="stat">
+            <div class="stat-value">{{ agent_stats.approved_tasks }}</div>
+            <div class="stat-label">Tasks Approved</div>
+        </div>
+        <div class="stat">
+            <div class="stat-value">{{ agent_stats.learning_samples }}</div>
+            <div class="stat-label">Learning Samples</div>
+        </div>
+    </div>
+
+    <div class="two-col">
+        <div>
+            <div class="card">
+                <h2>Voice & Tone</h2>
+                <p style="color: #666; margin-bottom: 1rem; font-size: 0.9rem;">
+                    Baseline guidance for agent communications.
+                </p>
+
+                <form hx-post="/api/twin/settings" hx-swap="none" class="twin-settings-form">
+                    <div class="form-group">
+                        <label for="formality">Formality Level</label>
+                        <select name="formality" id="formality">
+                            <option value="casual" {% if twin_settings.formality == 'casual' %}selected{% endif %}>Casual</option>
+                            <option value="balanced" {% if twin_settings.formality == 'balanced' or not twin_settings.formality %}selected{% endif %}>Balanced</option>
+                            <option value="formal" {% if twin_settings.formality == 'formal' %}selected{% endif %}>Formal</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="brevity">Response Length</label>
+                        <select name="brevity" id="brevity">
+                            <option value="concise" {% if twin_settings.brevity == 'concise' %}selected{% endif %}>Concise</option>
+                            <option value="balanced" {% if twin_settings.brevity == 'balanced' or not twin_settings.brevity %}selected{% endif %}>Balanced</option>
+                            <option value="detailed" {% if twin_settings.brevity == 'detailed' %}selected{% endif %}>Detailed</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="signature">Email Signature</label>
+                        <textarea name="signature" id="signature" rows="2" placeholder="Best regards,&#10;Chris">{{ twin_settings.signature or '' }}</textarea>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary">Save Settings</button>
+                </form>
+            </div>
+        </div>
+
+        <div>
+            <div class="card">
+                <h2>Recent Approved Emails</h2>
+                <p style="color: #666; margin-bottom: 1rem; font-size: 0.9rem;">
+                    Examples the agent uses to match your style.
+                </p>
+
+                {% if recent_emails %}
+                <div class="recent-emails-list">
+                    {% for email in recent_emails[:5] %}
+                    <div class="email-example">
+                        <strong>To:</strong> {{ email.to }}<br>
+                        <strong>Subject:</strong> {{ email.subject }}<br>
+                        <em style="font-size: 0.85rem; color: #666;">{{ email.body[:100] }}...</em>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <div class="empty">
+                    No approved emails yet. Approve drafts from the <a href="/inbox?type=email_draft">Inbox</a>.
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<!-- State Tab -->
+{% if tab == 'state' %}
+<div class="tab-content">
+    <div class="two-col">
+        <div>
+            <div class="card">
+                <div class="card-header">
+                    <h2>Current Mode</h2>
+                    <span class="mode-badge mode-{{ state.mode.value }}">{{ state.mode.value | replace('_', ' ') | title }}</span>
+                </div>
+                <p style="color: #666; margin-top: 0.5rem;">{{ mode_description }}</p>
+
+                <h3 style="margin-top: 1rem; margin-bottom: 0.5rem; font-size: 1rem;">Switch Mode</h3>
+                <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
+                    {% for mode in available_modes %}
+                    <button class="btn {% if mode.value == state.mode.value %}btn-primary{% else %}btn-secondary{% endif %}"
+                            hx-post="/api/state/update?mode={{ mode.value }}"
+                            hx-swap="none"
+                            onclick="location.reload()">
+                        {{ mode.value | replace('_', ' ') | title }}
+                    </button>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Continuous Signals</h2>
+                <div style="display: grid; gap: 1rem; margin-top: 0.5rem;">
+                    <div>
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.25rem;">
+                            <span style="font-weight: 500;">Fatigue Level</span>
+                            <span>{{ (state.signals.fatigue_level * 100)|int }}%</span>
+                        </div>
+                        <div class="signal-bar" style="height: 12px;">
+                            <div class="signal-fill {% if state.signals.fatigue_level < 0.4 %}low{% elif state.signals.fatigue_level < 0.7 %}medium{% else %}high{% endif %}"
+                                 style="width: {{ (state.signals.fatigue_level * 100)|int }}%"></div>
+                        </div>
+                        <div style="display: flex; gap: 0.5rem; margin-top: 0.25rem;">
+                            <button class="btn btn-sm btn-secondary" hx-post="/api/state/signal?fatigue_delta=-0.1" hx-swap="none" onclick="location.reload()">-</button>
+                            <button class="btn btn-sm btn-secondary" hx-post="/api/state/signal?fatigue_delta=0.1" hx-swap="none" onclick="location.reload()">+</button>
+                        </div>
+                    </div>
+
+                    <div>
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.25rem;">
+                            <span style="font-weight: 500;">Interruption Pressure</span>
+                            <span>{{ (state.signals.interruption_pressure * 100)|int }}%</span>
+                        </div>
+                        <div class="signal-bar" style="height: 12px;">
+                            <div class="signal-fill {% if state.signals.interruption_pressure < 0.4 %}low{% elif state.signals.interruption_pressure < 0.7 %}medium{% else %}high{% endif %}"
+                                 style="width: {{ (state.signals.interruption_pressure * 100)|int }}%"></div>
+                        </div>
+                    </div>
+
+                    <div>
+                        <div style="display: flex; justify-content: space-between;">
+                            <span style="font-weight: 500;">Available Block</span>
+                            <span style="font-weight: 600;">
+                                {% if state.signals.available_block_minutes %}{{ state.signals.available_block_minutes }} min{% else %}Not set{% endif %}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div>
+            <div class="card">
+                <h2>Mode Rules</h2>
+                <table>
+                    <tr><th>Setting</th><th>Value</th></tr>
+                    <tr><td>Allowed Tasks</td><td>{{ rules.allowed_task_types | join(', ') }}</td></tr>
+                    <tr><td>Max Friction</td><td>{{ rules.max_task_friction }}/5</td></tr>
+                    <tr><td>Notification Gate</td><td><span class="badge">{{ rules.notification_gate }}</span></td></tr>
+                    <tr><td>Interrupt For</td><td>{{ rules.interrupt_for | join(', ') or 'None' }}</td></tr>
+                </table>
+            </div>
+
+            <div class="card">
+                <h2>Today's Switch Stats</h2>
+                <div class="stats" style="margin-bottom: 0; flex-wrap: wrap;">
+                    <div class="stat">
+                        <div class="stat-value">{{ switch_stats.total_switches }}</div>
+                        <div class="stat-label">Switches</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value">{{ switch_stats.interrupted_switches }}</div>
+                        <div class="stat-label">Interrupted</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value">{{ switch_stats.estimated_recovery_minutes }}</div>
+                        <div class="stat-label">Recovery Min</div>
+                    </div>
+                </div>
+            </div>
+
+            {% if captured_items %}
+            <div class="card">
+                <h2>Captured Items</h2>
+                <ul style="list-style: none; padding: 0;">
+                    {% for item in captured_items %}
+                    <li style="padding: 0.5rem 0; border-bottom: 1px solid #eee;">
+                        <div style="display: flex; justify-content: space-between;">
+                            <span style="font-weight: 500;">{{ item.subject }}</span>
+                            <span class="badge badge-{{ item.urgency }}">{{ item.urgency }}</span>
+                        </div>
+                        <div style="font-size: 0.8rem; color: #666;">{{ item.source }}</div>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<!-- Integrations Tab -->
+{% if tab == 'integrations' %}
+<div class="tab-content">
+    <div class="card">
+        <h2>Google Workspace</h2>
+        <p style="color: #666; margin-bottom: 1rem;">
+            Connected services for calendar, email, and document access.
+        </p>
+
+        <table>
+            <tr>
+                <td style="width: 150px; font-weight: 500;">Gmail</td>
+                <td><span class="badge badge-active">Connected</span></td>
+                <td style="font-size: 0.85rem; color: #666;">Push notifications enabled</td>
+            </tr>
+            <tr>
+                <td style="font-weight: 500;">Calendar</td>
+                <td><span class="badge badge-active">Connected</span></td>
+                <td style="font-size: 0.85rem; color: #666;">Context packs for upcoming events</td>
+            </tr>
+            <tr>
+                <td style="font-weight: 500;">Drive</td>
+                <td><span class="badge badge-active">Connected</span></td>
+                <td style="font-size: 0.85rem; color: #666;">Document indexing enabled</td>
+            </tr>
+        </table>
+
+        <p style="font-size: 0.85rem; color: #666; margin-top: 1rem;">
+            To reconnect, <a href="/auth/logout">logout</a> and sign in again with Google.
+        </p>
+    </div>
+
+    <div class="card">
+        <h2>Discord</h2>
+        <p style="color: #666; margin-bottom: 1rem;">
+            Notifications and alerts are sent to Discord.
+        </p>
+
+        <p style="font-size: 0.85rem;">
+            Configure <code>DISCORD_WEBHOOK_URL</code> in your <code>.env</code> file.
+        </p>
+    </div>
+
+    <div class="card">
+        <h2>GitHub</h2>
+        <p style="color: #666; margin-bottom: 1rem;">
+            Repository and issue tracking integration.
+        </p>
+
+        <p style="font-size: 0.85rem;">
+            Configure <code>GITHUB_TOKEN</code> in your <code>.env</code> file for repository access.
+        </p>
+    </div>
+</div>
+{% endif %}
+
+<style>
+.settings-tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 2px solid #e2e8f0;
+    margin-bottom: 1.5rem;
+}
+
+.settings-tabs .tab {
+    padding: 0.75rem 1.25rem;
+    text-decoration: none;
+    color: #64748b;
+    font-weight: 500;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    transition: all 0.2s;
+}
+
+.settings-tabs .tab:hover {
+    color: var(--primary);
+}
+
+.settings-tabs .tab.active {
+    color: var(--primary);
+    border-bottom-color: var(--primary);
+}
+
+.tab-content {
+    animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+.form-group {
+    margin-bottom: 1rem;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 0.25rem;
+    font-weight: 500;
+    color: #333;
+}
+
+.form-group select,
+.form-group textarea {
+    width: 100%;
+    padding: 0.5rem;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 0.9rem;
+}
+
+.form-group textarea {
+    font-family: inherit;
+    resize: vertical;
+}
+
+.twin-settings-form {
+    max-width: 400px;
+}
+
+.recent-emails-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.email-example {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    padding: 0.75rem;
+    font-size: 0.85rem;
+}
+
+.signal-bar {
+    background: #e2e8f0;
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.signal-fill {
+    height: 100%;
+    border-radius: 6px;
+    transition: width 0.3s;
+}
+
+.signal-fill.low { background: #22c55e; }
+.signal-fill.medium { background: #f59e0b; }
+.signal-fill.high { background: #ef4444; }
+
+.mode-badge {
+    padding: 0.25rem 0.75rem;
+    border-radius: 12px;
+    font-size: 0.85rem;
+    font-weight: 500;
+}
+
+.mode-badge.mode-deep_work { background: #dbeafe; color: #1e40af; }
+.mode-badge.mode-meetings { background: #fef3c7; color: #92400e; }
+.mode-badge.mode-email_comms { background: #dcfce7; color: #166534; }
+.mode-badge.mode-admin { background: #f3e8ff; color: #6b21a8; }
+.mode-badge.mode-fragmented { background: #fee2e2; color: #991b1b; }
+.mode-badge.mode-shutdown { background: #f1f5f9; color: #475569; }
+</style>
 {% endblock %}
