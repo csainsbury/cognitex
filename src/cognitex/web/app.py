@@ -4956,6 +4956,259 @@ async def bulk_reject_proposals(
     )
 
 
+# ========================================================================
+# Agent Inbox
+# ========================================================================
+
+@app.get("/inbox", response_class=HTMLResponse)
+async def inbox_page(request: Request, type: str | None = None):
+    """Unified agent inbox page."""
+    from cognitex.services.inbox import get_inbox_service
+
+    inbox = get_inbox_service()
+    counts = await inbox.get_pending_count()
+    items = await inbox.get_pending_items(item_type=type)
+    recent_decisions = await inbox.get_recent_decisions(limit=15)
+
+    return templates.TemplateResponse(
+        "inbox.html",
+        {
+            "request": request,
+            "counts": counts,
+            "items": items,
+            "recent_decisions": recent_decisions,
+            "filter_type": type,
+        }
+    )
+
+
+@app.get("/api/inbox/count", response_class=HTMLResponse)
+async def inbox_count():
+    """Get pending inbox item counts (for badge polling)."""
+    from cognitex.services.inbox import get_inbox_service
+
+    inbox = get_inbox_service()
+    counts = await inbox.get_pending_count()
+
+    # Return badge HTML - show count if > 0, hide otherwise
+    total = counts.get("total", 0)
+    if total > 0:
+        urgent = counts.get("urgent", 0)
+        badge_style = "background: var(--danger);" if urgent > 0 else "background: var(--primary);"
+        return HTMLResponse(content=f"""
+            <span style="display: inline-block; {badge_style} color: white; font-size: 0.65rem; padding: 0.1rem 0.4rem; border-radius: 10px; min-width: 16px; text-align: center;">
+                {total}
+            </span>
+        """)
+    else:
+        return HTMLResponse(content="")
+
+
+@app.get("/api/inbox/items", response_class=HTMLResponse)
+async def inbox_items_partial(request: Request, type: str | None = None):
+    """Get inbox items partial (for HTMX refresh)."""
+    from cognitex.services.inbox import get_inbox_service
+
+    inbox = get_inbox_service()
+    items = await inbox.get_pending_items(item_type=type)
+
+    return templates.TemplateResponse(
+        "partials/inbox_items.html",
+        {"request": request, "items": items}
+    )
+
+
+@app.post("/api/inbox/{item_id}/approve", response_class=HTMLResponse)
+async def approve_inbox_item(item_id: str):
+    """Approve an inbox item."""
+    from cognitex.services.inbox import get_inbox_service
+    from cognitex.agent.action_log import log_action
+
+    inbox = get_inbox_service()
+    item = await inbox.get_item(item_id)
+
+    if not item:
+        return HTMLResponse(content="<div class='inbox-item'>Item not found</div>", status_code=404)
+
+    # Handle type-specific approval
+    if item.item_type == "task_proposal":
+        # Delegate to existing proposal approval
+        from cognitex.agent.action_log import approve_proposal
+        if item.source_id:
+            await approve_proposal(item.source_id)
+
+    # Mark item as approved
+    await inbox.approve_item(item_id)
+
+    # Record feedback for learning
+    await inbox.record_feedback(
+        item_id=item_id,
+        item_type=item.item_type,
+        action="approved",
+        context=item.payload,
+    )
+
+    # Trigger expertise learning
+    try:
+        from cognitex.agent.expertise import get_expertise_manager
+        em = get_expertise_manager()
+        if item.item_type == "task_proposal":
+            project_id = item.payload.get("project_id")
+            if project_id:
+                await em.self_improve(
+                    domain=f"project:{project_id}",
+                    action_type="task_approved",
+                    context={"title": item.title, "payload": item.payload}
+                )
+        elif item.item_type == "context_pack":
+            await em.self_improve(
+                domain="context_pack",
+                action_type="pack_approved",
+                context=item.payload
+            )
+        elif item.item_type == "email_draft":
+            await em.self_improve(
+                domain="email_drafting",
+                action_type="draft_approved",
+                context=item.payload
+            )
+    except Exception as e:
+        logger.warning("Failed to trigger learning on approval", error=str(e))
+
+    await log_action(
+        "inbox_item_approved",
+        "web_ui",
+        summary=f"Approved {item.item_type}: {item.title[:50]}",
+        details={"item_id": item_id, "item_type": item.item_type}
+    )
+
+    # Return success message that fades out
+    return HTMLResponse(content=f"""
+        <div class="inbox-item" style="background: #d1fae5; border-color: #a7f3d0; opacity: 0.8;">
+            <div class="inbox-item-title" style="color: #065f46;">
+                ✓ Approved: {item.title}
+            </div>
+        </div>
+    """)
+
+
+@app.post("/api/inbox/{item_id}/reject", response_class=HTMLResponse)
+async def reject_inbox_item(
+    item_id: str,
+    reason: str = Form("other"),
+    reason_text: str = Form(None),
+):
+    """Reject an inbox item with feedback."""
+    from cognitex.services.inbox import get_inbox_service
+    from cognitex.agent.action_log import log_action, learn_from_rejection
+
+    inbox = get_inbox_service()
+    item = await inbox.get_item(item_id)
+
+    if not item:
+        return HTMLResponse(content="<div class='inbox-item'>Item not found</div>", status_code=404)
+
+    # Handle type-specific rejection
+    if item.item_type == "task_proposal" and item.source_id:
+        from cognitex.agent.action_log import reject_proposal
+        await reject_proposal(item.source_id, f"{reason}: {reason_text}" if reason_text else reason)
+
+    # Mark item as rejected
+    await inbox.reject_item(item_id, reason, reason_text)
+
+    # Learn from rejection
+    await learn_from_rejection(
+        proposal_type=item.item_type,
+        rejection_reason=f"{reason}: {item.title}",
+        context={
+            "reason_category": reason,
+            "reason_text": reason_text,
+            **item.payload,
+        }
+    )
+
+    await log_action(
+        "inbox_item_rejected",
+        "web_ui",
+        summary=f"Rejected {item.item_type}: {item.title[:50]} ({reason})",
+        details={"item_id": item_id, "item_type": item.item_type, "reason": reason}
+    )
+
+    return HTMLResponse(content=f"""
+        <div class="inbox-item" style="background: #fee2e2; border-color: #fecaca; opacity: 0.8;">
+            <div class="inbox-item-title" style="color: #991b1b;">
+                ✗ Rejected: {item.title}
+            </div>
+        </div>
+    """)
+
+
+@app.post("/api/inbox/{item_id}/dismiss", response_class=HTMLResponse)
+async def dismiss_inbox_item(item_id: str):
+    """Dismiss an inbox item (no longer relevant)."""
+    from cognitex.services.inbox import get_inbox_service
+    from cognitex.agent.action_log import log_action
+
+    inbox = get_inbox_service()
+    item = await inbox.get_item(item_id)
+
+    if not item:
+        return HTMLResponse(content="<div class='inbox-item'>Item not found</div>", status_code=404)
+
+    await inbox.dismiss_item(item_id)
+
+    await log_action(
+        "inbox_item_dismissed",
+        "web_ui",
+        summary=f"Dismissed {item.item_type}: {item.title[:50]}",
+        details={"item_id": item_id, "item_type": item.item_type}
+    )
+
+    return HTMLResponse(content=f"""
+        <div class="inbox-item" style="background: #f1f5f9; border-color: #e2e8f0; opacity: 0.8;">
+            <div class="inbox-item-title" style="color: #64748b;">
+                Dismissed: {item.title}
+            </div>
+        </div>
+    """)
+
+
+@app.post("/api/inbox/{item_id}/helpful")
+async def mark_inbox_item_helpful(item_id: str, helpful: bool = True):
+    """Mark a context pack or similar item as helpful/not helpful."""
+    from cognitex.services.inbox import get_inbox_service
+    from cognitex.agent.action_log import log_action
+
+    inbox = get_inbox_service()
+    item = await inbox.get_item(item_id)
+
+    if not item:
+        return {"success": False, "error": "Item not found"}
+
+    await inbox.mark_helpful(item_id, helpful)
+
+    # Trigger learning
+    try:
+        from cognitex.agent.expertise import get_expertise_manager
+        em = get_expertise_manager()
+        await em.self_improve(
+            domain="context_pack",
+            action_type="pack_feedback",
+            context={"helpful": helpful, **item.payload}
+        )
+    except Exception as e:
+        logger.warning("Failed to trigger learning on feedback", error=str(e))
+
+    await log_action(
+        "inbox_item_feedback",
+        "web_ui",
+        summary=f"Marked {item.item_type} as {'helpful' if helpful else 'not helpful'}",
+        details={"item_id": item_id, "helpful": helpful}
+    )
+
+    return {"success": True, "helpful": helpful}
+
+
 @app.get("/learning", response_class=HTMLResponse)
 async def learning_page(request: Request):
     """Learning system dashboard showing accumulated patterns and insights."""

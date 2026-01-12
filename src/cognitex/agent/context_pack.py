@@ -1556,6 +1556,53 @@ class ContextPackTriggerSystem:
             # FIX: Publish to the correct channel that the bot actually listens to
             await redis.publish("cognitex:notifications", json.dumps(notification_payload))
 
+            # Also create inbox item for unified view
+            try:
+                from cognitex.services.inbox import get_inbox_service
+                from datetime import datetime, timedelta
+
+                inbox = get_inbox_service()
+                event_start = event.get("start", {})
+                event_time_str = event_start.get("dateTime", "")
+
+                # Determine priority based on stage
+                priority = "normal"
+                if pack.build_stage.value == "T_15M":
+                    priority = "urgent"
+                elif pack.build_stage.value == "T_1H":
+                    priority = "high"
+
+                # Parse event time for expiry
+                expires_at = None
+                if event_time_str:
+                    try:
+                        from dateutil.parser import parse as parse_dt
+                        event_dt = parse_dt(event_time_str)
+                        expires_at = event_dt + timedelta(minutes=30)  # Expire 30min after event starts
+                    except Exception:
+                        pass
+
+                await inbox.create_item(
+                    item_type="context_pack",
+                    title=f"Context: {summary}",
+                    summary=f"Readiness: {pack.readiness_score:.0%} | {len(pack.missing_prerequisites)} items need attention",
+                    payload={
+                        "pack_id": pack.pack_id,
+                        "readiness": pack.readiness_score,
+                        "event_id": event.get("id"),
+                        "event_title": summary,
+                        "event_time": event_time_str,
+                        "stage": pack.build_stage.value,
+                        "missing_count": len(pack.missing_prerequisites),
+                    },
+                    source_id=pack.pack_id,
+                    source_type="context_packs",
+                    priority=priority,
+                    expires_at=expires_at,
+                )
+            except Exception as inbox_err:
+                logger.debug("Failed to create inbox item for context pack", error=str(inbox_err))
+
         except Exception as e:
             logger.warning("Failed to notify pack ready", error=str(e))
 

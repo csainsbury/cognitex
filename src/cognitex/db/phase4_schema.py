@@ -221,6 +221,49 @@ CREATE TABLE IF NOT EXISTS scratch_archive (
 CREATE INDEX IF NOT EXISTS idx_scratch_archive_space ON scratch_archive(scratch_space_id);
 CREATE INDEX IF NOT EXISTS idx_scratch_archive_date ON scratch_archive(archived_at);
 
+-- Agent Inbox: Unified view for all agent suggestions requiring user decision
+-- Consolidates task proposals, context packs, email drafts, flagged items
+CREATE TABLE IF NOT EXISTS inbox_items (
+    id TEXT PRIMARY KEY,
+    item_type TEXT NOT NULL,  -- 'task_proposal', 'context_pack', 'email_draft', 'flagged_item'
+    status TEXT DEFAULT 'pending',  -- 'pending', 'approved', 'rejected', 'dismissed'
+    priority TEXT DEFAULT 'normal',  -- 'urgent', 'high', 'normal', 'low'
+    title TEXT NOT NULL,
+    summary TEXT,
+    payload JSONB NOT NULL DEFAULT '{}',  -- Type-specific data
+    source_id TEXT,  -- Links to original entity (proposal_id, pack_id, draft_id, etc.)
+    source_type TEXT,  -- 'task_proposals', 'context_packs', 'email_drafts', 'agent_actions'
+    created_at TIMESTAMP DEFAULT NOW(),
+    decided_at TIMESTAMP,
+    decision_reason TEXT,
+    expires_at TIMESTAMP  -- For time-sensitive items (e.g., context packs for meetings)
+);
+
+CREATE INDEX IF NOT EXISTS idx_inbox_status ON inbox_items(status);
+CREATE INDEX IF NOT EXISTS idx_inbox_type ON inbox_items(item_type);
+CREATE INDEX IF NOT EXISTS idx_inbox_created ON inbox_items(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_inbox_priority ON inbox_items(priority);
+CREATE INDEX IF NOT EXISTS idx_inbox_expires ON inbox_items(expires_at);
+CREATE INDEX IF NOT EXISTS idx_inbox_source ON inbox_items(source_id);
+
+-- Inbox feedback: Track user decisions for learning
+-- Used to improve agent suggestions over time
+CREATE TABLE IF NOT EXISTS inbox_feedback (
+    id TEXT PRIMARY KEY,
+    inbox_item_id TEXT REFERENCES inbox_items(id) ON DELETE CASCADE,
+    item_type TEXT NOT NULL,  -- Denormalized for easier querying
+    action TEXT NOT NULL,  -- 'approved', 'rejected', 'helpful', 'not_helpful', 'dismissed'
+    reason_category TEXT,  -- Quick-select category (e.g., 'not_relevant', 'bad_timing', 'wrong_priority')
+    reason_text TEXT,  -- Free-form explanation
+    context JSONB DEFAULT '{}',  -- Snapshot of relevant context at decision time
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_inbox_feedback_item ON inbox_feedback(inbox_item_id);
+CREATE INDEX IF NOT EXISTS idx_inbox_feedback_type ON inbox_feedback(item_type);
+CREATE INDEX IF NOT EXISTS idx_inbox_feedback_action ON inbox_feedback(action);
+CREATE INDEX IF NOT EXISTS idx_inbox_feedback_created ON inbox_feedback(created_at);
+
 -- Add lifecycle columns to preference_rules if they don't exist
 -- These are added via ALTER TABLE to preserve existing data
 """

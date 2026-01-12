@@ -794,6 +794,30 @@ class DraftEmailTool(BaseTool):
             except Exception as e:
                 logger.warning("Failed to send approval notification", error=str(e))
 
+            # 4. Create inbox item for unified view
+            try:
+                from cognitex.services.inbox import get_inbox_service
+                inbox = get_inbox_service()
+                await inbox.create_item(
+                    item_type="email_draft",
+                    title=f"Draft: {subject[:50]}{'...' if len(subject) > 50 else ''}",
+                    summary=f"To: {to}",
+                    payload={
+                        "draft_id": draft_id,
+                        "approval_id": approval_id,
+                        "to": to,
+                        "subject": subject,
+                        "body_preview": body[:200] if body else "",
+                        "reply_to_id": reply_to_id,
+                        "reasoning": reasoning,
+                    },
+                    source_id=draft_id,
+                    source_type="email_drafts",
+                    priority="normal",
+                )
+            except Exception as inbox_err:
+                logger.debug("Failed to create inbox item for email draft", error=str(inbox_err))
+
             logger.info("Email draft staged", approval_id=approval_id, draft_id=draft_id, to=to)
             return ToolResult(
                 success=True,

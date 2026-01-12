@@ -1,0 +1,161 @@
+{% for item in items %}
+<div class="inbox-item {% if item.priority == 'urgent' %}priority-urgent{% elif item.priority == 'high' %}priority-high{% endif %}"
+     id="inbox-item-{{ item.id }}">
+    <div class="inbox-item-header">
+        <div>
+            <span class="badge badge-{{ item.item_type }}">{{ item.item_type | replace('_', ' ') }}</span>
+            {% if item.priority in ['urgent', 'high'] %}
+            <span class="badge badge-{{ 'paused' if item.priority == 'urgent' else 'pending' }}">{{ item.priority }}</span>
+            {% endif %}
+        </div>
+        <div class="inbox-item-meta">
+            <span>{{ item.created_at.strftime('%b %d, %H:%M') }}</span>
+            {% if item.expires_at %}
+            <span title="Expires at {{ item.expires_at.strftime('%H:%M') }}" style="color: var(--warning);">
+                expires {{ item.expires_at.strftime('%H:%M') }}
+            </span>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="inbox-item-title">{{ item.title }}</div>
+
+    {% if item.summary %}
+    <div class="inbox-item-summary">{{ item.summary }}</div>
+    {% endif %}
+
+    <!-- Type-specific payload display -->
+    {% if item.item_type == 'task_proposal' %}
+    <div class="inbox-item-payload">
+        {% if item.payload.project_name %}
+        <strong>Project:</strong> {{ item.payload.project_name }}<br>
+        {% endif %}
+        {% if item.payload.priority %}
+        <strong>Priority:</strong> {{ item.payload.priority }}<br>
+        {% endif %}
+        {% if item.payload.reason %}
+        <strong>Why:</strong> {{ item.payload.reason[:200] }}{% if item.payload.reason | length > 200 %}...{% endif %}
+        {% endif %}
+    </div>
+
+    {% elif item.item_type == 'context_pack' %}
+    <div class="inbox-item-payload">
+        {% if item.payload.readiness %}
+        <strong>Readiness:</strong> {{ (item.payload.readiness * 100) | int }}%<br>
+        {% endif %}
+        {% if item.payload.event_title %}
+        <strong>For:</strong> {{ item.payload.event_title }}<br>
+        {% endif %}
+        {% if item.payload.event_time %}
+        <strong>When:</strong> {{ item.payload.event_time }}
+        {% endif %}
+    </div>
+
+    {% elif item.item_type == 'email_draft' %}
+    <div class="inbox-item-payload">
+        {% if item.payload.to %}
+        <strong>To:</strong> {{ item.payload.to }}<br>
+        {% endif %}
+        {% if item.payload.subject %}
+        <strong>Subject:</strong> {{ item.payload.subject }}<br>
+        {% endif %}
+        {% if item.payload.body_preview %}
+        <strong>Preview:</strong> {{ item.payload.body_preview[:150] }}...
+        {% endif %}
+    </div>
+
+    {% elif item.item_type == 'flagged_item' %}
+    <div class="inbox-item-payload">
+        {% if item.payload.entity_type %}
+        <strong>Type:</strong> {{ item.payload.entity_type }}<br>
+        {% endif %}
+        {% if item.payload.issue %}
+        <strong>Issue:</strong> {{ item.payload.issue }}
+        {% endif %}
+    </div>
+    {% endif %}
+
+    <div class="inbox-item-actions">
+        <!-- Approve button -->
+        <button class="btn btn-success btn-sm"
+                hx-post="/api/inbox/{{ item.id }}/approve"
+                hx-target="#inbox-item-{{ item.id }}"
+                hx-swap="outerHTML"
+                title="Approve">
+            Approve
+        </button>
+
+        <!-- Reject dropdown -->
+        <div class="dropdown" style="display: inline-block; position: relative;">
+            <button class="btn btn-danger btn-sm"
+                    onclick="showRejectDropdown('{{ item.id }}')"
+                    title="Reject">
+                Reject
+            </button>
+            <div class="dropdown-menu"
+                 id="inbox-reject-menu-{{ item.id }}"
+                 style="display: none; position: absolute; right: 0; background: white; border: 1px solid #ddd; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); z-index: 100; min-width: 250px;">
+                <form id="inbox-reject-form-{{ item.id }}"
+                      hx-post="/api/inbox/{{ item.id }}/reject"
+                      hx-target="#inbox-item-{{ item.id }}"
+                      hx-swap="outerHTML">
+                    <div class="reason-select" id="inbox-reason-select-{{ item.id }}">
+                        <div style="padding: 0.5rem; font-size: 0.75rem; color: #666; border-bottom: 1px solid #eee;">
+                            Why reject? (helps learning)
+                        </div>
+                        <button type="button" onclick="selectInboxRejectReason('{{ item.id }}', 'not_relevant', 'Not relevant')" class="dropdown-item">Not relevant</button>
+                        <button type="button" onclick="selectInboxRejectReason('{{ item.id }}', 'bad_timing', 'Bad timing')" class="dropdown-item">Bad timing</button>
+                        <button type="button" onclick="selectInboxRejectReason('{{ item.id }}', 'wrong_priority', 'Wrong priority')" class="dropdown-item">Wrong priority</button>
+                        <button type="button" onclick="selectInboxRejectReason('{{ item.id }}', 'duplicate', 'Duplicate')" class="dropdown-item">Duplicate</button>
+                        <button type="button" onclick="selectInboxRejectReason('{{ item.id }}', 'not_my_task', 'Not my responsibility')" class="dropdown-item">Not my responsibility</button>
+                        <button type="button" onclick="selectInboxRejectReason('{{ item.id }}', 'already_done', 'Already done')" class="dropdown-item">Already done</button>
+                        <button type="button" onclick="selectInboxRejectReason('{{ item.id }}', 'other', 'Other')" class="dropdown-item">Other</button>
+                    </div>
+                    <div class="feedback-prompt" id="inbox-feedback-prompt-{{ item.id }}" style="display: none; padding: 0.75rem;">
+                        <input type="hidden" name="reason" id="inbox-reason-{{ item.id }}" value="">
+                        <p style="margin: 0 0 0.5rem 0; font-size: 0.85rem; color: #333;">
+                            <strong id="inbox-reason-label-{{ item.id }}"></strong>
+                        </p>
+                        <p style="margin: 0 0 0.5rem 0; font-size: 0.8rem; color: #666;">
+                            Add details? <span style="color: #999;">(optional)</span>
+                        </p>
+                        <textarea name="reason_text" placeholder="Any additional context..." style="width: 100%; min-height: 50px; font-size: 0.85rem; padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+                        <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+                            <button type="submit" class="btn btn-danger btn-sm">Reject</button>
+                            <button type="submit" class="btn btn-secondary btn-sm" onclick="document.querySelector('#inbox-reject-form-{{ item.id }} textarea').value = ''">Skip details</button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Dismiss button -->
+        <button class="btn btn-secondary btn-sm"
+                hx-post="/api/inbox/{{ item.id }}/dismiss"
+                hx-target="#inbox-item-{{ item.id }}"
+                hx-swap="outerHTML"
+                title="Dismiss (no longer relevant)">
+            Dismiss
+        </button>
+
+        <!-- Helpful buttons for context packs -->
+        {% if item.item_type == 'context_pack' %}
+        <div class="helpful-buttons">
+            <span style="font-size: 0.75rem; color: #888;">Helpful?</span>
+            <button class="helpful-btn helpful"
+                    hx-post="/api/inbox/{{ item.id }}/helpful?helpful=true"
+                    hx-swap="none"
+                    title="This was helpful">Yes</button>
+            <button class="helpful-btn not-helpful"
+                    hx-post="/api/inbox/{{ item.id }}/helpful?helpful=false"
+                    hx-swap="none"
+                    title="This was not helpful">No</button>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% else %}
+<div class="card">
+    <p class="empty">No pending items. The agent will surface suggestions here as they arise.</p>
+</div>
+{% endfor %}

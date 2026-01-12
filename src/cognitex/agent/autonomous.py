@@ -1576,6 +1576,28 @@ class AutonomousAgent:
             except Exception as e:
                 logger.warning("Failed to mark email as flagged", gmail_id=entity_id, error=str(e))
 
+        # Create inbox item for unified view
+        try:
+            from cognitex.services.inbox import get_inbox_service
+            inbox = get_inbox_service()
+            await inbox.create_item(
+                item_type="flagged_item",
+                title=f"Review: {entity_name[:50]}{'...' if len(entity_name) > 50 else ''}",
+                summary=f"{entity_type}: {issue[:150]}",
+                payload={
+                    "entity_type": entity_type,
+                    "entity_id": entity_id,
+                    "entity_name": entity_name,
+                    "issue": issue,
+                    "reason": reason,
+                },
+                source_id=f"flag_{entity_type}_{entity_id or 'unknown'}",
+                source_type="agent_actions",
+                priority="high" if entity_type in ["email", "task"] else "normal",
+            )
+        except Exception as inbox_err:
+            logger.debug("Failed to create inbox item for flagged item", error=str(inbox_err))
+
         # Send Discord notification
         await self._send_review_notification(entity_type, entity_name, issue)
 

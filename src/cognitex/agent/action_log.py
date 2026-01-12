@@ -255,6 +255,27 @@ async def propose_task(
 
         logger.info("Task proposed for approval", proposal_id=proposal_id, title=title[:50])
 
+        # Also create inbox item for unified view
+        try:
+            from cognitex.services.inbox import get_inbox_service
+            inbox = get_inbox_service()
+            await inbox.create_item(
+                item_type="task_proposal",
+                title=title,
+                summary=description[:200] if description else None,
+                payload={
+                    "project_id": project_id,
+                    "goal_id": goal_id,
+                    "priority": priority,
+                    "reason": reason,
+                },
+                source_id=proposal_id,
+                source_type="task_proposals",
+                priority="high" if priority in ["critical", "high"] else "normal",
+            )
+        except Exception as inbox_err:
+            logger.debug("Failed to create inbox item", error=str(inbox_err))
+
     except Exception as e:
         logger.warning("Failed to propose task", error=str(e), title=title[:50])
 

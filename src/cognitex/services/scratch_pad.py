@@ -241,6 +241,19 @@ class ScratchPadService:
         # Invalidate cache
         self._invalidate_cache(space_name)
 
+        # Publish event for user entries (triggers agent response)
+        if source == "user":
+            try:
+                from cognitex.db.redis import get_redis
+                redis = get_redis()
+                await redis.publish("cognitex:events:scratch_pad", json.dumps({
+                    "space_name": space_name,
+                    "text": entry_text[:200],
+                    "source": source,
+                }))
+            except Exception as e:
+                logger.debug("Failed to publish scratch pad event", error=str(e))
+
         return entry
 
     async def update_content(

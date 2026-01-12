@@ -1,0 +1,237 @@
+{% extends "base.html" %}
+
+{% block title %}Inbox - Cognitex{% endblock %}
+
+{% block content %}
+<h1>Agent Inbox</h1>
+<p style="color: #666; margin-bottom: 1.5rem;">
+    Review suggestions from the agent. Your decisions help improve future recommendations.
+</p>
+
+<div class="stats">
+    <div class="stat">
+        <div class="stat-value">{{ counts.total }}</div>
+        <div class="stat-label">Pending</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value" style="{% if counts.urgent > 0 %}color: var(--danger);{% endif %}">{{ counts.urgent }}</div>
+        <div class="stat-label">Urgent</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value">{{ counts.by_type.task_proposal }}</div>
+        <div class="stat-label">Tasks</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value">{{ counts.by_type.context_pack }}</div>
+        <div class="stat-label">Context</div>
+    </div>
+</div>
+
+<!-- Filter tabs -->
+<div class="filters">
+    <a href="/inbox" class="btn {% if not filter_type %}btn-primary{% else %}btn-secondary{% endif %}">
+        All ({{ counts.total }})
+    </a>
+    <a href="/inbox?type=task_proposal" class="btn {% if filter_type == 'task_proposal' %}btn-primary{% else %}btn-secondary{% endif %}">
+        Tasks ({{ counts.by_type.task_proposal }})
+    </a>
+    <a href="/inbox?type=context_pack" class="btn {% if filter_type == 'context_pack' %}btn-primary{% else %}btn-secondary{% endif %}">
+        Context ({{ counts.by_type.context_pack }})
+    </a>
+    <a href="/inbox?type=email_draft" class="btn {% if filter_type == 'email_draft' %}btn-primary{% else %}btn-secondary{% endif %}">
+        Emails ({{ counts.by_type.email_draft }})
+    </a>
+    <a href="/inbox?type=flagged_item" class="btn {% if filter_type == 'flagged_item' %}btn-primary{% else %}btn-secondary{% endif %}">
+        Flagged ({{ counts.by_type.flagged_item }})
+    </a>
+</div>
+
+<!-- Pending items -->
+{% if items | length > 0 %}
+<div id="inbox-items"
+     hx-get="/api/inbox/items{% if filter_type %}?type={{ filter_type }}{% endif %}"
+     hx-trigger="every 30s"
+     hx-swap="innerHTML">
+    {% include "partials/inbox_items.html" %}
+</div>
+{% else %}
+<div class="card">
+    <p class="empty">No pending items. The agent will surface suggestions here as they arise.</p>
+</div>
+{% endif %}
+
+<!-- Recent decisions -->
+{% if recent_decisions | length > 0 %}
+<div class="card" style="margin-top: 2rem;">
+    <h2>Recent Decisions</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Type</th>
+                <th>Title</th>
+                <th>Status</th>
+                <th>Reason</th>
+                <th>Decided</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in recent_decisions[:15] %}
+            <tr class="{% if item.status == 'approved' %}approved{% elif item.status == 'rejected' %}rejected{% endif %}">
+                <td>
+                    <span class="badge badge-{{ item.item_type }}">{{ item.item_type | replace('_', ' ') }}</span>
+                </td>
+                <td>{{ item.title }}</td>
+                <td>
+                    {% if item.status == 'approved' %}
+                    <span style="color: var(--success);">Approved</span>
+                    {% elif item.status == 'rejected' %}
+                    <span style="color: var(--danger);">Rejected</span>
+                    {% else %}
+                    <span style="color: var(--text-muted);">{{ item.status }}</span>
+                    {% endif %}
+                </td>
+                <td style="font-size: 0.85rem; color: #666;">{{ item.decision_reason or '-' }}</td>
+                <td style="font-size: 0.85rem; color: #666;">
+                    {{ item.decided_at.strftime('%Y-%m-%d %H:%M') if item.decided_at else '-' }}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<style>
+/* Type badges */
+.badge-task_proposal { background: var(--primary-light); color: var(--primary-text); border: 1px solid #c7d2fe; }
+.badge-context_pack { background: #d1fae5; color: #065f46; border: 1px solid #a7f3d0; }
+.badge-email_draft { background: #fef3c7; color: #92400e; border: 1px solid #fde68a; }
+.badge-flagged_item { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
+
+/* Priority indicators */
+.priority-urgent {
+    border-left: 4px solid var(--danger);
+    background: linear-gradient(90deg, rgba(239, 68, 68, 0.05), transparent);
+}
+.priority-high {
+    border-left: 4px solid #f59e0b;
+}
+
+/* Inbox item cards */
+.inbox-item {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem 1.25rem;
+    margin-bottom: 0.75rem;
+    transition: box-shadow 0.2s, transform 0.2s;
+}
+
+.inbox-item:hover {
+    box-shadow: var(--shadow);
+    transform: translateY(-1px);
+}
+
+.inbox-item-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 0.5rem;
+}
+
+.inbox-item-title {
+    font-weight: 600;
+    font-size: 1rem;
+    color: var(--text-main);
+}
+
+.inbox-item-meta {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+.inbox-item-summary {
+    font-size: 0.9rem;
+    color: #555;
+    margin-bottom: 0.75rem;
+    line-height: 1.5;
+}
+
+.inbox-item-payload {
+    background: #f8fafc;
+    border-radius: 4px;
+    padding: 0.75rem;
+    font-size: 0.85rem;
+    margin-bottom: 0.75rem;
+}
+
+.inbox-item-actions {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+/* Helpful feedback buttons */
+.helpful-buttons {
+    display: flex;
+    gap: 0.5rem;
+    margin-left: auto;
+}
+
+.helpful-btn {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75rem;
+    border-radius: 4px;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: white;
+    color: var(--text-muted);
+}
+
+.helpful-btn:hover {
+    background: #f8fafc;
+}
+
+.helpful-btn.helpful:hover {
+    border-color: var(--success);
+    color: var(--success);
+}
+
+.helpful-btn.not-helpful:hover {
+    border-color: var(--danger);
+    color: var(--danger);
+}
+
+/* Status rows */
+tr.approved { background-color: #f0fdf4; }
+tr.rejected { background-color: #fef2f2; }
+</style>
+
+<script>
+function selectInboxRejectReason(itemId, reason, label) {
+    document.getElementById('inbox-reason-select-' + itemId).style.display = 'none';
+    document.getElementById('inbox-feedback-prompt-' + itemId).style.display = 'block';
+    document.getElementById('inbox-reason-' + itemId).value = reason;
+    document.getElementById('inbox-reason-label-' + itemId).textContent = label;
+}
+
+function showRejectDropdown(itemId) {
+    const menu = document.getElementById('inbox-reject-menu-' + itemId);
+    menu.classList.toggle('show');
+    menu.style.display = menu.classList.contains('show') ? 'block' : 'none';
+}
+
+// Close dropdowns when clicking outside
+document.addEventListener('click', function(e) {
+    if (!e.target.closest('.dropdown')) {
+        document.querySelectorAll('[id^="inbox-reject-menu-"]').forEach(menu => {
+            menu.classList.remove('show');
+            menu.style.display = 'none';
+        });
+    }
+});
+</script>
+{% endblock %}
