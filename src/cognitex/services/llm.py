@@ -18,11 +18,19 @@ logger = structlog.get_logger()
 T = TypeVar("T")
 
 
+def _is_overloaded_error(error: Exception) -> bool:
+    """Check if error is an API overload (529) error."""
+    error_str = str(error).lower()
+    return "529" in error_str or "overloaded" in error_str
+
+
 def with_retry(
     max_attempts: int = 3,
     base_delay: float = 1.0,
     max_delay: float = 30.0,
     exceptions: tuple = (Exception,),
+    overload_max_attempts: int = 6,
+    overload_base_delay: float = 5.0,
 ) -> Callable:
     """
     Decorator to retry async functions with exponential backoff.
@@ -32,33 +40,46 @@ def with_retry(
         base_delay: Initial delay in seconds
         max_delay: Maximum delay between retries
         exceptions: Tuple of exception types to catch
+        overload_max_attempts: Extra attempts for overload errors (529)
+        overload_base_delay: Longer base delay for overload errors
     """
     def decorator(func: Callable) -> Callable:
         @wraps(func)
         async def wrapper(*args, **kwargs) -> T:
             last_exception = None
+            is_overload = False
+            actual_max = max_attempts
 
-            for attempt in range(max_attempts):
+            for attempt in range(overload_max_attempts):  # Use higher max for overloads
                 try:
                     return await func(*args, **kwargs)
                 except exceptions as e:
                     last_exception = e
-                    if attempt == max_attempts - 1:
+                    is_overload = _is_overloaded_error(e)
+
+                    # Use extended retries for overload errors
+                    actual_max = overload_max_attempts if is_overload else max_attempts
+
+                    if attempt >= actual_max - 1:
                         logger.error(
                             "LLM call failed after retries",
                             function=func.__name__,
-                            attempts=max_attempts,
+                            attempts=attempt + 1,
+                            is_overload=is_overload,
                             error=str(e),
                         )
                         raise
 
-                    # Exponential backoff with jitter
-                    delay = min(base_delay * (2 ** attempt), max_delay)
+                    # Use longer delays for overload errors
+                    delay_base = overload_base_delay if is_overload else base_delay
+                    delay = min(delay_base * (2 ** attempt), max_delay)
+
                     logger.warning(
                         "LLM call failed, retrying",
                         function=func.__name__,
                         attempt=attempt + 1,
                         delay=delay,
+                        is_overload=is_overload,
                         error=str(e),
                     )
                     await asyncio.sleep(delay)
