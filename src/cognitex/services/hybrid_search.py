@@ -26,6 +26,15 @@ class SearchMode(str, Enum):
     HYBRID = "hybrid"
 
 
+class ContentFilter(str, Enum):
+    """Filter search results by content type."""
+    ALL = "all"
+    DECISIONS = "decisions"  # Chunks containing decisions
+    ACTIONS = "actions"      # Chunks with action items
+    RISKS = "risks"          # Chunks mentioning risks
+    HIGH_IMPORTANCE = "important"  # High importance chunks
+
+
 @dataclass
 class SearchResult:
     """A search result with scoring breakdown."""
@@ -37,6 +46,14 @@ class SearchResult:
     keyword_score: float = 0.0
     combined_score: float = 0.0
     metadata: dict | None = None
+
+    # Enhanced semantic metadata
+    section_title: str = ""
+    chunk_type: str = ""
+    importance: float = 0.5
+    contains_decision: bool = False
+    contains_action_item: bool = False
+    contains_risk: bool = False
 
 
 async def hybrid_search_documents(
@@ -93,11 +110,22 @@ async def hybrid_search_chunks(
     mode: SearchMode = SearchMode.HYBRID,
     semantic_weight: float = 0.6,
     keyword_weight: float = 0.4,
+    content_filter: ContentFilter = ContentFilter.ALL,
+    boost_importance: bool = True,
 ) -> list[SearchResult]:
     """
     Search document chunks using hybrid semantic + keyword matching.
 
     Useful for finding specific passages within large documents.
+
+    Args:
+        query: Search query text
+        limit: Maximum results
+        mode: Search mode (semantic, keyword, hybrid)
+        semantic_weight: Weight for semantic scores
+        keyword_weight: Weight for keyword scores
+        content_filter: Filter by content type (decisions, actions, risks)
+        boost_importance: Whether to boost high-importance chunks
     """
     from cognitex.db.postgres import get_session
 
@@ -105,23 +133,31 @@ async def hybrid_search_chunks(
 
     async for session in get_session():
         if mode == SearchMode.KEYWORD_ONLY:
-            results = await _keyword_search_chunks(session, query, limit)
+            results = await _keyword_search_chunks(session, query, limit * 2, content_filter)
         elif mode == SearchMode.SEMANTIC_ONLY:
-            results = await _semantic_search_chunks(session, query, limit)
+            results = await _semantic_search_chunks(session, query, limit * 2, content_filter)
         else:
-            semantic_results = await _semantic_search_chunks(session, query, limit * 2)
-            keyword_results = await _keyword_search_chunks(session, query, limit * 2)
+            semantic_results = await _semantic_search_chunks(session, query, limit * 2, content_filter)
+            keyword_results = await _keyword_search_chunks(session, query, limit * 2, content_filter)
 
             results = _merge_search_results(
                 semantic_results,
                 keyword_results,
                 semantic_weight,
                 keyword_weight,
-                limit,
+                limit * 2,
             )
         break
 
-    return results
+    # Apply importance boosting if enabled
+    if boost_importance:
+        for result in results:
+            if result.importance > 0.7:
+                result.combined_score *= (1.0 + (result.importance - 0.5) * 0.5)
+
+    # Sort and limit
+    results.sort(key=lambda x: x.combined_score, reverse=True)
+    return results[:limit]
 
 
 async def hybrid_search_all(
@@ -275,8 +311,9 @@ async def _semantic_search_chunks(
     session: AsyncSession,
     query: str,
     limit: int,
+    content_filter: ContentFilter = ContentFilter.ALL,
 ) -> list[SearchResult]:
-    """Semantic search on document chunks."""
+    """Semantic search on document chunks with enhanced metadata."""
     from cognitex.services.llm import get_llm_service
 
     try:
@@ -284,19 +321,37 @@ async def _semantic_search_chunks(
         query_embedding = await llm.generate_embedding(query)
         query_embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
 
-        result = await session.execute(text("""
+        # Build filter clause based on content_filter
+        filter_clause = ""
+        if content_filter == ContentFilter.DECISIONS:
+            filter_clause = "AND dc.contains_decision = true"
+        elif content_filter == ContentFilter.ACTIONS:
+            filter_clause = "AND dc.contains_action_item = true"
+        elif content_filter == ContentFilter.RISKS:
+            filter_clause = "AND dc.contains_risk = true"
+        elif content_filter == ContentFilter.HIGH_IMPORTANCE:
+            filter_clause = "AND dc.importance > 0.7"
+
+        result = await session.execute(text(f"""
             SELECT
                 dc.drive_id,
                 dc.chunk_index,
                 dc.content,
                 dc.start_char,
                 dc.end_char,
+                dc.section_title,
+                dc.chunk_type,
+                dc.importance,
+                dc.contains_decision,
+                dc.contains_action_item,
+                dc.contains_risk,
                 df.name as doc_title,
                 1 - (e.embedding <=> CAST(:query_embedding AS vector)) as similarity
             FROM embeddings e
             JOIN document_chunks dc ON dc.drive_id || ':' || dc.chunk_index = e.entity_id
             LEFT JOIN drive_files df ON df.id = dc.drive_id
             WHERE e.entity_type = 'chunk'
+            {filter_clause}
             ORDER BY e.embedding <=> CAST(:query_embedding AS vector)
             LIMIT :limit
         """), {
@@ -306,10 +361,16 @@ async def _semantic_search_chunks(
 
         results = []
         for row in result.fetchall():
+            # Build title with section if available
+            title = row.doc_title or "Document"
+            if row.section_title:
+                title = f"{title} > {row.section_title}"
+            title = f"{title} (chunk {row.chunk_index})"
+
             results.append(SearchResult(
                 entity_type="chunk",
                 entity_id=f"{row.drive_id}:{row.chunk_index}",
-                title=f"{row.doc_title or 'Document'} (chunk {row.chunk_index})",
+                title=title,
                 content=row.content[:500] if row.content else "",
                 semantic_score=float(row.similarity),
                 combined_score=float(row.similarity),
@@ -319,6 +380,13 @@ async def _semantic_search_chunks(
                     "start_char": row.start_char,
                     "end_char": row.end_char,
                 },
+                # Enhanced metadata
+                section_title=row.section_title or "",
+                chunk_type=row.chunk_type or "",
+                importance=float(row.importance) if row.importance else 0.5,
+                contains_decision=bool(row.contains_decision),
+                contains_action_item=bool(row.contains_action_item),
+                contains_risk=bool(row.contains_risk),
             ))
         return results
 
@@ -331,21 +399,40 @@ async def _keyword_search_chunks(
     session: AsyncSession,
     query: str,
     limit: int,
+    content_filter: ContentFilter = ContentFilter.ALL,
 ) -> list[SearchResult]:
-    """Keyword search on document chunks."""
+    """Keyword search on document chunks with enhanced metadata."""
     try:
-        result = await session.execute(text("""
+        # Build filter clause based on content_filter
+        filter_clause = ""
+        if content_filter == ContentFilter.DECISIONS:
+            filter_clause = "AND dc.contains_decision = true"
+        elif content_filter == ContentFilter.ACTIONS:
+            filter_clause = "AND dc.contains_action_item = true"
+        elif content_filter == ContentFilter.RISKS:
+            filter_clause = "AND dc.contains_risk = true"
+        elif content_filter == ContentFilter.HIGH_IMPORTANCE:
+            filter_clause = "AND dc.importance > 0.7"
+
+        result = await session.execute(text(f"""
             SELECT
                 dc.drive_id,
                 dc.chunk_index,
                 dc.content,
                 dc.start_char,
                 dc.end_char,
+                dc.section_title,
+                dc.chunk_type,
+                dc.importance,
+                dc.contains_decision,
+                dc.contains_action_item,
+                dc.contains_risk,
                 df.name as doc_title,
                 ts_rank_cd(to_tsvector('english', dc.content), plainto_tsquery('english', :query)) as rank
             FROM document_chunks dc
             LEFT JOIN drive_files df ON df.id = dc.drive_id
             WHERE to_tsvector('english', dc.content) @@ plainto_tsquery('english', :query)
+            {filter_clause}
             ORDER BY rank DESC
             LIMIT :limit
         """), {
@@ -363,10 +450,17 @@ async def _keyword_search_chunks(
 
         for row in rows:
             normalized_rank = row.rank / max_rank if max_rank > 0 else 0.0
+
+            # Build title with section if available
+            title = row.doc_title or "Document"
+            if row.section_title:
+                title = f"{title} > {row.section_title}"
+            title = f"{title} (chunk {row.chunk_index})"
+
             results.append(SearchResult(
                 entity_type="chunk",
                 entity_id=f"{row.drive_id}:{row.chunk_index}",
-                title=f"{row.doc_title or 'Document'} (chunk {row.chunk_index})",
+                title=title,
                 content=row.content[:500] if row.content else "",
                 keyword_score=normalized_rank,
                 combined_score=normalized_rank,
@@ -376,6 +470,13 @@ async def _keyword_search_chunks(
                     "start_char": row.start_char,
                     "end_char": row.end_char,
                 },
+                # Enhanced metadata
+                section_title=row.section_title or "",
+                chunk_type=row.chunk_type or "",
+                importance=float(row.importance) if row.importance else 0.5,
+                contains_decision=bool(row.contains_decision),
+                contains_action_item=bool(row.contains_action_item),
+                contains_risk=bool(row.contains_risk),
             ))
         return results
 
@@ -556,3 +657,258 @@ async def search_with_context(
         results.sort(key=lambda x: x.combined_score, reverse=True)
 
     return results[:limit]
+
+
+# =============================================================================
+# Specialized semantic searches
+# =============================================================================
+
+async def find_decisions(
+    query: str | None = None,
+    limit: int = 20,
+) -> list[SearchResult]:
+    """
+    Find chunks containing decisions.
+
+    Args:
+        query: Optional query to filter decisions
+        limit: Maximum results
+
+    Returns:
+        Chunks marked as containing decisions
+    """
+    if query:
+        return await hybrid_search_chunks(
+            query=query,
+            limit=limit,
+            content_filter=ContentFilter.DECISIONS,
+        )
+    else:
+        # No query - just get most recent decisions
+        from cognitex.db.postgres import get_session
+
+        async for session in get_session():
+            result = await session.execute(text("""
+                SELECT
+                    dc.drive_id,
+                    dc.chunk_index,
+                    dc.content,
+                    dc.section_title,
+                    dc.importance,
+                    df.name as doc_title
+                FROM document_chunks dc
+                LEFT JOIN drive_files df ON df.id = dc.drive_id
+                WHERE dc.contains_decision = true
+                ORDER BY dc.importance DESC, dc.created_at DESC
+                LIMIT :limit
+            """), {"limit": limit})
+
+            results = []
+            for row in result.fetchall():
+                title = row.doc_title or "Document"
+                if row.section_title:
+                    title = f"{title} > {row.section_title}"
+
+                results.append(SearchResult(
+                    entity_type="chunk",
+                    entity_id=f"{row.drive_id}:{row.chunk_index}",
+                    title=title,
+                    content=row.content[:500] if row.content else "",
+                    combined_score=float(row.importance) if row.importance else 0.5,
+                    importance=float(row.importance) if row.importance else 0.5,
+                    contains_decision=True,
+                    section_title=row.section_title or "",
+                ))
+            return results
+
+    return []
+
+
+async def find_action_items(
+    query: str | None = None,
+    limit: int = 20,
+) -> list[SearchResult]:
+    """
+    Find chunks containing action items.
+
+    Args:
+        query: Optional query to filter action items
+        limit: Maximum results
+
+    Returns:
+        Chunks marked as containing action items
+    """
+    if query:
+        return await hybrid_search_chunks(
+            query=query,
+            limit=limit,
+            content_filter=ContentFilter.ACTIONS,
+        )
+    else:
+        from cognitex.db.postgres import get_session
+
+        async for session in get_session():
+            result = await session.execute(text("""
+                SELECT
+                    dc.drive_id,
+                    dc.chunk_index,
+                    dc.content,
+                    dc.section_title,
+                    dc.importance,
+                    df.name as doc_title
+                FROM document_chunks dc
+                LEFT JOIN drive_files df ON df.id = dc.drive_id
+                WHERE dc.contains_action_item = true
+                ORDER BY dc.importance DESC, dc.created_at DESC
+                LIMIT :limit
+            """), {"limit": limit})
+
+            results = []
+            for row in result.fetchall():
+                title = row.doc_title or "Document"
+                if row.section_title:
+                    title = f"{title} > {row.section_title}"
+
+                results.append(SearchResult(
+                    entity_type="chunk",
+                    entity_id=f"{row.drive_id}:{row.chunk_index}",
+                    title=title,
+                    content=row.content[:500] if row.content else "",
+                    combined_score=float(row.importance) if row.importance else 0.5,
+                    importance=float(row.importance) if row.importance else 0.5,
+                    contains_action_item=True,
+                    section_title=row.section_title or "",
+                ))
+            return results
+
+    return []
+
+
+async def find_risks(
+    query: str | None = None,
+    limit: int = 20,
+) -> list[SearchResult]:
+    """
+    Find chunks mentioning risks or concerns.
+
+    Args:
+        query: Optional query to filter risks
+        limit: Maximum results
+
+    Returns:
+        Chunks marked as containing risks
+    """
+    if query:
+        return await hybrid_search_chunks(
+            query=query,
+            limit=limit,
+            content_filter=ContentFilter.RISKS,
+        )
+    else:
+        from cognitex.db.postgres import get_session
+
+        async for session in get_session():
+            result = await session.execute(text("""
+                SELECT
+                    dc.drive_id,
+                    dc.chunk_index,
+                    dc.content,
+                    dc.section_title,
+                    dc.importance,
+                    df.name as doc_title
+                FROM document_chunks dc
+                LEFT JOIN drive_files df ON df.id = dc.drive_id
+                WHERE dc.contains_risk = true
+                ORDER BY dc.importance DESC, dc.created_at DESC
+                LIMIT :limit
+            """), {"limit": limit})
+
+            results = []
+            for row in result.fetchall():
+                title = row.doc_title or "Document"
+                if row.section_title:
+                    title = f"{title} > {row.section_title}"
+
+                results.append(SearchResult(
+                    entity_type="chunk",
+                    entity_id=f"{row.drive_id}:{row.chunk_index}",
+                    title=title,
+                    content=row.content[:500] if row.content else "",
+                    combined_score=float(row.importance) if row.importance else 0.5,
+                    importance=float(row.importance) if row.importance else 0.5,
+                    contains_risk=True,
+                    section_title=row.section_title or "",
+                ))
+            return results
+
+    return []
+
+
+async def find_important_content(
+    query: str | None = None,
+    min_importance: float = 0.7,
+    limit: int = 20,
+) -> list[SearchResult]:
+    """
+    Find high-importance content chunks.
+
+    Args:
+        query: Optional query to search within important chunks
+        min_importance: Minimum importance threshold (0-1)
+        limit: Maximum results
+
+    Returns:
+        Chunks with importance above threshold
+    """
+    if query:
+        return await hybrid_search_chunks(
+            query=query,
+            limit=limit,
+            content_filter=ContentFilter.HIGH_IMPORTANCE,
+            boost_importance=True,
+        )
+    else:
+        from cognitex.db.postgres import get_session
+
+        async for session in get_session():
+            result = await session.execute(text("""
+                SELECT
+                    dc.drive_id,
+                    dc.chunk_index,
+                    dc.content,
+                    dc.section_title,
+                    dc.chunk_type,
+                    dc.importance,
+                    dc.contains_decision,
+                    dc.contains_action_item,
+                    dc.contains_risk,
+                    df.name as doc_title
+                FROM document_chunks dc
+                LEFT JOIN drive_files df ON df.id = dc.drive_id
+                WHERE dc.importance > :min_importance
+                ORDER BY dc.importance DESC, dc.created_at DESC
+                LIMIT :limit
+            """), {"min_importance": min_importance, "limit": limit})
+
+            results = []
+            for row in result.fetchall():
+                title = row.doc_title or "Document"
+                if row.section_title:
+                    title = f"{title} > {row.section_title}"
+
+                results.append(SearchResult(
+                    entity_type="chunk",
+                    entity_id=f"{row.drive_id}:{row.chunk_index}",
+                    title=title,
+                    content=row.content[:500] if row.content else "",
+                    combined_score=float(row.importance) if row.importance else 0.5,
+                    section_title=row.section_title or "",
+                    chunk_type=row.chunk_type or "",
+                    importance=float(row.importance) if row.importance else 0.5,
+                    contains_decision=bool(row.contains_decision),
+                    contains_action_item=bool(row.contains_action_item),
+                    contains_risk=bool(row.contains_risk),
+                ))
+            return results
+
+    return []

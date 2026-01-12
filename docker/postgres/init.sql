@@ -199,6 +199,13 @@ CREATE TABLE IF NOT EXISTS document_chunks (
     start_char INTEGER NOT NULL,
     end_char INTEGER NOT NULL,
     char_count INTEGER NOT NULL,
+    -- Enhanced semantic metadata (from document analysis)
+    section_title VARCHAR(500),        -- Section this chunk belongs to
+    chunk_type VARCHAR(50),            -- Type: narrative, table, list, heading
+    importance FLOAT DEFAULT 0.5,      -- 0-1 relevance/importance score
+    contains_decision BOOLEAN DEFAULT FALSE,
+    contains_action_item BOOLEAN DEFAULT FALSE,
+    contains_risk BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(drive_id, chunk_index)
 );
@@ -206,8 +213,12 @@ CREATE TABLE IF NOT EXISTS document_chunks (
 CREATE INDEX IF NOT EXISTS idx_document_chunks_drive_id ON document_chunks(drive_id);
 CREATE INDEX IF NOT EXISTS idx_document_chunks_hash ON document_chunks(content_hash);
 CREATE INDEX IF NOT EXISTS idx_document_chunks_fts ON document_chunks USING gin(to_tsvector('english', content));
+-- Index for filtering by semantic metadata
+CREATE INDEX IF NOT EXISTS idx_document_chunks_importance ON document_chunks(importance) WHERE importance > 0.7;
+CREATE INDEX IF NOT EXISTS idx_document_chunks_decisions ON document_chunks(drive_id) WHERE contains_decision = true;
+CREATE INDEX IF NOT EXISTS idx_document_chunks_actions ON document_chunks(drive_id) WHERE contains_action_item = true;
 
-COMMENT ON TABLE document_chunks IS 'Stores document chunks for semantic search with overlap';
+COMMENT ON TABLE document_chunks IS 'Stores document chunks for semantic search with overlap and semantic metadata';
 
 -- Drive metadata cache
 CREATE TABLE IF NOT EXISTS drive_files (

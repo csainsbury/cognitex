@@ -742,33 +742,96 @@ Focus on facts, recent developments, and key relationships."""
     ) -> list[dict]:
         """Find documents/code related to the event/task.
 
-        Uses semantic search on document chunks and checks for
-        documents shared with attendees.
+        Uses enhanced semantic search with document type awareness:
+        - Hybrid search on document chunks
+        - Filter by semantic metadata (decisions, actions, risks)
+        - Include document analysis context
+        - Check documents shared with attendees
         """
         artifacts = []
         search_query = f"{title} {description[:200]}" if description else title
 
         try:
-            from cognitex.db.postgres import get_session as get_postgres_session
-            from cognitex.services.ingestion import search_chunks_semantic
+            from cognitex.services.hybrid_search import (
+                hybrid_search_chunks,
+                find_decisions,
+                find_action_items,
+                ContentFilter,
+            )
 
-            # Semantic search on document chunks
-            async for pg_session in get_postgres_session():
-                chunks = await search_chunks_semantic(pg_session, search_query, limit=5)
+            # Primary semantic search with importance boosting
+            results = await hybrid_search_chunks(
+                query=search_query,
+                limit=5,
+                boost_importance=True,
+            )
 
-                for chunk in chunks:
-                    # Get document name from Neo4j
-                    doc_name = await self._get_document_name(chunk.get("drive_id"))
-                    artifacts.append({
-                        "title": doc_name or f"Document chunk ({chunk.get('chunk_index', 0)})",
-                        "url": f"https://drive.google.com/file/d/{chunk.get('drive_id')}/view",
-                        "drive_id": chunk.get("drive_id"),
-                        "relevance_score": chunk.get("similarity", 0.5),
-                        "snippet": chunk.get("content", "")[:150] + "...",
-                        "reviewed": False,
-                    })
+            for result in results:
+                doc_name = await self._get_document_name(result.metadata.get("drive_id"))
+                artifact = {
+                    "title": doc_name or result.title,
+                    "url": f"https://drive.google.com/file/d/{result.metadata.get('drive_id')}/view",
+                    "drive_id": result.metadata.get("drive_id"),
+                    "relevance_score": result.combined_score,
+                    "snippet": result.content[:150] + "...",
+                    "reviewed": False,
+                }
 
-            # Also check for documents mentioning attendees
+                # Add semantic metadata indicators
+                indicators = []
+                if result.contains_decision:
+                    indicators.append("📋 decision")
+                if result.contains_action_item:
+                    indicators.append("✅ action")
+                if result.contains_risk:
+                    indicators.append("⚠️ risk")
+
+                if indicators:
+                    artifact["title"] = f"{artifact['title']} ({', '.join(indicators)})"
+                    artifact["semantic_type"] = indicators
+
+                # Include section context
+                if result.section_title:
+                    artifact["section"] = result.section_title
+
+                artifacts.append(artifact)
+
+            # Also search for decision-containing chunks specifically
+            # (useful for meetings that require decisions)
+            if "decision" in title.lower() or "review" in title.lower():
+                decision_results = await find_decisions(query=search_query, limit=3)
+                for result in decision_results:
+                    drive_id = result.metadata.get("drive_id") if result.metadata else None
+                    if drive_id and not any(a.get("drive_id") == drive_id for a in artifacts):
+                        doc_name = await self._get_document_name(drive_id)
+                        artifacts.append({
+                            "title": f"📋 {doc_name or 'Document'} - Decision point",
+                            "url": f"https://drive.google.com/file/d/{drive_id}/view",
+                            "drive_id": drive_id,
+                            "relevance_score": result.combined_score * 0.9,  # Slight boost for relevance
+                            "snippet": result.content[:150] + "...",
+                            "reviewed": False,
+                            "semantic_type": ["decision"],
+                        })
+
+            # Search for action items if this is a status/planning meeting
+            if "status" in title.lower() or "planning" in title.lower() or "standup" in title.lower():
+                action_results = await find_action_items(query=search_query, limit=3)
+                for result in action_results:
+                    drive_id = result.metadata.get("drive_id") if result.metadata else None
+                    if drive_id and not any(a.get("drive_id") == drive_id for a in artifacts):
+                        doc_name = await self._get_document_name(drive_id)
+                        artifacts.append({
+                            "title": f"✅ {doc_name or 'Document'} - Action items",
+                            "url": f"https://drive.google.com/file/d/{drive_id}/view",
+                            "drive_id": drive_id,
+                            "relevance_score": result.combined_score * 0.85,
+                            "snippet": result.content[:150] + "...",
+                            "reviewed": False,
+                            "semantic_type": ["action"],
+                        })
+
+            # Check for documents mentioning attendees
             if attendee_emails:
                 async for session in get_neo4j_session():
                     for email_addr in attendee_emails[:2]:

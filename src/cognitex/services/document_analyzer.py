@@ -177,7 +177,7 @@ class DocumentAnalyzer:
             skills=[skill_id],
         )
 
-        # Convert to DocumentAnalysis
+        # Convert to DocumentAnalysis with enhanced fields
         return DocumentAnalysis(
             summary=result.get("summary", ""),
             changes=result.get("changes", []),
@@ -188,6 +188,20 @@ class DocumentAnalyzer:
             ],
             raw_text=result.get("raw_text", ""),
             method="skills",
+            # Enhanced fields
+            document_type=result.get("document_type", ""),
+            maturity=result.get("maturity", ""),
+            purpose=result.get("purpose", ""),
+            key_decisions=result.get("key_decisions", []),
+            action_items=result.get("action_items", []),
+            risks=result.get("risks", []),
+            key_findings=result.get("key_findings", []),
+            recommendations=result.get("recommendations", []),
+            sections=result.get("sections", []),
+            key_entities=result.get("key_entities", {}),
+            doc_author=result.get("doc_author", ""),
+            doc_date=result.get("doc_date", ""),
+            doc_version=result.get("doc_version", ""),
         )
 
     def _build_analysis_prompt(
@@ -197,6 +211,35 @@ class DocumentAnalyzer:
         skill_id: str,
     ) -> str:
         """Build the analysis prompt based on document type and context."""
+
+        # Common deep analysis instructions
+        deep_analysis_instructions = """
+Additionally, perform deep semantic analysis:
+
+1. **Document Classification**:
+   - document_type: What kind of document is this? (proposal, report, specification, meeting_notes, status_update, decision_doc, contract, policy, guide, analysis, letter, other)
+   - maturity: What stage is this document? (draft, in_review, final, archived)
+   - purpose: In one sentence, what is this document for?
+
+2. **Semantic Extraction**:
+   - key_decisions: List any decisions made OR decisions that need to be made
+   - action_items: List action items with format {item, assignee (if mentioned), deadline (if mentioned)}
+   - risks: List any risks, concerns, blockers, or warnings mentioned
+   - key_findings: List the main findings, conclusions, or results
+   - recommendations: List any recommendations or suggestions made
+
+3. **Structure**:
+   - sections: List main sections with format {title, summary (1-2 sentences)}
+
+4. **Key Entities**:
+   - key_entities: Extract {people: [names], organizations: [org names], projects: [project names]}
+
+5. **Metadata** (if found in document):
+   - doc_author: Author name if mentioned
+   - doc_date: Document date if mentioned
+   - doc_version: Version number if mentioned
+
+Return your response as JSON with ALL these fields."""
 
         base_prompt = f"""Analyze this document: "{filename}"
 """
@@ -210,86 +253,88 @@ Context: {context}
         if skill_id == "docx":
             base_prompt += """
 This is a Word document. Please:
-1. Identify any tracked changes (insertions and deletions)
-2. Find any comments in the document
-3. Locate highlighted or emphasized text
+1. Identify any tracked changes (insertions and deletions) with their authors if available
+2. Find all comments in the document with author attribution
+3. Locate highlighted or emphasized text (bold, underlined, colored)
 4. Summarize the main content
 5. List any questions or items that need review/decision
+6. Identify the document structure (sections, headings)
 
-Format your response with these sections:
-SUMMARY: Brief overview of the document content
-
-CHANGES: List of tracked changes found (insertions and deletions)
-- Change 1
-- Change 2
-
-REVIEW_ITEMS: Specific items needing review or decision
-- Item 1
-- Item 2
-
-QUESTIONS: Any questions or requests found in the document
-- Question 1
-- Question 2
+Format your response as JSON:
+{
+    "summary": "Brief overview of the document content",
+    "changes": ["Change 1: ...", "Change 2: ..."],
+    "review_items": ["Item needing review 1", "Item 2"],
+    "questions": ["Question 1", "Question 2"],
+    "raw_text": "First 500 chars of document text...",
+    ... (additional fields below)
+}
 """
 
         elif skill_id == "pdf":
             base_prompt += """
 This is a PDF document. Please:
 1. Extract and summarize the main content
-2. Identify key points and important sections
+2. Identify the document structure (sections, chapters, key areas)
 3. Note any items that appear to need review or action
-4. List any questions raised in the document
+4. List any questions or unclear items
+5. Identify tables, figures, and their key data
+6. Extract any form fields and their values
 
-Format your response with these sections:
-SUMMARY: Brief overview of the document content
-
-CHANGES: (PDFs don't have tracked changes, note any notable differences if this is a revision)
-
-REVIEW_ITEMS: Key points needing attention
-- Item 1
-- Item 2
-
-QUESTIONS: Any questions or unclear items
-- Question 1
+Format your response as JSON:
+{
+    "summary": "Brief overview of the document content",
+    "changes": [],
+    "review_items": ["Key point needing attention 1", "Point 2"],
+    "questions": ["Question or unclear item 1"],
+    "raw_text": "First 500 chars of document text...",
+    ... (additional fields below)
+}
 """
 
         elif skill_id == "xlsx":
             base_prompt += """
 This is an Excel spreadsheet. Please:
-1. Describe the structure (sheets, columns, data types)
-2. Summarize the data content and purpose
-3. Identify any formulas, totals, or calculations
-4. Note any items that appear to need review
+1. Describe the structure (sheets, columns, data types, row counts)
+2. Summarize what data this spreadsheet contains and its purpose
+3. Identify key formulas, calculations, and their results
+4. Note any validation rules, conditional formatting, or data constraints
+5. Find any issues: missing data, errors, inconsistencies
+6. Identify named ranges and their purposes
 
-Format your response with these sections:
-SUMMARY: Overview of the spreadsheet structure and content
-
-CHANGES: Any notable data patterns or issues
-
-REVIEW_ITEMS: Items needing verification or review
-- Item 1
-
-QUESTIONS: Any unclear data or missing information
+Format your response as JSON:
+{
+    "summary": "Overview of the spreadsheet structure and content",
+    "changes": ["Notable data pattern or issue 1"],
+    "review_items": ["Item needing verification 1"],
+    "questions": ["Unclear data point 1"],
+    "raw_text": "Sheet structure overview...",
+    ... (additional fields below)
+}
 """
 
         elif skill_id == "pptx":
             base_prompt += """
 This is a PowerPoint presentation. Please:
-1. Summarize the presentation topic and flow
-2. List the main points from each section
-3. Identify any items needing review
-4. Note any questions or action items
+1. Summarize the presentation topic, narrative arc, and key message
+2. List each slide with its title and key points
+3. Identify any items needing review or that seem incomplete
+4. Note speaker notes if present
+5. List any questions, action items, or next steps mentioned
 
-Format your response with these sections:
-SUMMARY: Overview of the presentation
-
-CHANGES: Any notable items
-
-REVIEW_ITEMS: Slides or content needing review
-- Item 1
-
-QUESTIONS: Any questions raised
+Format your response as JSON:
+{
+    "summary": "Overview of the presentation",
+    "changes": [],
+    "review_items": ["Slide or content needing review 1"],
+    "questions": ["Question raised in presentation 1"],
+    "raw_text": "Slide titles and key content...",
+    ... (additional fields below)
+}
 """
+
+        # Add deep analysis instructions
+        base_prompt += deep_analysis_instructions
 
         return base_prompt
 

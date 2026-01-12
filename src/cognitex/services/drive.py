@@ -266,6 +266,141 @@ class DriveService:
             logger.warning("Failed to extract XLSX text", error=str(e))
             return None
 
+    def get_file_bytes(self, file_id: str, mime_type: str) -> bytes | None:
+        """
+        Download raw file bytes.
+
+        Args:
+            file_id: The file ID
+            mime_type: The file's MIME type
+
+        Returns:
+            Raw bytes or None if unable to download
+        """
+        try:
+            # Google Docs/Sheets/Slides - export to native format
+            if mime_type == "application/vnd.google-apps.document":
+                # Export as DOCX for richer analysis
+                request = self.service.files().export_media(
+                    fileId=file_id,
+                    mimeType="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+                return request.execute()
+
+            if mime_type == "application/vnd.google-apps.spreadsheet":
+                # Export as XLSX
+                request = self.service.files().export_media(
+                    fileId=file_id,
+                    mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+                return request.execute()
+
+            if mime_type == "application/vnd.google-apps.presentation":
+                # Export as PPTX
+                request = self.service.files().export_media(
+                    fileId=file_id,
+                    mimeType="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                )
+                return request.execute()
+
+            # Regular files - download directly
+            request = self.service.files().get_media(fileId=file_id)
+            buffer = io.BytesIO()
+            downloader = MediaIoBaseDownload(buffer, request)
+
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+
+            return buffer.getvalue()
+
+        except Exception as e:
+            logger.warning("Failed to get file bytes", file_id=file_id, error=str(e))
+            return None
+
+    async def get_file_analysis(
+        self,
+        file_id: str,
+        file_name: str,
+        mime_type: str,
+        context: str = "",
+    ) -> dict | None:
+        """
+        Get deep semantic analysis of a file using DocumentAnalyzer.
+
+        Uses Anthropic Skills when available, falls back to local parsing.
+        Returns rich analysis including tracked changes, comments, highlights,
+        and semantic understanding.
+
+        Args:
+            file_id: The file ID
+            file_name: The file name
+            mime_type: The file's MIME type
+            context: Optional context about the file (e.g., "Meeting preparation doc")
+
+        Returns:
+            Dict with analysis results or None if unable to analyze
+        """
+        from cognitex.services.document_analyzer import get_document_analyzer
+
+        # Map Google native types to their export equivalents
+        export_mime_map = {
+            "application/vnd.google-apps.document": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.google-apps.spreadsheet": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.google-apps.presentation": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        }
+        export_ext_map = {
+            "application/vnd.google-apps.document": ".docx",
+            "application/vnd.google-apps.spreadsheet": ".xlsx",
+            "application/vnd.google-apps.presentation": ".pptx",
+        }
+
+        analyzer = get_document_analyzer()
+
+        # Determine effective MIME type and filename for analysis
+        effective_mime = export_mime_map.get(mime_type, mime_type)
+        if mime_type in export_ext_map and not file_name.endswith(export_ext_map[mime_type]):
+            effective_name = file_name + export_ext_map[mime_type]
+        else:
+            effective_name = file_name
+
+        # Check if document type is supported
+        if not analyzer.is_supported(effective_name, effective_mime):
+            logger.debug(
+                "Document type not supported for deep analysis",
+                file_name=file_name,
+                mime_type=mime_type,
+            )
+            return None
+
+        # Download file bytes
+        content = self.get_file_bytes(file_id, mime_type)
+        if not content:
+            logger.warning("Failed to download file for analysis", file_id=file_id)
+            return None
+
+        try:
+            analysis = await analyzer.analyze(
+                filename=effective_name,
+                content=content,
+                context=context,
+                mime_type=effective_mime,
+            )
+
+            logger.info(
+                "File analyzed successfully",
+                file_name=file_name,
+                method=analysis.method,
+                changes=len(analysis.changes),
+                review_items=len(analysis.review_items),
+            )
+
+            return analysis.to_dict()
+
+        except Exception as e:
+            logger.error("File analysis failed", file_name=file_name, error=str(e))
+            return None
+
     def get_sharing_info(self, file_id: str) -> list[dict]:
         """
         Get detailed sharing information for a file.

@@ -15,8 +15,13 @@ logger = structlog.get_logger()
 
 @dataclass
 class DocumentAnalysis:
-    """Result of document analysis."""
+    """Result of document analysis.
 
+    Enhanced to include document classification, semantic understanding,
+    and extracted actionable items.
+    """
+
+    # Basic extraction
     summary: str = ""
     changes: list[str] = field(default_factory=list)
     review_items: list[str] = field(default_factory=list)
@@ -24,6 +29,27 @@ class DocumentAnalysis:
     filename: str = ""
     method: str = "local"  # "local" or "skills"
     raw_text: str = ""
+
+    # Document classification
+    document_type: str = ""  # proposal, report, specification, meeting_notes, status_update, decision_doc, etc.
+    maturity: str = ""  # draft, in_review, final, archived
+    purpose: str = ""  # What is this document for?
+
+    # Semantic extraction
+    key_decisions: list[str] = field(default_factory=list)  # Decisions made or needed
+    action_items: list[dict[str, str]] = field(default_factory=list)  # {item, assignee, deadline}
+    risks: list[str] = field(default_factory=list)  # Risks, concerns, blockers
+    key_findings: list[str] = field(default_factory=list)  # Main findings/conclusions
+    recommendations: list[str] = field(default_factory=list)  # Recommendations made
+
+    # Structure
+    sections: list[dict[str, str]] = field(default_factory=list)  # {title, summary}
+    key_entities: dict[str, list[str]] = field(default_factory=dict)  # {people: [], organizations: [], projects: []}
+
+    # Metadata extracted from document
+    doc_author: str = ""
+    doc_date: str = ""
+    doc_version: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -34,6 +60,19 @@ class DocumentAnalysis:
             "questions": self.questions,
             "filename": self.filename,
             "method": self.method,
+            "document_type": self.document_type,
+            "maturity": self.maturity,
+            "purpose": self.purpose,
+            "key_decisions": self.key_decisions,
+            "action_items": self.action_items,
+            "risks": self.risks,
+            "key_findings": self.key_findings,
+            "recommendations": self.recommendations,
+            "sections": self.sections,
+            "key_entities": self.key_entities,
+            "doc_author": self.doc_author,
+            "doc_date": self.doc_date,
+            "doc_version": self.doc_version,
         }
 
 

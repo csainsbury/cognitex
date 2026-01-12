@@ -1316,6 +1316,7 @@ async def index_document_chunked(
     drive_id: str,
     content: str,
     mime_type: str | None = None,
+    analysis: dict | None = None,
 ) -> dict:
     """
     Index a document using semantic chunking for deep understanding.
@@ -1324,19 +1325,28 @@ async def index_document_chunked(
     and stores them for retrieval. This enables finding relevant passages
     within large documents.
 
+    When document analysis is provided, uses section-aware chunking and
+    annotates chunks with semantic metadata (decisions, actions, risks).
+
     Args:
         pg_session: PostgreSQL async session
         drive_id: Drive file ID
         content: Full document content
         mime_type: MIME type hint for chunking strategy
+        analysis: Optional DocumentAnalysis dict for enhanced chunking
 
     Returns:
-        Dict with indexing stats (chunks_created, embeddings_created)
+        Dict with indexing stats (chunks_created, embeddings_created, enhanced)
     """
-    from cognitex.services.chunking import smart_chunk, compute_hash
+    from cognitex.services.chunking import (
+        smart_chunk,
+        compute_hash,
+        chunk_with_sections,
+        annotate_chunks_with_analysis,
+    )
     from cognitex.services.llm import get_llm_service
 
-    stats = {"chunks_created": 0, "embeddings_created": 0, "skipped": 0}
+    stats = {"chunks_created": 0, "embeddings_created": 0, "skipped": 0, "enhanced": False}
 
     # Calculate content hash for the full document
     full_hash = compute_hash(content)
@@ -1391,8 +1401,22 @@ async def index_document_chunked(
             WHERE entity_type = 'chunk' AND entity_id LIKE :pattern
         """)
         await pg_session.execute(delete_embeddings, {"pattern": f"{drive_id}:%"})
+
+    # Generate chunks - use enhanced chunking if analysis is available
+    if analysis and analysis.get("sections"):
+        # Section-aware chunking
+        chunks = chunk_with_sections(content, analysis.get("sections", []))
+        # Annotate with semantic metadata
+        chunks = annotate_chunks_with_analysis(chunks, analysis)
+        stats["enhanced"] = True
+        logger.debug("Using enhanced section-aware chunking", drive_id=drive_id, sections=len(analysis.get("sections", [])))
     else:
+        # Fall back to smart chunking
         chunks = smart_chunk(content, mime_type)
+        # If we have analysis but no sections, still annotate the chunks
+        if analysis:
+            chunks = annotate_chunks_with_analysis(chunks, analysis)
+            stats["enhanced"] = True
 
     if not chunks:
         logger.debug("No chunks generated", drive_id=drive_id)
@@ -1402,28 +1426,68 @@ async def index_document_chunked(
 
     # Process chunks
     for chunk in chunks:
-        # Store chunk
-        insert_chunk = text("""
-            INSERT INTO document_chunks
-                (drive_id, chunk_index, content, content_hash, start_char, end_char, char_count)
-            VALUES
-                (:drive_id, :chunk_index, :content, :content_hash, :start_char, :end_char, :char_count)
-            ON CONFLICT (drive_id, chunk_index) DO UPDATE SET
-                content = EXCLUDED.content,
-                content_hash = EXCLUDED.content_hash,
-                start_char = EXCLUDED.start_char,
-                end_char = EXCLUDED.end_char,
-                char_count = EXCLUDED.char_count
-        """)
-        await pg_session.execute(insert_chunk, {
-            "drive_id": drive_id,
-            "chunk_index": chunk.chunk_index,
-            "content": chunk.content,
-            "content_hash": chunk.content_hash,
-            "start_char": chunk.start_char,
-            "end_char": chunk.end_char,
-            "char_count": len(chunk.content),
-        })
+        # Check if this is an enhanced chunk with semantic metadata
+        is_enhanced = hasattr(chunk, 'section_title')
+
+        # Store chunk with optional enhanced metadata
+        if is_enhanced:
+            insert_chunk = text("""
+                INSERT INTO document_chunks
+                    (drive_id, chunk_index, content, content_hash, start_char, end_char, char_count,
+                     section_title, chunk_type, importance, contains_decision, contains_action_item, contains_risk)
+                VALUES
+                    (:drive_id, :chunk_index, :content, :content_hash, :start_char, :end_char, :char_count,
+                     :section_title, :chunk_type, :importance, :contains_decision, :contains_action_item, :contains_risk)
+                ON CONFLICT (drive_id, chunk_index) DO UPDATE SET
+                    content = EXCLUDED.content,
+                    content_hash = EXCLUDED.content_hash,
+                    start_char = EXCLUDED.start_char,
+                    end_char = EXCLUDED.end_char,
+                    char_count = EXCLUDED.char_count,
+                    section_title = EXCLUDED.section_title,
+                    chunk_type = EXCLUDED.chunk_type,
+                    importance = EXCLUDED.importance,
+                    contains_decision = EXCLUDED.contains_decision,
+                    contains_action_item = EXCLUDED.contains_action_item,
+                    contains_risk = EXCLUDED.contains_risk
+            """)
+            await pg_session.execute(insert_chunk, {
+                "drive_id": drive_id,
+                "chunk_index": chunk.chunk_index,
+                "content": chunk.content,
+                "content_hash": chunk.content_hash,
+                "start_char": chunk.start_char,
+                "end_char": chunk.end_char,
+                "char_count": len(chunk.content),
+                "section_title": chunk.section_title or None,
+                "chunk_type": chunk.chunk_type or None,
+                "importance": chunk.importance,
+                "contains_decision": chunk.contains_decision,
+                "contains_action_item": chunk.contains_action_item,
+                "contains_risk": chunk.contains_risk,
+            })
+        else:
+            insert_chunk = text("""
+                INSERT INTO document_chunks
+                    (drive_id, chunk_index, content, content_hash, start_char, end_char, char_count)
+                VALUES
+                    (:drive_id, :chunk_index, :content, :content_hash, :start_char, :end_char, :char_count)
+                ON CONFLICT (drive_id, chunk_index) DO UPDATE SET
+                    content = EXCLUDED.content,
+                    content_hash = EXCLUDED.content_hash,
+                    start_char = EXCLUDED.start_char,
+                    end_char = EXCLUDED.end_char,
+                    char_count = EXCLUDED.char_count
+            """)
+            await pg_session.execute(insert_chunk, {
+                "drive_id": drive_id,
+                "chunk_index": chunk.chunk_index,
+                "content": chunk.content,
+                "content_hash": chunk.content_hash,
+                "start_char": chunk.start_char,
+                "end_char": chunk.end_char,
+                "char_count": len(chunk.content),
+            })
         stats["chunks_created"] += 1
 
         # Generate embedding for chunk
@@ -1474,6 +1538,7 @@ async def run_deep_document_indexing(
     pg_session: AsyncSession,
     limit: int = 50,
     max_file_size: int = 10_000_000,
+    use_skills: bool = True,
 ) -> dict:
     """
     Index documents with deep chunking using database-driven queue.
@@ -1481,6 +1546,7 @@ async def run_deep_document_indexing(
     Architecture (Metadata-First Indexing):
     1. Query DB for priority files that are either new or modified since last index.
     2. Download and process only those files.
+    3. Optionally analyze documents with Skills for semantic understanding.
 
     This avoids traversing the Drive folder structure repeatedly and prevents
     blocking the event loop with synchronous Drive API calls.
@@ -1489,13 +1555,15 @@ async def run_deep_document_indexing(
         pg_session: PostgreSQL async session
         limit: Maximum documents to process
         max_file_size: Skip files larger than this (bytes)
+        use_skills: Whether to use DocumentAnalyzer for semantic analysis
 
     Returns:
         Indexing stats
     """
     from cognitex.services.drive import get_drive_service
+    from cognitex.services.document_analyzer import get_document_analyzer
 
-    logger.info("Starting deep document indexing (database-driven)", limit=limit)
+    logger.info("Starting deep document indexing (database-driven)", limit=limit, use_skills=use_skills)
 
     # MIME types we can meaningfully index
     indexable_types = (
@@ -1552,10 +1620,13 @@ async def run_deep_document_indexing(
     logger.info("Found stale documents to index", count=len(files_to_process))
 
     drive = get_drive_service()
+    analyzer = get_document_analyzer() if use_skills else None
+
     stats = {
         "documents_processed": 0,
         "chunks_total": 0,
         "embeddings_total": 0,
+        "enhanced": 0,  # Documents with semantic analysis
         "failed": 0,
         "skipped": 0,
     }
@@ -1582,17 +1653,43 @@ async def run_deep_document_indexing(
                 stats["skipped"] += 1
                 continue
 
-            # Index with chunking
+            # Get semantic analysis if analyzer is available and document type is supported
+            analysis = None
+            if analyzer and analyzer.is_supported(file_name, mime_type):
+                try:
+                    # Download raw bytes for analysis (needed for Skills/local parsing)
+                    file_bytes = await asyncio.to_thread(drive.get_file_bytes, file_id, mime_type)
+                    if file_bytes:
+                        analysis_result = await analyzer.analyze(
+                            filename=file_name,
+                            content=file_bytes,
+                            context=f"Document from folder: {folder_path}",
+                            mime_type=mime_type,
+                        )
+                        analysis = analysis_result.to_dict()
+                        logger.debug(
+                            "Got document analysis",
+                            file=file_name,
+                            method=analysis.get("method"),
+                            sections=len(analysis.get("sections", [])),
+                        )
+                except Exception as e:
+                    logger.warning("Document analysis failed, using basic chunking", file=file_name, error=str(e))
+
+            # Index with chunking (enhanced if analysis available)
             result = await index_document_chunked(
                 pg_session,
                 drive_id=file_id,
                 content=content,
                 mime_type=mime_type,
+                analysis=analysis,
             )
 
             stats["documents_processed"] += 1
             stats["chunks_total"] += result["chunks_created"]
             stats["embeddings_total"] += result.get("embeddings_created", 0)
+            if result.get("enhanced"):
+                stats["enhanced"] += 1
 
             # Explicit commit after each file to save progress
             await pg_session.commit()
@@ -1602,6 +1699,7 @@ async def run_deep_document_indexing(
                 file=file_name,
                 folder=folder_path,
                 chunks=result["chunks_created"],
+                enhanced=result.get("enhanced", False),
             )
 
             # Free memory
