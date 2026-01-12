@@ -2418,17 +2418,21 @@ async def auto_index_drive_file(
     file_name: str,
     mime_type: str,
     max_file_size: int = 10_000_000,
+    run_semantic_analysis: bool = True,
 ) -> dict:
     """
-    Automatically index a single Drive file with chunking and graph analysis.
+    Automatically index a single Drive file with chunking, graph analysis, and semantic analysis.
 
     Called by Drive change webhooks when files are added or modified.
+    Creates document chunks, embeddings, and runs semantic analysis to extract
+    summary, topics, and concepts for the document.
 
     Args:
         file_id: Google Drive file ID
         file_name: File name for logging
         mime_type: MIME type of the file
         max_file_size: Skip files larger than this (bytes)
+        run_semantic_analysis: Whether to run Gemini semantic analysis (default True)
 
     Returns:
         Indexing stats
@@ -2459,6 +2463,8 @@ async def auto_index_drive_file(
         "chunks_analyzed": 0,
         "topics_created": 0,
         "concepts_created": 0,
+        "semantic_analysis": False,
+        "summary_created": False,
         "error": None,
     }
 
@@ -2561,6 +2567,31 @@ async def auto_index_drive_file(
                     break
                 break
 
+            # Run semantic analysis to create document summary and graph relationships
+            if run_semantic_analysis:
+                try:
+                    from cognitex.services.semantic_analysis import SemanticAnalyzer
+
+                    logger.info("Running semantic analysis", file=file_name)
+                    analyzer = SemanticAnalyzer()
+                    analysis = await analyzer.analyze_document(file_id, content)
+
+                    if analysis:
+                        stats["semantic_analysis"] = True
+                        stats["summary_created"] = bool(analysis.summary)
+                        # Topics and concepts are also created by semantic analysis
+                        # but we already counted chunk-level ones above
+                        logger.info(
+                            "Semantic analysis complete",
+                            file=file_name,
+                            has_summary=bool(analysis.summary),
+                            topics=len(analysis.topics),
+                            concepts=len(analysis.key_concepts),
+                        )
+                except Exception as e:
+                    logger.warning("Semantic analysis failed", file=file_name, error=str(e))
+                    # Don't fail the whole indexing if semantic analysis fails
+
         finally:
             await close_postgres()
             await close_neo4j()
@@ -2571,6 +2602,7 @@ async def auto_index_drive_file(
             chunks=stats["chunks_created"],
             analyzed=stats["chunks_analyzed"],
             topics=stats["topics_created"],
+            semantic=stats["semantic_analysis"],
         )
 
     except Exception as e:

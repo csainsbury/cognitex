@@ -229,6 +229,16 @@ class TriggerSystem:
             replace_existing=True,
         )
 
+        # Semantic analysis sweep (every 2 hours during daytime)
+        # Catches any priority folder docs that were indexed but not semantically analyzed
+        self.scheduler.add_job(
+            self._semantic_analysis_sweep,
+            CronTrigger(hour="9,11,13,15,17", minute=15),
+            id="semantic_sweep",
+            name="Semantic Analysis Sweep",
+            replace_existing=True,
+        )
+
         logger.info("Scheduled triggers configured")
 
     async def _start_event_listeners(self) -> None:
@@ -797,6 +807,108 @@ class TriggerSystem:
             try:
                 from cognitex.agent.action_log import log_action
                 await log_action("drive_poll", "trigger", status="failed", error=str(e))
+            except Exception:
+                pass
+
+    async def _semantic_analysis_sweep(self) -> None:
+        """
+        Periodic sweep to run semantic analysis on documents that haven't been analyzed.
+
+        Finds priority folder documents that have been indexed (have chunks) but
+        don't have semantic analysis (no summary in Neo4j), and runs Gemini
+        analysis to extract summary, topics, and concepts.
+        """
+        logger.debug("Starting semantic analysis sweep")
+
+        try:
+            from cognitex.db.postgres import init_postgres, close_postgres, get_session
+            from cognitex.db.neo4j import init_neo4j, close_neo4j, get_neo4j_session
+            from cognitex.services.semantic_analysis import SemanticAnalyzer
+            from cognitex.services.drive import get_drive_service
+            from cognitex.agent.action_log import log_action
+            from sqlalchemy import text
+
+            await init_postgres()
+            await init_neo4j()
+
+            try:
+                # Find priority files that are indexed but not semantically analyzed
+                # These are files in drive_files with is_priority=true that have
+                # document_chunks but no entry in document_analysis
+                async for pg_session in get_session():
+                    query = text("""
+                        SELECT DISTINCT df.id, df.name, df.mime_type
+                        FROM drive_files df
+                        JOIN document_chunks dc ON df.id = dc.drive_id
+                        LEFT JOIN document_analysis da ON df.id = da.file_id
+                        WHERE df.is_priority = true
+                          AND da.file_id IS NULL
+                          AND df.mime_type IN (
+                              'application/vnd.google-apps.document',
+                              'text/plain',
+                              'text/markdown',
+                              'application/pdf',
+                              'text/csv'
+                          )
+                        ORDER BY df.modified_time DESC
+                        LIMIT 10
+                    """)
+                    result = await pg_session.execute(query)
+                    files_to_analyze = result.fetchall()
+                    break
+
+                if not files_to_analyze:
+                    logger.debug("No files need semantic analysis")
+                    return
+
+                logger.info("Found files needing semantic analysis", count=len(files_to_analyze))
+
+                drive = get_drive_service()
+                analyzer = SemanticAnalyzer()
+                analyzed_count = 0
+
+                for file_row in files_to_analyze:
+                    file_id, file_name, mime_type = file_row
+
+                    try:
+                        # Get file content
+                        content = drive.get_file_content(file_id, mime_type)
+                        if not content or len(content.strip()) < 100:
+                            logger.debug("Skipping file with no content", file=file_name)
+                            continue
+
+                        # Run semantic analysis
+                        logger.info("Running semantic analysis", file=file_name)
+                        analysis = await analyzer.analyze_document(file_id, content)
+
+                        if analysis:
+                            analyzed_count += 1
+                            logger.info(
+                                "Semantic analysis complete",
+                                file=file_name,
+                                has_summary=bool(analysis.summary),
+                            )
+
+                    except Exception as e:
+                        logger.warning("Semantic analysis failed for file", file=file_name, error=str(e))
+
+                if analyzed_count > 0:
+                    await log_action(
+                        "semantic_sweep",
+                        "trigger",
+                        summary=f"Analyzed {analyzed_count} documents",
+                    )
+                    logger.info("Semantic analysis sweep complete", analyzed=analyzed_count)
+
+            finally:
+                await close_postgres()
+                await close_neo4j()
+
+        except Exception as e:
+            logger.error("Semantic analysis sweep failed", error=str(e))
+            try:
+                from cognitex.agent.action_log import log_action
+                await log_action("semantic_sweep", "trigger", status="failed", error=str(e))
             except Exception:
                 pass
 
