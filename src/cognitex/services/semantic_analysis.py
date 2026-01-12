@@ -12,7 +12,7 @@ import gc
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any
 
@@ -303,8 +303,8 @@ class SemanticAnalyzer:
                 {
                     "file_id": analysis.file_id,
                     "summary": analysis.summary,
-                    "key_concepts": json.dumps(analysis.key_concepts),
-                    "topics": json.dumps(analysis.topics),
+                    "key_concepts": json.dumps([asdict(c) for c in analysis.key_concepts]),
+                    "topics": json.dumps([asdict(t) for t in analysis.topics]),
                     "entities": json.dumps(analysis.entities),
                     "llm_model": "gemini-2.0-flash-exp",
                 }
@@ -321,9 +321,10 @@ class SemanticAnalyzer:
         async with driver.session() as session:
             # Create/update concepts and link to document
             for concept in analysis.key_concepts:
-                if not concept or len(concept.strip()) < 2:
+                concept_name = concept.name if isinstance(concept, ScoredItem) else str(concept)
+                if not concept_name or len(concept_name.strip()) < 2:
                     continue
-                concept_normalized = concept.strip().lower()
+                concept_normalized = concept_name.strip().lower()
                 await session.run("""
                     MERGE (c:Concept {name: $name})
                     ON CREATE SET c.created_at = datetime()
@@ -334,9 +335,10 @@ class SemanticAnalyzer:
 
             # Create/update topics and link to document
             for topic in analysis.topics:
-                if not topic or len(topic.strip()) < 2:
+                topic_name = topic.name if isinstance(topic, ScoredItem) else str(topic)
+                if not topic_name or len(topic_name.strip()) < 2:
                     continue
-                topic_normalized = topic.strip().lower()
+                topic_normalized = topic_name.strip().lower()
                 await session.run("""
                     MERGE (t:Topic {name: $name})
                     ON CREATE SET t.created_at = datetime()
