@@ -1257,9 +1257,13 @@
             console.warn('Notification connection error, reconnecting...');
             notificationSource.close();
 
+            // Check if this might be an auth error (EventSource doesn't expose status)
+            // After max retries, assume session expired
             if (reconnectAttempts < maxReconnectAttempts) {
                 reconnectAttempts++;
                 setTimeout(connectNotifications, 2000 * reconnectAttempts);
+            } else {
+                console.warn('Max reconnect attempts reached, session may have expired');
             }
         };
     }
@@ -1348,6 +1352,14 @@
     document.addEventListener('visibilitychange', function() {
         if (!document.hidden && (!notificationSource || notificationSource.readyState === EventSource.CLOSED)) {
             connectNotifications();
+        }
+    });
+
+    // Handle HTMX 401 errors (session expired) - redirect to login
+    document.body.addEventListener('htmx:responseError', function(e) {
+        if (e.detail.xhr.status === 401) {
+            console.warn('Session expired, redirecting to login');
+            window.location.href = '/auth/login?next=' + encodeURIComponent(window.location.pathname);
         }
     });
 

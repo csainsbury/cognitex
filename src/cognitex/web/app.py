@@ -582,7 +582,15 @@ async def auth_middleware(request: Request, call_next):
             request.state.user = user
             return await call_next(request)
 
-    # Not authenticated - redirect to login
+    # Not authenticated
+    # For API endpoints, return 401 instead of redirecting
+    if path.startswith("/api/"):
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Not authenticated", "redirect": "/auth/login"}
+        )
+
+    # For regular pages, redirect to login
     next_url = path
     if request.url.query:
         next_url += f"?{request.url.query}"
