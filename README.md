@@ -11,6 +11,8 @@ A personal cognitive assistant that manages your digital life through a semantic
   - **Metadata-first indexing**: Fast metadata sync followed by targeted content indexing
   - **Priority folders**: Configure folders for deep semantic analysis
   - **Differential sync**: Only processes new/modified files
+  - **Semantic analysis**: Automatic topic extraction, concept linking, and document summaries
+  - **Auto-indexing**: Webhook-driven indexing of new/modified files with periodic sweeps
 - **GitHub**: Syncs repositories and code files with semantic search
 - **Coding Sessions**: Syncs Claude Code session summaries for project context
 
@@ -25,21 +27,35 @@ An LLM-powered agent that acts on your behalf when you're not available:
 - **Decision memory** for learning from accepted/rejected proposals
 
 ### Executive Function Layer
-- **Operating Modes**: Deep Focus, Fragmented, Overloaded, etc.
+- **Operating Modes**: Deep Focus, Fragmented, Overloaded, Hyperfocus, Avoidant, Transition
 - **Interruption Firewall**: Captures incoming items based on current mode
 - **Decision Policy**: Recommends next actions based on energy and task fit
-- **Context Packs**: Auto-generated briefings for meetings and decisions
+- **Context Packs**: Auto-generated briefings for meetings with multi-stage compilation
+  - T-24h: Initial research and document gathering
+  - T-2h: Deep analysis and preparation
+  - T-15m: Final briefing compilation
+  - T-5m: "Whisper mode" - last-minute reminders
+
+### LLM Provider Support
+- **Multi-provider**: Anthropic Claude, OpenAI GPT, Google Gemini, Together.ai
+- **Automatic fallback**: Falls back to Sonnet when Opus is overloaded (529 errors)
+- **Extended retry logic**: Longer delays and more attempts for API overload situations
+- **Runtime switching**: Change providers via Settings page without restart
 
 ### Web Dashboard
 - Task, Project, and Goal management with inline editing
 - **Task subtasks**: Expandable checklist steps with drag-and-drop reordering
 - **Ideas scratch pad**: Quick capture of thoughts, convert to tasks when ready
+- **Unified Inbox**: Review agent proposals, email drafts, and context packs
+- **Chat interface**: Conversational interaction with the agent
 - Document search with semantic similarity
 - Agent log with action history
 - Digital Twin review page for approving drafts and suggestions
 - Real-time state and mode visualization
+- **Real-time notifications**: SSE-powered toast notifications (same as Discord)
 - **Settings page**: Runtime configuration of LLM providers and preferences
 - **Semantic graph visualization**: Interactive knowledge graph explorer
+- **Learning dashboard**: View learning patterns and feedback history
 
 ## Architecture
 
@@ -161,7 +177,8 @@ cognitex auth              # Authenticate with Google
 # Sync data
 cognitex sync              # Sync Gmail
 cognitex calendar          # Sync Calendar
-cognitex drive-sync        # Sync Drive metadata
+cognitex drive-metadata    # Index all Drive file metadata
+cognitex drive-sync        # Sync Drive metadata (legacy)
 cognitex drive-sync --index-priority  # Sync and deep-index priority folders
 cognitex deep-index        # Deep index priority folders (metadata-first)
 cognitex github-sync owner/repo  # Sync GitHub repo
@@ -172,6 +189,8 @@ cognitex classify          # Classify emails with LLM
 cognitex infer-tasks       # Extract tasks from emails
 cognitex analyze-chunks    # Build semantic graph from documents
 cognitex link-project      # Auto-link documents to projects
+cognitex semantic-analyze  # Run semantic analysis on indexed documents
+cognitex sync-graph        # Sync Drive files to Neo4j graph
 
 # Task management
 cognitex tasks             # List tasks
@@ -202,14 +221,15 @@ cognitex web
 Navigate to `http://localhost:8080`:
 - **Dashboard**: Overview of tasks, projects, goals
 - **Today**: Today's schedule and energy forecast
+- **Chat**: Conversational interface with the agent
+- **Inbox**: Unified inbox for agent proposals, drafts, context packs
 - **Tasks**: Task management with expandable subtasks
 - **Projects/Goals**: Project and goal management
-- **Ideas**: Scratch pad for quick idea capture, convert to tasks
 - **Documents**: Semantic search across indexed content
+- **Ideas**: Scratch pad for quick idea capture, convert to tasks
 - **Graph**: Interactive knowledge graph visualization
-- **Twin**: Review agent-drafted emails and suggestions
-- **Agent Log**: Action history
-- **State**: Current operating mode
+- **Learning**: Learning patterns and feedback history
+- **Agent Log**: Action history and decision trail
 - **Settings**: Configure LLM providers and preferences
 
 ### Autonomous Agent
@@ -247,6 +267,8 @@ cognitex/
 │   ├── agent/           # Autonomous agent
 │   │   ├── autonomous.py    # Main agent loop
 │   │   ├── graph_observer.py # Graph state monitoring
+│   │   ├── context_pack.py  # Meeting context compilation
+│   │   ├── triggers.py      # Event-driven triggers
 │   │   ├── tools.py         # Agent tools
 │   │   ├── decision_memory.py # Learning from decisions
 │   │   ├── memory.py        # Working + episodic memory
@@ -263,11 +285,13 @@ cognitex/
 │   │   ├── calendar.py
 │   │   ├── drive.py
 │   │   ├── drive_metadata.py  # Metadata-first Drive indexing
+│   │   ├── semantic_analysis.py # Topic/concept extraction
 │   │   ├── github.py
 │   │   ├── ideas.py           # Ideas scratch pad
+│   │   ├── inbox.py           # Unified inbox service
 │   │   ├── ingestion.py       # Document chunking & embedding
 │   │   ├── linking.py         # Auto-linking documents to projects
-│   │   └── llm.py             # Multi-provider LLM service
+│   │   └── llm.py             # Multi-provider LLM with fallback
 │   └── web/             # Web dashboard
 │       ├── app.py
 │       └── templates/
