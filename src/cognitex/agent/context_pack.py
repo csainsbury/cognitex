@@ -1728,7 +1728,7 @@ class ContextPackTriggerSystem:
 
             logger.info(
                 "Sent meeting whisper",
-                event=summary[:30],
+                meeting=summary[:30],
                 pack_id=pack.pack_id,
             )
 

@@ -9,6 +9,7 @@ The hybrid approach gives the best of both worlds:
 - Keyword catches exact terms, names, and technical jargon
 """
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 
@@ -17,6 +18,39 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger()
+
+
+def _sanitize_search_query(query: str, max_length: int = 200) -> str:
+    """Sanitize a search query for PostgreSQL text search.
+
+    - Removes email headers (From:, To:, Sent:, etc.)
+    - Strips special characters that break plainto_tsquery
+    - Truncates to reasonable length
+    - Returns empty string if query becomes too short
+    """
+    if not query:
+        return ""
+
+    # Remove common email header patterns
+    query = re.sub(r'(From|To|Cc|Bcc|Sent|Date|Subject):\s*[^\n]+', ' ', query)
+    query = re.sub(r'_{5,}', ' ', query)  # Email separator lines
+    query = re.sub(r'<[^>]+@[^>]+>', '', query)  # Email addresses in angle brackets
+
+    # Remove special characters that can break text search
+    query = re.sub(r'[<>@#$%^&*(){}[\]|\\:";\'<>,.?/~`+=]', ' ', query)
+
+    # Collapse whitespace
+    query = re.sub(r'\s+', ' ', query).strip()
+
+    # Truncate to max length, break at word boundary
+    if len(query) > max_length:
+        query = query[:max_length].rsplit(' ', 1)[0]
+
+    # Return empty if too short to be useful
+    if len(query) < 3:
+        return ""
+
+    return query
 
 
 class SearchMode(str, Enum):
@@ -260,6 +294,11 @@ async def _keyword_search_documents(
     limit: int,
 ) -> list[SearchResult]:
     """Keyword search using PostgreSQL tsvector."""
+    # Sanitize query
+    clean_query = _sanitize_search_query(query)
+    if not clean_query:
+        return []
+
     try:
         # Use plainto_tsquery for simpler query parsing
         result = await session.execute(text("""
@@ -275,7 +314,7 @@ async def _keyword_search_documents(
             ORDER BY rank DESC
             LIMIT :limit
         """), {
-            "query": query,
+            "query": clean_query,
             "limit": limit,
         })
 
@@ -402,6 +441,12 @@ async def _keyword_search_chunks(
     content_filter: ContentFilter = ContentFilter.ALL,
 ) -> list[SearchResult]:
     """Keyword search on document chunks with enhanced metadata."""
+    # Sanitize query to prevent SQL issues with email headers etc.
+    clean_query = _sanitize_search_query(query)
+    if not clean_query:
+        logger.debug("Keyword search skipped - query too short after sanitization")
+        return []
+
     try:
         # Build filter clause based on content_filter
         filter_clause = ""
@@ -436,7 +481,7 @@ async def _keyword_search_chunks(
             ORDER BY rank DESC
             LIMIT :limit
         """), {
-            "query": query,
+            "query": clean_query,
             "limit": limit,
         })
 
@@ -534,32 +579,34 @@ async def _search_code_hybrid(
 
             if mode in (SearchMode.KEYWORD_ONLY, SearchMode.HYBRID) and not results:
                 # Keyword fallback for code
-                keyword_result = await session.execute(text("""
-                    SELECT
-                        cc.file_id,
-                        cc.path,
-                        cc.repo_name,
-                        cc.content,
-                        ts_rank_cd(to_tsvector('english', cc.content), plainto_tsquery('english', :query)) as rank
-                    FROM code_content cc
-                    WHERE to_tsvector('english', cc.content) @@ plainto_tsquery('english', :query)
-                    ORDER BY rank DESC
-                    LIMIT :limit
-                """), {
-                    "query": query,
-                    "limit": limit,
-                })
+                clean_query = _sanitize_search_query(query)
+                if clean_query:
+                    keyword_result = await session.execute(text("""
+                        SELECT
+                            cc.file_id,
+                            cc.path,
+                            cc.repo_name,
+                            cc.content,
+                            ts_rank_cd(to_tsvector('english', cc.content), plainto_tsquery('english', :query)) as rank
+                        FROM code_content cc
+                        WHERE to_tsvector('english', cc.content) @@ plainto_tsquery('english', :query)
+                        ORDER BY rank DESC
+                        LIMIT :limit
+                    """), {
+                        "query": clean_query,
+                        "limit": limit,
+                    })
 
-                for row in keyword_result.fetchall():
-                    results.append(SearchResult(
-                        entity_type="code",
-                        entity_id=row.file_id,
-                        title=row.path,
-                        content=row.content[:500] if row.content else "",
-                        keyword_score=1.0,  # Simplified scoring
-                        combined_score=1.0,
-                        metadata={"repo_name": row.repo_name},
-                    ))
+                    for row in keyword_result.fetchall():
+                        results.append(SearchResult(
+                            entity_type="code",
+                            entity_id=row.file_id,
+                            title=row.path,
+                            content=row.content[:500] if row.content else "",
+                            keyword_score=1.0,  # Simplified scoring
+                            combined_score=1.0,
+                            metadata={"repo_name": row.repo_name},
+                        ))
 
         except Exception as e:
             logger.warning("Code search failed", error=str(e))
