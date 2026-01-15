@@ -837,7 +837,7 @@ class TriggerSystem:
                 # document_chunks but no entry in document_analysis
                 async for pg_session in get_session():
                     query = text("""
-                        SELECT DISTINCT df.id, df.name, df.mime_type
+                        SELECT DISTINCT df.id, df.name, df.mime_type, df.modified_time
                         FROM drive_files df
                         JOIN document_chunks dc ON df.id = dc.drive_id
                         LEFT JOIN document_analysis da ON df.id = da.file_id

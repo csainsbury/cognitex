@@ -123,6 +123,10 @@ class InboxService:
         item_id = f"inbox_{uuid.uuid4().hex[:12]}"
         now = datetime.now()
 
+        # Normalize expires_at to naive datetime (PostgreSQL compatibility)
+        if expires_at is not None and expires_at.tzinfo is not None:
+            expires_at = expires_at.replace(tzinfo=None)
+
         item = InboxItem(
             id=item_id,
             item_type=item_type,
