@@ -887,11 +887,13 @@
             <a href="/chat" {% if "/chat" in request.url.path %}class="active"{% endif %}>Chat</a>
             <a href="/inbox" {% if "/inbox" in request.url.path %}class="active"{% endif %} style="position: relative;">
                 Inbox
+                {% if "/auth/" not in request.url.path %}
                 <span id="inbox-badge"
                       hx-get="/api/inbox/count"
                       hx-trigger="load, every 15s, refresh from:body"
                       hx-swap="innerHTML"
                       style="position: absolute; top: 5px; right: -8px;"></span>
+                {% endif %}
             </a>
             <a href="/tasks" {% if "/tasks" in request.url.path %}class="active"{% endif %}>Tasks</a>
             <a href="/projects" {% if "/projects" in request.url.path %}class="active"{% endif %}>Projects</a>
@@ -1345,19 +1347,26 @@
     `;
     document.head.appendChild(style);
 
-    // Connect when page loads
-    document.addEventListener('DOMContentLoaded', connectNotifications);
-
-    // Reconnect when page becomes visible again
-    document.addEventListener('visibilitychange', function() {
-        if (!document.hidden && (!notificationSource || notificationSource.readyState === EventSource.CLOSED)) {
+    // Connect when page loads (skip on auth pages)
+    document.addEventListener('DOMContentLoaded', function() {
+        if (!window.location.pathname.startsWith('/auth/')) {
             connectNotifications();
         }
     });
 
+    // Reconnect when page becomes visible again (skip on auth pages)
+    document.addEventListener('visibilitychange', function() {
+        if (!document.hidden && !window.location.pathname.startsWith('/auth/')) {
+            if (!notificationSource || notificationSource.readyState === EventSource.CLOSED) {
+                connectNotifications();
+            }
+        }
+    });
+
     // Handle HTMX 401 errors (session expired) - redirect to login
+    // Skip if already on login page to prevent loops
     document.body.addEventListener('htmx:responseError', function(e) {
-        if (e.detail.xhr.status === 401) {
+        if (e.detail.xhr.status === 401 && !window.location.pathname.startsWith('/auth/')) {
             console.warn('Session expired, redirecting to login');
             window.location.href = '/auth/login?next=' + encodeURIComponent(window.location.pathname);
         }
@@ -1382,8 +1391,8 @@
     });
     </script>
 
-    <!-- Scratch Pad Panel (loads via HTMX) -->
-    {% if show_scratch_pad is not defined or show_scratch_pad %}
+    <!-- Scratch Pad Panel (loads via HTMX) - skip on auth pages -->
+    {% if (show_scratch_pad is not defined or show_scratch_pad) and "/auth/" not in request.url.path %}
     <div hx-get="/api/scratch/panel"
          hx-trigger="load"
          hx-swap="innerHTML"
