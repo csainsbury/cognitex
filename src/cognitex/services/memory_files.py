@@ -443,6 +443,62 @@ class MemoryFileService:
 
         return "\n".join(sections)
 
+    async def update_recurring_patterns(self, patterns: list[str]) -> bool:
+        """
+        Update the Recurring Patterns section in curated memory.
+
+        This is called periodically by the learning system to populate
+        patterns it has discovered. Patterns are marked as auto-generated
+        so the user knows they can edit or delete them.
+
+        Args:
+            patterns: List of pattern strings to add
+
+        Returns:
+            True if updated successfully
+        """
+        if not patterns:
+            return True
+
+        curated = await self.get_curated_memory()
+        if not curated:
+            # Initialize if empty
+            curated = DEFAULT_CURATED_MEMORY
+
+        # Find the Recurring Patterns section
+        section_marker = "## Recurring Patterns"
+        next_section_markers = ["## Corrections", "## User Preferences", "## Important Relationships"]
+
+        if section_marker not in curated:
+            # Add section if missing
+            curated += f"\n\n{section_marker}\n"
+
+        # Find section boundaries
+        section_start = curated.find(section_marker)
+        section_end = len(curated)
+
+        for marker in next_section_markers:
+            pos = curated.find(marker, section_start + len(section_marker))
+            if pos != -1 and pos < section_end:
+                section_end = pos
+
+        # Build new section content
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        new_section = f"{section_marker}\n"
+        new_section += f"<!-- Auto-updated: {timestamp} -->\n\n"
+
+        for pattern in patterns:
+            new_section += f"- {pattern}\n"
+
+        new_section += "\n"
+
+        # Replace section
+        new_curated = curated[:section_start] + new_section + curated[section_end:]
+
+        return await self.save_curated_memory(new_curated)
+
     async def get_entries_for_person(self, email: str, limit: int = 10) -> list[MemoryEntry]:
         """Get memory entries related to a person."""
         from cognitex.db.neo4j import get_neo4j_session
