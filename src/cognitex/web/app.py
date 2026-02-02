@@ -620,12 +620,19 @@ async def auth_middleware(request: Request, call_next):
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    """Dashboard home page with quick overview."""
+    """Dashboard home page with comprehensive overview."""
+    from cognitex.services.inbox import get_inbox_service
+    from cognitex.services.ideas import get_idea_service
+    from cognitex.db.neo4j import get_neo4j_session
+    from cognitex.agent.action_log import get_recent_actions
+    from datetime import datetime, timedelta
+
     task_service = get_task_service()
     project_service = get_project_service()
     goal_service = get_goal_service()
+    inbox_service = get_inbox_service()
 
-    tasks = await task_service.list(limit=10)
+    tasks = await task_service.list(limit=20)
     projects = await project_service.list(limit=10)
     goals = await goal_service.list(limit=10)
 
@@ -634,15 +641,77 @@ async def home(request: Request):
     active_projects = len([p for p in projects if p.get("status") == "active"])
     active_goals = len([g for g in goals if g.get("status") == "active"])
 
+    # Inbox counts
+    inbox_counts = await inbox_service.get_pending_count()
+    pending_inbox = inbox_counts.get("total", 0)
+    urgent_inbox = inbox_counts.get("urgent", 0)
+
+    # Get inbox items for preview
+    inbox_items = await inbox_service.get_pending_items(limit=5)
+
+    # Get ideas count
+    try:
+        idea_service = get_idea_service()
+        ideas = await idea_service.list(status="active", limit=100)
+        idea_count = len(ideas)
+    except Exception:
+        idea_count = 0
+
+    # Get today's events
+    today_events = []
+    try:
+        async for session in get_neo4j_session():
+            result = await session.run("""
+                MATCH (e:Event)
+                WHERE date(e.start) = date()
+                RETURN e.gcal_id as id, e.summary as title, e.start as start, e.end as end
+                ORDER BY e.start
+                LIMIT 5
+            """)
+            today_events = await result.data()
+            break
+    except Exception:
+        pass
+
+    # Get recent agent actions
+    try:
+        recent_actions = await get_recent_actions(limit=5)
+    except Exception:
+        recent_actions = []
+
+    # Get upcoming deadlines (tasks due within 7 days)
+    upcoming_deadlines = [
+        t for t in tasks
+        if t.get("due") and t.get("status") != "done"
+    ][:5]
+
+    # High priority tasks
+    high_priority_tasks = [
+        t for t in tasks
+        if t.get("priority") in ("high", "urgent") and t.get("status") != "done"
+    ][:5]
+
     return templates.TemplateResponse(
         "home.html",
         {
             "request": request,
+            # Stats
             "pending_tasks": pending_tasks,
             "active_projects": active_projects,
             "active_goals": active_goals,
+            "pending_inbox": pending_inbox,
+            "urgent_inbox": urgent_inbox,
+            "idea_count": idea_count,
+            # Lists
             "recent_tasks": tasks[:5],
             "recent_projects": projects[:5],
+            "inbox_items": inbox_items,
+            "today_events": today_events,
+            "recent_actions": recent_actions,
+            "upcoming_deadlines": upcoming_deadlines,
+            "high_priority_tasks": high_priority_tasks,
+            # Inbox breakdown
+            "inbox_by_type": inbox_counts.get("by_type", {}),
         },
     )
 

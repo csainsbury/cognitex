@@ -5,74 +5,606 @@
 {% block content %}
 <h1>Dashboard</h1>
 
+<!-- Stats Row - All Clickable -->
 <div class="stats">
-    <div class="stat">
+    <a href="/tasks" class="stat stat-link">
         <div class="stat-value">{{ pending_tasks }}</div>
         <div class="stat-label">Pending Tasks</div>
-    </div>
-    <div class="stat">
+    </a>
+    <a href="/projects" class="stat stat-link">
         <div class="stat-value">{{ active_projects }}</div>
         <div class="stat-label">Active Projects</div>
-    </div>
-    <div class="stat">
+    </a>
+    <a href="/goals" class="stat stat-link">
         <div class="stat-value">{{ active_goals }}</div>
         <div class="stat-label">Active Goals</div>
-    </div>
+    </a>
+    <a href="/inbox" class="stat stat-link {% if urgent_inbox > 0 %}stat-urgent{% endif %}">
+        <div class="stat-value">{{ pending_inbox }}{% if urgent_inbox > 0 %}<span class="urgent-badge">{{ urgent_inbox }}</span>{% endif %}</div>
+        <div class="stat-label">Inbox Items</div>
+    </a>
+    <a href="/ideas" class="stat stat-link">
+        <div class="stat-value">{{ idea_count }}</div>
+        <div class="stat-label">Ideas</div>
+    </a>
 </div>
 
-<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
-    <div class="card">
-        <div class="card-header">
-            <h2>Recent Tasks</h2>
-            <a href="/tasks" class="link">View all</a>
+<!-- Quick Navigation Tiles -->
+<div class="nav-tiles">
+    <a href="/today" class="nav-tile">
+        <span class="nav-tile-icon">📅</span>
+        <span class="nav-tile-label">Today</span>
+        <span class="nav-tile-desc">Schedule & energy</span>
+    </a>
+    <a href="/chat" class="nav-tile">
+        <span class="nav-tile-icon">💬</span>
+        <span class="nav-tile-label">Chat</span>
+        <span class="nav-tile-desc">Talk to agent</span>
+    </a>
+    <a href="/context-packs" class="nav-tile">
+        <span class="nav-tile-icon">🧠</span>
+        <span class="nav-tile-label">Context</span>
+        <span class="nav-tile-desc">Meeting prep</span>
+    </a>
+    <a href="/documents" class="nav-tile">
+        <span class="nav-tile-icon">📄</span>
+        <span class="nav-tile-label">Documents</span>
+        <span class="nav-tile-desc">Search files</span>
+    </a>
+    <a href="/graph" class="nav-tile">
+        <span class="nav-tile-icon">🕸️</span>
+        <span class="nav-tile-label">Graph</span>
+        <span class="nav-tile-desc">Knowledge map</span>
+    </a>
+    <a href="/learning" class="nav-tile">
+        <span class="nav-tile-icon">📊</span>
+        <span class="nav-tile-label">Learning</span>
+        <span class="nav-tile-desc">Patterns & insights</span>
+    </a>
+    <a href="/bootstrap" class="nav-tile">
+        <span class="nav-tile-icon">🎭</span>
+        <span class="nav-tile-label">Bootstrap</span>
+        <span class="nav-tile-desc">Voice & identity</span>
+    </a>
+    <a href="/memory" class="nav-tile">
+        <span class="nav-tile-icon">🗃️</span>
+        <span class="nav-tile-label">Memory</span>
+        <span class="nav-tile-desc">Agent knowledge</span>
+    </a>
+</div>
+
+<!-- Main Grid -->
+<div class="dashboard-grid">
+    <!-- Left Column -->
+    <div class="dashboard-col">
+        <!-- Inbox Preview -->
+        {% if inbox_items %}
+        <div class="card">
+            <div class="card-header">
+                <h2>📥 Inbox</h2>
+                <a href="/inbox" class="btn btn-sm btn-secondary">View All ({{ pending_inbox }})</a>
+            </div>
+            <div class="inbox-list">
+                {% for item in inbox_items %}
+                <a href="/inbox#{{ item.id }}" class="inbox-item inbox-item-{{ item.priority }}">
+                    <div class="inbox-item-type">
+                        {% if item.item_type == 'email_draft' %}📧{% elif item.item_type == 'task_proposal' %}📋{% elif item.item_type == 'context_pack' %}🧠{% else %}📌{% endif %}
+                    </div>
+                    <div class="inbox-item-content">
+                        <div class="inbox-item-title">{{ item.title[:50] }}{% if item.title|length > 50 %}...{% endif %}</div>
+                        <div class="inbox-item-meta">{{ item.item_type|replace('_', ' ')|title }} · {{ item.created_at.strftime('%H:%M') if item.created_at else '' }}</div>
+                    </div>
+                    {% if item.priority == 'urgent' %}
+                    <span class="badge badge-urgent">Urgent</span>
+                    {% endif %}
+                </a>
+                {% endfor %}
+            </div>
         </div>
-        {% if recent_tasks %}
-        <table>
-            <tr>
-                <th>Task</th>
-                <th>Priority</th>
-                <th>Status</th>
-            </tr>
-            {% for task in recent_tasks %}
-            <tr>
-                <td>{{ task.title }}</td>
-                <td><span class="priority-{{ task.priority }}">{{ task.priority }}</span></td>
-                <td><span class="badge badge-{{ task.status }}">{{ task.status }}</span></td>
-            </tr>
-            {% endfor %}
-        </table>
-        {% else %}
-        <p class="empty">No tasks yet</p>
         {% endif %}
-    </div>
 
-    <div class="card">
-        <div class="card-header">
-            <h2>Recent Projects</h2>
-            <a href="/projects" class="link">View all</a>
+        <!-- High Priority Tasks -->
+        {% if high_priority_tasks %}
+        <div class="card">
+            <div class="card-header">
+                <h2>🔥 Priority Tasks</h2>
+                <a href="/tasks?priority=high" class="link">View all</a>
+            </div>
+            <div class="task-list">
+                {% for task in high_priority_tasks %}
+                <a href="/tasks#{{ task.id }}" class="task-item">
+                    <span class="priority-dot priority-{{ task.priority }}"></span>
+                    <span class="task-title">{{ task.title[:40] }}{% if task.title|length > 40 %}...{% endif %}</span>
+                    {% if task.due %}
+                    <span class="task-due">{{ task.due }}</span>
+                    {% endif %}
+                </a>
+                {% endfor %}
+            </div>
         </div>
-        {% if recent_projects %}
-        <table>
-            <tr>
-                <th>Project</th>
-                <th>Status</th>
-                <th>Tasks</th>
-            </tr>
-            {% for project in recent_projects %}
-            <tr>
-                <td>{{ project.title }}</td>
-                <td><span class="badge badge-{{ project.status }}">{{ project.status }}</span></td>
-                <td>{{ project.done_count|default(0) }}/{{ project.task_count|default(0) }}</td>
-            </tr>
-            {% endfor %}
-        </table>
-        {% else %}
-        <p class="empty">No projects yet</p>
         {% endif %}
+
+        <!-- Recent Tasks -->
+        <div class="card">
+            <div class="card-header">
+                <h2>📋 Recent Tasks</h2>
+                <a href="/tasks" class="btn btn-sm btn-primary">+ Add Task</a>
+            </div>
+            {% if recent_tasks %}
+            <table class="clickable-table">
+                <thead>
+                    <tr>
+                        <th>Task</th>
+                        <th>Priority</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for task in recent_tasks %}
+                    <tr onclick="window.location='/tasks#{{ task.id }}'">
+                        <td>
+                            <span class="task-title-cell">{{ task.title[:35] }}{% if task.title|length > 35 %}...{% endif %}</span>
+                            {% if task.project_title %}
+                            <span class="task-project">{{ task.project_title[:20] }}</span>
+                            {% endif %}
+                        </td>
+                        <td><span class="priority-badge priority-{{ task.priority }}">{{ task.priority }}</span></td>
+                        <td><span class="badge badge-{{ task.status }}">{{ task.status }}</span></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p class="empty">No tasks yet. <a href="/tasks">Create one</a></p>
+            {% endif %}
+        </div>
+
+        <!-- Recent Projects -->
+        <div class="card">
+            <div class="card-header">
+                <h2>📁 Active Projects</h2>
+                <a href="/projects" class="link">View all</a>
+            </div>
+            {% if recent_projects %}
+            <table class="clickable-table">
+                <thead>
+                    <tr>
+                        <th>Project</th>
+                        <th>Progress</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for project in recent_projects %}
+                    <tr onclick="window.location='/projects/{{ project.id }}'">
+                        <td><strong>{{ project.title[:30] }}{% if project.title|length > 30 %}...{% endif %}</strong></td>
+                        <td>
+                            <div class="progress-bar">
+                                {% set done = project.done_count|default(0) %}
+                                {% set total = project.task_count|default(0) %}
+                                {% set pct = (done / total * 100) if total > 0 else 0 %}
+                                <div class="progress-fill" style="width: {{ pct }}%"></div>
+                            </div>
+                            <span class="progress-text">{{ done }}/{{ total }}</span>
+                        </td>
+                        <td><span class="badge badge-{{ project.status }}">{{ project.status }}</span></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p class="empty">No projects yet. <a href="/projects">Create one</a></p>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Right Column -->
+    <div class="dashboard-col">
+        <!-- Today's Events -->
+        {% if today_events %}
+        <div class="card">
+            <div class="card-header">
+                <h2>📅 Today's Events</h2>
+                <a href="/today" class="link">Full schedule</a>
+            </div>
+            <div class="event-list">
+                {% for event in today_events %}
+                <a href="/context-packs" class="event-item">
+                    <span class="event-time">{{ event.start[11:16] if event.start else '?' }}</span>
+                    <span class="event-title">{{ event.title[:35] }}{% if event.title|length > 35 %}...{% endif %}</span>
+                </a>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Upcoming Deadlines -->
+        {% if upcoming_deadlines %}
+        <div class="card">
+            <div class="card-header">
+                <h2>⏰ Upcoming Deadlines</h2>
+            </div>
+            <div class="deadline-list">
+                {% for task in upcoming_deadlines %}
+                <a href="/tasks#{{ task.id }}" class="deadline-item">
+                    <span class="deadline-title">{{ task.title[:30] }}{% if task.title|length > 30 %}...{% endif %}</span>
+                    <span class="deadline-date">{{ task.due }}</span>
+                </a>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Recent Agent Activity -->
+        {% if recent_actions %}
+        <div class="card">
+            <div class="card-header">
+                <h2>🤖 Agent Activity</h2>
+                <a href="/agent-log" class="link">Full log</a>
+            </div>
+            <div class="activity-list">
+                {% for action in recent_actions %}
+                <a href="/agent-log" class="activity-item">
+                    <span class="activity-type">{{ action.action_type|replace('_', ' ')|title }}</span>
+                    <span class="activity-summary">{{ action.summary[:50] if action.summary else '' }}{% if action.summary and action.summary|length > 50 %}...{% endif %}</span>
+                    <span class="activity-time">{{ action.timestamp.strftime('%H:%M') if action.timestamp else '' }}</span>
+                </a>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Quick Actions -->
+        <div class="card">
+            <div class="card-header">
+                <h2>⚡ Quick Actions</h2>
+            </div>
+            <div class="quick-actions">
+                <a href="/tasks" class="quick-action">
+                    <span class="qa-icon">➕</span>
+                    <span>New Task</span>
+                </a>
+                <a href="/ideas" class="quick-action">
+                    <span class="qa-icon">💡</span>
+                    <span>Capture Idea</span>
+                </a>
+                <a href="/chat" class="quick-action">
+                    <span class="qa-icon">💬</span>
+                    <span>Ask Agent</span>
+                </a>
+                <a href="/memory" class="quick-action">
+                    <span class="qa-icon">📝</span>
+                    <span>Add Memory</span>
+                </a>
+            </div>
+        </div>
+
+        <!-- Configuration Links -->
+        <div class="card card-subtle">
+            <div class="card-header">
+                <h2>⚙️ Configuration</h2>
+            </div>
+            <div class="config-links">
+                <a href="/settings" class="config-link">Settings</a>
+                <a href="/bootstrap" class="config-link">Voice & Identity</a>
+                <a href="/skills" class="config-link">Skills</a>
+                <a href="/help" class="config-link">Help</a>
+            </div>
+        </div>
     </div>
 </div>
 
-<div class="shortcuts">
-    CLI: <code>cognitex tasks</code> | <code>cognitex projects</code> | <code>cognitex goals</code>
-</div>
+<style>
+/* Clickable Stats */
+.stat-link {
+    text-decoration: none;
+    color: inherit;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+.stat-link:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow);
+    border-color: var(--primary);
+}
+.stat-urgent {
+    border-color: var(--danger);
+    background: linear-gradient(135deg, #fff 0%, #fef2f2 100%);
+}
+.urgent-badge {
+    font-size: 0.7rem;
+    background: var(--danger);
+    color: white;
+    padding: 0.15rem 0.4rem;
+    border-radius: 10px;
+    margin-left: 0.5rem;
+    vertical-align: middle;
+}
+
+/* Navigation Tiles */
+.nav-tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 1rem;
+    margin-bottom: 2rem;
+}
+.nav-tile {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem;
+    text-decoration: none;
+    color: inherit;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    transition: all 0.2s;
+}
+.nav-tile:hover {
+    border-color: var(--primary);
+    transform: translateY(-2px);
+    box-shadow: var(--shadow);
+}
+.nav-tile-icon {
+    font-size: 1.5rem;
+    margin-bottom: 0.5rem;
+}
+.nav-tile-label {
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: var(--text-main);
+}
+.nav-tile-desc {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-top: 0.25rem;
+}
+
+/* Dashboard Grid */
+.dashboard-grid {
+    display: grid;
+    grid-template-columns: 1.2fr 1fr;
+    gap: 1.5rem;
+}
+@media (max-width: 1000px) {
+    .dashboard-grid {
+        grid-template-columns: 1fr;
+    }
+}
+.dashboard-col {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+}
+
+/* Clickable Tables */
+.clickable-table tr {
+    cursor: pointer;
+}
+.clickable-table tr:hover td {
+    background: var(--primary-light);
+}
+.task-title-cell {
+    display: block;
+    font-weight: 500;
+}
+.task-project {
+    display: block;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+/* Priority Badges */
+.priority-badge {
+    font-size: 0.7rem;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+.priority-high, .priority-urgent {
+    background: var(--danger-bg);
+    color: #b91c1c;
+}
+.priority-medium {
+    background: var(--warning-bg);
+    color: #92400e;
+}
+.priority-low {
+    background: #f1f5f9;
+    color: #475569;
+}
+
+/* Priority Dots */
+.priority-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 0.5rem;
+}
+.priority-dot.priority-high, .priority-dot.priority-urgent { background: var(--danger); }
+.priority-dot.priority-medium { background: var(--warning); }
+.priority-dot.priority-low { background: #94a3b8; }
+
+/* Progress Bar */
+.progress-bar {
+    width: 60px;
+    height: 6px;
+    background: #e2e8f0;
+    border-radius: 3px;
+    overflow: hidden;
+    display: inline-block;
+    vertical-align: middle;
+}
+.progress-fill {
+    height: 100%;
+    background: var(--success);
+    border-radius: 3px;
+}
+.progress-text {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-left: 0.5rem;
+}
+
+/* Inbox List */
+.inbox-list {
+    display: flex;
+    flex-direction: column;
+}
+.inbox-item {
+    display: flex;
+    align-items: center;
+    padding: 0.75rem;
+    border-bottom: 1px solid var(--border);
+    text-decoration: none;
+    color: inherit;
+    gap: 0.75rem;
+}
+.inbox-item:last-child { border-bottom: none; }
+.inbox-item:hover { background: #f8fafc; }
+.inbox-item-urgent { background: #fef2f2; }
+.inbox-item-type { font-size: 1.2rem; }
+.inbox-item-content { flex: 1; }
+.inbox-item-title { font-weight: 500; font-size: 0.9rem; }
+.inbox-item-meta { font-size: 0.75rem; color: var(--text-muted); }
+
+/* Task List */
+.task-list {
+    display: flex;
+    flex-direction: column;
+}
+.task-item {
+    display: flex;
+    align-items: center;
+    padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+    text-decoration: none;
+    color: inherit;
+}
+.task-item:last-child { border-bottom: none; }
+.task-item:hover { background: #f8fafc; }
+.task-title { flex: 1; font-size: 0.9rem; }
+.task-due { font-size: 0.75rem; color: var(--text-muted); }
+
+/* Event List */
+.event-list {
+    display: flex;
+    flex-direction: column;
+}
+.event-item {
+    display: flex;
+    align-items: center;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid var(--border);
+    text-decoration: none;
+    color: inherit;
+    gap: 0.75rem;
+}
+.event-item:last-child { border-bottom: none; }
+.event-item:hover { background: #f8fafc; padding-left: 0.5rem; padding-right: 0.5rem; margin: 0 -0.5rem; }
+.event-time {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    color: var(--primary);
+    font-weight: 600;
+    min-width: 50px;
+}
+.event-title { font-size: 0.9rem; }
+
+/* Deadline List */
+.deadline-list {
+    display: flex;
+    flex-direction: column;
+}
+.deadline-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid var(--border);
+    text-decoration: none;
+    color: inherit;
+}
+.deadline-item:last-child { border-bottom: none; }
+.deadline-item:hover { background: #f8fafc; padding-left: 0.5rem; padding-right: 0.5rem; margin: 0 -0.5rem; }
+.deadline-title { font-size: 0.9rem; }
+.deadline-date { font-size: 0.8rem; color: var(--warning); font-weight: 500; }
+
+/* Activity List */
+.activity-list {
+    display: flex;
+    flex-direction: column;
+}
+.activity-item {
+    display: flex;
+    flex-direction: column;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid var(--border);
+    text-decoration: none;
+    color: inherit;
+}
+.activity-item:last-child { border-bottom: none; }
+.activity-item:hover { background: #f8fafc; padding-left: 0.5rem; padding-right: 0.5rem; margin: 0 -0.5rem; }
+.activity-type {
+    font-size: 0.7rem;
+    color: var(--primary);
+    font-weight: 600;
+    text-transform: uppercase;
+}
+.activity-summary { font-size: 0.85rem; color: var(--text-main); }
+.activity-time { font-size: 0.7rem; color: var(--text-muted); }
+
+/* Quick Actions */
+.quick-actions {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.75rem;
+}
+.quick-action {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem;
+    background: #f8fafc;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    text-decoration: none;
+    color: var(--text-main);
+    font-size: 0.85rem;
+    font-weight: 500;
+    transition: all 0.2s;
+}
+.quick-action:hover {
+    background: var(--primary-light);
+    border-color: var(--primary);
+}
+.qa-icon { font-size: 1.1rem; }
+
+/* Config Links */
+.card-subtle {
+    background: #f8fafc;
+}
+.config-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+.config-link {
+    padding: 0.4rem 0.75rem;
+    background: white;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    text-decoration: none;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    transition: all 0.2s;
+}
+.config-link:hover {
+    color: var(--primary);
+    border-color: var(--primary);
+}
+</style>
 {% endblock %}
