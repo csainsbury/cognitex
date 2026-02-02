@@ -992,14 +992,17 @@ class AutonomousAgent:
                 }
             )
 
-            # Send notification for review
+            # Send notification for review (low urgency allows batching)
             from cognitex.services.notifications import publish_notification
             await publish_notification(
-                f"**Task Link Suggestion**\n\n"
-                f"Link task '{task_name}' to project '{project_name}'?\n"
-                f"Reason: {reason}\n\n"
-                f"Review at /tasks to approve or dismiss.",
+                message=(
+                    f"**Task Link Suggestion**\n\n"
+                    f"Link task '{task_name}' to project '{project_name}'?\n"
+                    f"Reason: {reason}\n\n"
+                    f"Review at /tasks to approve or dismiss."
+                ),
                 urgency="low",
+                category="task",
             )
 
             return {"flagged": True, "task": task_name, "project": project_name}

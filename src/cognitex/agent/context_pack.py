@@ -29,6 +29,16 @@ from cognitex.agent.state_model import get_state_estimator, OperatingMode
 logger = structlog.get_logger()
 
 
+async def _get_document_analyzer():
+    """Lazily import document analyzer to avoid circular imports."""
+    try:
+        from cognitex.services.document_analyzer import get_document_analyzer
+        return get_document_analyzer()
+    except ImportError:
+        logger.debug("Document analyzer not available")
+        return None
+
+
 class BuildStage(str, Enum):
     """Context pack build stages."""
     T_24H = "T-24h"   # Day before
@@ -37,6 +47,56 @@ class BuildStage(str, Enum):
     T_5M = "T-5m"     # 5 minutes before (whisper mode)
     LIVE = "live"     # During the event/task
     POST = "post"     # After completion
+
+
+@dataclass
+class AttendeeProfile:
+    """Profile information for a meeting attendee."""
+
+    email: str
+    name: str | None = None
+    organization: str | None = None
+    role: str | None = None
+
+    # External research
+    linkedin_summary: str | None = None
+    company_info: str | None = None
+    recent_news: str | None = None
+
+    # Internal relationship
+    email_count: int = 0
+    last_email_date: datetime | None = None
+    shared_projects: list[str] = field(default_factory=list)
+    open_tasks: list[str] = field(default_factory=list)
+
+    # Relationship summary
+    relationship_summary: str | None = None
+
+
+@dataclass
+class AmbientContext:
+    """What happened since we last interacted with this person."""
+
+    person_email: str
+    person_name: str | None = None
+
+    # Last interaction
+    last_meeting: dict | None = None  # {title, date, summary}
+    last_meeting_date: datetime | None = None
+
+    # Activity since last meeting
+    emails_since: int = 0
+    emails_from_them: int = 0
+    emails_to_them: int = 0
+    email_topics: list[str] = field(default_factory=list)
+
+    # Pending items
+    open_tasks_involving: list[dict] = field(default_factory=list)
+    pending_requests: list[str] = field(default_factory=list)
+    awaiting_their_response: bool = False
+
+    # Narrative summary
+    summary: str | None = None  # "Since your call on Jan 10, you've exchanged 5 emails..."
 
 
 @dataclass
@@ -58,6 +118,7 @@ class ContextPackContent:
     # Required materials
     artifact_links: list[dict] = field(default_factory=list)  # {title, url, relevance_score}
     required_documents: list[str] = field(default_factory=list)
+    document_analysis: list[dict] = field(default_factory=list)  # Analyzed document content
 
     # Decision support
     decision_list: list[str] = field(default_factory=list)
@@ -70,6 +131,15 @@ class ContextPackContent:
 
     # Follow-up preparation
     post_event_tasks: list[str] = field(default_factory=list)
+
+    # NEW: Attendee profiles with external research
+    attendee_profiles: list[AttendeeProfile] = field(default_factory=list)
+
+    # NEW: Ambient context ("what happened since last meeting")
+    ambient_context: list[AmbientContext] = field(default_factory=list)
+
+    # NEW: Key things to know (LLM-generated summary)
+    what_you_need_to_know: list[str] = field(default_factory=list)
 
     # Readiness
     readiness_score: float = 0.0
@@ -299,6 +369,41 @@ class ContextPackCompiler:
         if "meeting" in summary.lower() or attendees:
             agenda = self._draft_agenda(summary, description, attendees)
 
+        # Analyze referenced documents for key content
+        doc_analysis = await self._gather_document_analysis(
+            event_id=event_id,
+            event_title=summary,
+            artifacts=artifacts,
+        )
+
+        # NEW: Build attendee profiles with relationship context
+        attendee_profiles = []
+        ambient_contexts = []
+
+        if attendees and stage in [BuildStage.T_24H, BuildStage.T_2H]:
+            # Build profiles for external attendees (not yourself)
+            for att in attendees[:5]:  # Limit to 5 attendees
+                email = att.get("email", "")
+                if not email or self._is_self(email):
+                    continue
+
+                profile = await self._build_attendee_profile(att)
+                if profile:
+                    attendee_profiles.append(profile)
+
+                # Get relationship context
+                ambient = await self._get_ambient_context(email)
+                if ambient:
+                    ambient_contexts.append(ambient)
+
+        # NEW: Generate "what you need to know" summary
+        what_to_know = await self._generate_what_to_know(
+            event=event,
+            attendee_profiles=attendee_profiles,
+            ambient_contexts=ambient_contexts,
+            doc_analysis=doc_analysis,
+        )
+
         # Create pack
         pack = ContextPackContent(
             pack_id=pack_id,
@@ -306,9 +411,13 @@ class ContextPackCompiler:
             objective=objective,
             last_touch_recap=last_touch,
             artifact_links=artifacts,
+            document_analysis=doc_analysis,
             decision_list=decisions,
             dont_forget=dont_forget,
             pre_drafted_agenda=agenda,
+            attendee_profiles=attendee_profiles,
+            ambient_context=ambient_contexts,
+            what_you_need_to_know=what_to_know,
             build_stage=stage,
         )
 
@@ -667,6 +776,191 @@ Focus on facts, recent developments, and key relationships."""
         # Generate from summary
         return f"Complete: {summary}"
 
+    def _is_self(self, email: str) -> bool:
+        """Check if this email is the user's own email."""
+        try:
+            from cognitex.config import get_settings
+            settings = get_settings()
+            user_email = settings.user_email
+            return email.lower() == user_email.lower() if user_email else False
+        except Exception:
+            return False
+
+    async def _build_attendee_profile(self, attendee: dict) -> AttendeeProfile | None:
+        """Build a profile for an attendee with relationship context."""
+        email = attendee.get("email", "")
+        if not email:
+            return None
+
+        name = attendee.get("displayName") or email.split("@")[0].replace(".", " ").title()
+        domain = email.split("@")[1] if "@" in email else None
+
+        profile = AttendeeProfile(
+            email=email,
+            name=name,
+        )
+
+        # Get person info from graph
+        async for session in get_neo4j_session():
+            try:
+                result = await session.run("""
+                    MATCH (p:Person {email: $email})
+                    OPTIONAL MATCH (p)-[:SENT_BY|RECEIVED_BY]-(e:Email)
+                    WITH p, count(DISTINCT e) as email_count, max(e.date) as last_email
+                    OPTIONAL MATCH (p)-[:WORKS_FOR]->(o:Organization)
+                    RETURN p.name as name, p.title as title,
+                           o.name as org, email_count, last_email
+                """, {"email": email.lower()})
+
+                record = await result.single()
+                if record:
+                    profile.name = record["name"] or profile.name
+                    profile.role = record["title"]
+                    profile.organization = record["org"]
+                    profile.email_count = record["email_count"] or 0
+                    if record["last_email"]:
+                        last = record["last_email"]
+                        if hasattr(last, "to_native"):
+                            profile.last_email_date = last.to_native()
+
+                # Get shared projects/tasks
+                result = await session.run("""
+                    MATCH (p:Person {email: $email})-[:ASSIGNED_TO|MENTIONED_IN]-(t:Task)
+                    WHERE t.status IN ['pending', 'in_progress']
+                    RETURN t.title as title, t.project_id as project
+                    LIMIT 5
+                """, {"email": email.lower()})
+
+                records = await result.data()
+                profile.open_tasks = [r["title"] for r in records if r.get("title")]
+                profile.shared_projects = list(set(
+                    r["project"] for r in records if r.get("project")
+                ))
+
+            except Exception as e:
+                logger.warning("Failed to build attendee profile", email=email, error=str(e))
+            break
+
+        # Generate relationship summary
+        if profile.email_count > 0:
+            profile.relationship_summary = (
+                f"{profile.email_count} emails exchanged"
+                + (f", {len(profile.open_tasks)} open tasks" if profile.open_tasks else "")
+            )
+        else:
+            profile.relationship_summary = "No prior email history"
+
+        return profile
+
+    async def _get_ambient_context(self, person_email: str) -> AmbientContext | None:
+        """Get ambient context for a person (what happened since last meeting)."""
+        try:
+            from cognitex.services.relationship_timeline import get_relationship_timeline_builder
+
+            builder = get_relationship_timeline_builder()
+            context = await builder.build_ambient_context(person_email)
+
+            # Convert to our dataclass (they're compatible but may differ)
+            return AmbientContext(
+                person_email=context.person_email,
+                person_name=context.person_name,
+                last_meeting=context.last_meeting,
+                last_meeting_date=context.last_meeting_date,
+                emails_since=context.emails_since,
+                emails_from_them=context.emails_from_them,
+                emails_to_them=context.emails_to_them,
+                email_topics=context.email_topics,
+                open_tasks_involving=[],
+                pending_requests=context.pending_requests,
+                awaiting_their_response=context.awaiting_their_response,
+                summary=context.summary,
+            )
+        except Exception as e:
+            logger.warning("Failed to get ambient context", email=person_email, error=str(e))
+            return None
+
+    async def _generate_what_to_know(
+        self,
+        event: dict,
+        attendee_profiles: list[AttendeeProfile],
+        ambient_contexts: list[AmbientContext],
+        doc_analysis: list[dict],
+    ) -> list[str]:
+        """Generate key things the user needs to know before this meeting."""
+        things_to_know = []
+
+        summary = event.get("summary", "")
+        description = event.get("description", "")
+
+        # Add key attendee context
+        for profile in attendee_profiles[:3]:
+            if profile.organization:
+                things_to_know.append(
+                    f"{profile.name} is from {profile.organization}"
+                    + (f" ({profile.role})" if profile.role else "")
+                )
+            elif profile.email_count == 0:
+                things_to_know.append(f"First time meeting {profile.name} - no prior emails")
+
+        # Add relationship context highlights
+        for ctx in ambient_contexts[:3]:
+            if ctx.awaiting_their_response:
+                things_to_know.append(
+                    f"{ctx.person_name or ctx.person_email.split('@')[0]} is waiting for your response"
+                )
+            if ctx.pending_requests:
+                things_to_know.append(
+                    f"You have a pending request from {ctx.person_name or ctx.person_email.split('@')[0]}"
+                )
+            if ctx.last_meeting:
+                things_to_know.append(ctx.summary)
+
+        # Add document highlights
+        for doc in doc_analysis[:2]:
+            if doc.get("key_points"):
+                points = doc["key_points"][:2]
+                things_to_know.append(f"From {doc.get('name', 'document')}: {'; '.join(points)}")
+
+        # If we have good context, use LLM to generate smart summary
+        if (attendee_profiles or ambient_contexts) and len(things_to_know) < 3:
+            try:
+                from cognitex.services.llm import get_llm_service
+                llm = get_llm_service()
+
+                context_text = f"""
+Meeting: {summary}
+Description: {description[:500]}
+
+Attendees:
+{chr(10).join(f"- {p.name} ({p.organization or 'unknown org'}): {p.relationship_summary}" for p in attendee_profiles[:3])}
+
+Recent history:
+{chr(10).join(ctx.summary for ctx in ambient_contexts[:3] if ctx.summary)}
+"""
+                prompt = f"""Based on this meeting context, list 2-3 key things the person should know before this meeting. Be specific and actionable.
+
+{context_text}
+
+Return ONLY a JSON array of strings, each being one key thing to know. Example:
+["John is the new CEO - adjust your pitch accordingly", "You owe Sarah a response about the budget"]"""
+
+                response = await llm.complete(prompt, max_tokens=300, temperature=0.3)
+
+                # Parse response
+                import json
+                response = response.strip()
+                if response.startswith("```"):
+                    response = response.split("\n", 1)[1].rsplit("```", 1)[0]
+
+                items = json.loads(response)
+                if isinstance(items, list):
+                    things_to_know.extend(items[:3])
+
+            except Exception as e:
+                logger.debug("Failed to generate LLM what-to-know", error=str(e))
+
+        return things_to_know[:5]  # Max 5 items
+
     async def _get_last_interaction(
         self,
         attendees: list[dict],
@@ -883,6 +1177,116 @@ Focus on facts, recent developments, and key relationships."""
         except Exception:
             pass
         return None
+
+    async def _gather_document_analysis(
+        self,
+        event_id: str,
+        event_title: str,
+        artifacts: list[dict],
+    ) -> list[dict]:
+        """Analyze documents referenced in the event or artifacts.
+
+        Uses the DocumentAnalyzer to extract key content, changes,
+        highlights, and review items from referenced Drive documents.
+
+        Args:
+            event_id: Calendar event ID
+            event_title: Event title for context
+            artifacts: List of artifact dicts with drive_id
+
+        Returns:
+            List of document analysis dicts
+        """
+        analyzer = await _get_document_analyzer()
+        if not analyzer:
+            return []
+
+        analyses = []
+
+        try:
+            from cognitex.services.drive import get_drive_service
+
+            drive = get_drive_service()
+
+            # Analyze top 3 most relevant documents from artifacts
+            docs_to_analyze = [
+                a for a in artifacts
+                if a.get("drive_id") and a.get("relevance_score", 0) > 0.5
+            ][:3]
+
+            for artifact in docs_to_analyze:
+                drive_id = artifact.get("drive_id")
+                doc_name = artifact.get("title", "Document")
+
+                try:
+                    # Get document metadata for MIME type
+                    file_meta = drive.get_file_metadata(drive_id)
+                    if not file_meta:
+                        continue
+
+                    mime_type = file_meta.get("mimeType", "")
+
+                    # Get raw document bytes from Drive
+                    content = drive.get_file_bytes(drive_id, mime_type)
+                    if not content:
+                        continue
+
+                    # Skip if file is too large (> 10MB)
+                    if len(content) > 10 * 1024 * 1024:
+                        logger.debug(
+                            "Skipping large document for analysis",
+                            drive_id=drive_id,
+                            size=len(content),
+                        )
+                        continue
+
+                    # Determine filename with proper extension
+                    filename = file_meta.get("name", doc_name)
+                    if not filename.endswith((".docx", ".pdf", ".xlsx", ".pptx")):
+                        # Add extension based on MIME type
+                        ext_map = {
+                            "application/vnd.google-apps.document": ".docx",
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+                            "application/pdf": ".pdf",
+                            "application/vnd.google-apps.spreadsheet": ".xlsx",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+                            "application/vnd.google-apps.presentation": ".pptx",
+                            "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+                        }
+                        ext = ext_map.get(mime_type, "")
+                        if ext:
+                            filename = filename + ext
+
+                    # Analyze the document
+                    analysis = await analyzer.analyze(
+                        filename=filename,
+                        content=content,
+                        context=f"Referenced in meeting: {event_title}",
+                    )
+
+                    if analysis:
+                        analysis_dict = analysis.to_dict()
+                        analysis_dict["drive_id"] = drive_id
+                        analysis_dict["filename"] = filename
+                        analyses.append(analysis_dict)
+
+                        logger.debug(
+                            "Analyzed document for context pack",
+                            drive_id=drive_id,
+                            doc_name=filename[:30],
+                        )
+
+                except Exception as e:
+                    logger.warning(
+                        "Failed to analyze document for context pack",
+                        drive_id=drive_id,
+                        error=str(e),
+                    )
+
+        except Exception as e:
+            logger.warning("Failed to gather document analysis", error=str(e))
+
+        return analyses
 
     def _extract_decisions(self, description: str) -> list[str]:
         """Extract decision points from description."""
@@ -1592,32 +1996,26 @@ class ContextPackTriggerSystem:
     ) -> None:
         """Notify user when a context pack is ready (via Discord)."""
         try:
-            from cognitex.db.redis import get_redis
-            import json
+            from cognitex.services.notifications import publish_notification
 
             summary = event.get("summary", "Event")
 
             # Format missing prerequisites as bullet points
             missing_points = "\n".join([f"- {p}" for p in pack.missing_prerequisites[:3]])
 
-            # Create notification in the format the Discord bot expects
-            # Bot listens to cognitex:notifications and expects "message" and "urgency"
-            notification_payload = {
-                "message": (
+            # Use notification service with debouncing
+            await publish_notification(
+                message=(
                     f"**🧠 Context Pack Ready: {summary}**\n"
                     f"Readiness: {pack.readiness_score:.0%}\n"
                     f"Stage: {pack.build_stage.value}\n\n"
                     f"**Missing / Needs Attention:**\n{missing_points or 'None'}\n\n"
                     f"_Check dashboard for full briefing_"
                 ),
-                "urgency": "normal",
-                "type": "context_pack",
-                "pack_id": pack.pack_id,
-            }
-
-            redis = get_redis()
-            # FIX: Publish to the correct channel that the bot actually listens to
-            await redis.publish("cognitex:notifications", json.dumps(notification_payload))
+                urgency="normal",
+                category="meeting",
+                metadata={"pack_id": pack.pack_id},
+            )
 
             # Also create inbox item for unified view
             try:
@@ -1645,11 +2043,43 @@ class ContextPackTriggerSystem:
                     except Exception:
                         pass
 
+                # Convert dataclasses to dicts for JSON serialization
+                attendee_profiles_data = []
+                for profile in pack.attendee_profiles:
+                    profile_dict = {
+                        "email": profile.email,
+                        "name": profile.name,
+                        "organization": profile.organization,
+                        "role": profile.role,
+                        "relationship_summary": profile.relationship_summary,
+                        "email_count": profile.email_count,
+                        "shared_projects": profile.shared_projects,
+                        "open_tasks": profile.open_tasks,
+                    }
+                    attendee_profiles_data.append(profile_dict)
+
+                ambient_context_data = []
+                for ctx in pack.ambient_context:
+                    ctx_dict = {
+                        "person_email": ctx.person_email,
+                        "person_name": ctx.person_name,
+                        "last_meeting": ctx.last_meeting,
+                        "emails_since": ctx.emails_since,
+                        "emails_from_them": ctx.emails_from_them,
+                        "emails_to_them": ctx.emails_to_them,
+                        "email_topics": ctx.email_topics,
+                        "pending_requests": ctx.pending_requests,
+                        "awaiting_their_response": ctx.awaiting_their_response,
+                        "summary": ctx.summary,
+                    }
+                    ambient_context_data.append(ctx_dict)
+
                 await inbox.create_item(
                     item_type="context_pack",
                     title=f"Context: {summary}",
                     summary=f"Readiness: {pack.readiness_score:.0%} | {len(pack.missing_prerequisites)} items need attention",
                     payload={
+                        # Basic metadata
                         "pack_id": pack.pack_id,
                         "readiness": pack.readiness_score,
                         "event_id": event.get("id"),
@@ -1657,6 +2087,15 @@ class ContextPackTriggerSystem:
                         "event_time": event_time_str,
                         "stage": pack.build_stage.value,
                         "missing_count": len(pack.missing_prerequisites),
+                        # Rich content
+                        "objective": pack.objective,
+                        "what_you_need_to_know": pack.what_you_need_to_know,
+                        "attendee_profiles": attendee_profiles_data,
+                        "ambient_context": ambient_context_data,
+                        "decision_list": pack.decision_list,
+                        "dont_forget": pack.dont_forget,
+                        "missing_prerequisites": pack.missing_prerequisites,
+                        "artifact_links": pack.artifact_links,
                     },
                     source_id=pack.pack_id,
                     source_type="context_packs",
@@ -1679,8 +2118,7 @@ class ContextPackTriggerSystem:
         Just the 3 key points you need to know before walking in.
         """
         try:
-            from cognitex.db.redis import get_redis
-            import json
+            from cognitex.services.notifications import publish_notification
 
             summary = event.get("summary", "Meeting")
             attendees = event.get("attendees", [])
@@ -1712,19 +2150,17 @@ class ContextPackTriggerSystem:
 
             cheat_text = "\n".join(cheat_lines) if cheat_lines else "No prep notes"
 
-            notification_payload = {
-                "message": (
+            # High urgency bypasses debouncing - whispers are time-sensitive
+            await publish_notification(
+                message=(
                     f"**🎯 {summary} starting in ~5 mins**\n\n"
                     f"{cheat_text}\n\n"
                     f"_Good luck!_"
                 ),
-                "urgency": "high",  # High priority for whisper
-                "type": "meeting_whisper",
-                "pack_id": pack.pack_id,
-            }
-
-            redis = get_redis()
-            await redis.publish("cognitex:notifications", json.dumps(notification_payload))
+                urgency="high",
+                category="meeting",
+                metadata={"pack_id": pack.pack_id},
+            )
 
             logger.info(
                 "Sent meeting whisper",

@@ -202,6 +202,7 @@ async def lifespan(app: FastAPI):
     from cognitex.db.phase4_schema import init_phase4_schema
     from cognitex.agent.triggers import start_triggers, stop_triggers
     from cognitex.services.push_notifications import get_watch_manager
+    from cognitex.services.notifications import init_notification_service, get_notification_service
     from cognitex.config import get_settings
 
     logger = structlog.get_logger()
@@ -214,6 +215,10 @@ async def lifespan(app: FastAPI):
 
     # Initialize Phase 4 learning schema
     await init_phase4_schema()
+
+    # Initialize notification service (debouncing + deduplication)
+    await init_notification_service()
+    logger.info("Notification service started (debouncing + deduplication)")
 
     # Start the full trigger system (includes autonomous agent + event listeners)
     try:
@@ -252,6 +257,13 @@ async def lifespan(app: FastAPI):
             await _notification_subscriber_task
         except asyncio.CancelledError:
             pass
+
+    # Stop notification service (flushes pending notifications)
+    try:
+        notification_service = get_notification_service()
+        await notification_service.stop()
+    except Exception:
+        pass
 
     try:
         await stop_triggers()

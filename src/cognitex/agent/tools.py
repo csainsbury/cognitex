@@ -625,20 +625,22 @@ class SendNotificationTool(BaseTool):
     }
 
     async def execute(self, message: str, urgency: str = "normal") -> ToolResult:
-        from cognitex.db.redis import get_redis
-        import json
+        from cognitex.services.notifications import publish_notification
 
         try:
-            # Publish to notification channel for the Discord bot to pick up
-            redis = get_redis()  # get_redis() is sync, returns async Redis client
-            notification_data = json.dumps({
-                "message": message,
-                "urgency": urgency,
-            })
-            subscribers = await redis.publish("cognitex:notifications", notification_data)
+            # Use notification service with debouncing and deduplication
+            sent = await publish_notification(
+                message=message,
+                urgency=urgency,
+                category="agent",
+            )
 
-            logger.info("Notification published", urgency=urgency, length=len(message), subscribers=subscribers)
-            return ToolResult(success=True, data={"queued": True, "subscribers": subscribers})
+            if sent:
+                logger.info("Notification queued", urgency=urgency, length=len(message))
+                return ToolResult(success=True, data={"queued": True})
+            else:
+                logger.debug("Notification deduplicated", urgency=urgency)
+                return ToolResult(success=True, data={"queued": False, "deduplicated": True})
         except Exception as e:
             logger.warning("Notification failed", error=str(e))
             return ToolResult(success=False, error=str(e))
@@ -774,23 +776,23 @@ class DraftEmailTool(BaseTool):
                 reasoning=reasoning,
             )
 
-            # 3. Send notification to Discord with approval buttons
+            # 3. Send notification with approval buttons (uses debouncing service)
             try:
-                redis = get_redis()
+                from cognitex.services.notifications import publish_notification
                 reasoning_line = f"\n_{reasoning}_" if reasoning else ""
-                notification = {
-                    "message": (
+                await publish_notification(
+                    message=(
                         f"**📧 Email Draft for Approval**\n\n"
                         f"**To:** {to}\n"
                         f"**Subject:** {subject}\n\n"
                         f"**Body:**\n```\n{body[:800]}{'...' if len(body) > 800 else ''}\n```"
                         f"{reasoning_line}"
                     ),
-                    "urgency": "normal",
-                    "approval_id": approval_id,
-                }
-                await redis.publish("cognitex:notifications", json.dumps(notification))
-                logger.info("Approval notification sent", approval_id=approval_id)
+                    urgency="normal",
+                    category="email",
+                    approval_id=approval_id,
+                )
+                logger.info("Approval notification queued", approval_id=approval_id)
             except Exception as e:
                 logger.warning("Failed to send approval notification", error=str(e))
 
@@ -817,6 +819,20 @@ class DraftEmailTool(BaseTool):
                 )
             except Exception as inbox_err:
                 logger.debug("Failed to create inbox item for email draft", error=str(inbox_err))
+
+            # 5. Track draft for edit learning
+            try:
+                from cognitex.services.email_style import track_draft_created
+                await track_draft_created(
+                    draft_id=draft_id,
+                    recipient_email=to,
+                    subject=subject,
+                    body=body,
+                    reply_to_email_id=reply_to_id,
+                    created_by="agent",
+                )
+            except Exception as track_err:
+                logger.debug("Failed to track draft lifecycle", error=str(track_err))
 
             logger.info("Email draft staged", approval_id=approval_id, draft_id=draft_id, to=to)
             return ToolResult(
@@ -1655,6 +1671,107 @@ class ReadDocumentTool(BaseTool):
             return ToolResult(success=False, error=str(e))
 
 
+class AnalyzeDocumentTool(BaseTool):
+    """Analyze a document in depth using AI-powered analysis.
+
+    Extracts tracked changes, comments, highlights, key decisions, action items,
+    and other semantic content from DOCX, PDF, XLSX, and PPTX files.
+    """
+
+    name = "analyze_document"
+    description = (
+        "Perform deep analysis on a document - extract tracked changes, comments, "
+        "highlights, key decisions, action items, and risks. "
+        "Best for documents sent for review or when you need to understand "
+        "the full content of a complex document."
+    )
+    risk = ToolRisk.READONLY
+    category = ToolCategory.READONLY
+    parameters = {
+        "drive_id": {"type": "string", "description": "Google Drive ID of the file to analyze"},
+        "context": {"type": "string", "description": "Context for the analysis (e.g., 'sent for review')", "optional": True},
+    }
+
+    async def execute(
+        self,
+        drive_id: str,
+        context: str = "",
+    ) -> ToolResult:
+        try:
+            from cognitex.services.drive import get_drive_service
+            from cognitex.services.document_analyzer import get_document_analyzer
+
+            drive = get_drive_service()
+            analyzer = get_document_analyzer()
+
+            # Get file metadata
+            file_meta = drive.get_file_metadata(drive_id)
+            if not file_meta:
+                return ToolResult(success=False, error=f"File not found: {drive_id}")
+
+            filename = file_meta.get("name", "document")
+            mime_type = file_meta.get("mimeType", "")
+
+            # Check if document type is supported
+            if not analyzer.is_supported(filename, mime_type):
+                return ToolResult(
+                    success=False,
+                    error=f"Document type not supported for analysis: {mime_type}"
+                )
+
+            # Get raw file bytes
+            content = drive.get_file_bytes(drive_id, mime_type)
+            if not content:
+                return ToolResult(success=False, error="Could not download file content")
+
+            # Check size limit (10MB)
+            if len(content) > 10 * 1024 * 1024:
+                return ToolResult(
+                    success=False,
+                    error=f"File too large for analysis ({len(content) / 1024 / 1024:.1f}MB). Max is 10MB."
+                )
+
+            # Determine filename with proper extension
+            if not any(filename.endswith(ext) for ext in [".docx", ".pdf", ".xlsx", ".pptx"]):
+                ext_map = {
+                    "application/vnd.google-apps.document": ".docx",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+                    "application/pdf": ".pdf",
+                    "application/vnd.google-apps.spreadsheet": ".xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+                    "application/vnd.google-apps.presentation": ".pptx",
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+                }
+                ext = ext_map.get(mime_type, "")
+                if ext:
+                    filename = filename + ext
+
+            # Analyze the document
+            analysis = await analyzer.analyze(
+                filename=filename,
+                content=content,
+                context=context,
+            )
+
+            # Build rich response
+            result_data = analysis.to_dict()
+            result_data["filename"] = filename
+            result_data["drive_id"] = drive_id
+
+            logger.info(
+                "Document analyzed",
+                drive_id=drive_id,
+                filename=filename[:30],
+                method=analysis.method,
+            )
+
+            return ToolResult(success=True, data=result_data)
+
+        except Exception as e:
+            logger.warning("Document analysis failed", drive_id=drive_id, error=str(e))
+            return ToolResult(success=False, error=str(e))
+
+
 class ToolRegistry:
     """Registry of all available tools."""
 
@@ -1683,6 +1800,7 @@ class ToolRegistry:
             GetGoalTool(),
             WebSearchTool(),
             WebFetchTool(),
+            AnalyzeDocumentTool(),
             # Auto-execute
             CreateTaskTool(),
             UpdateTaskTool(),
