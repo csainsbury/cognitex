@@ -5335,6 +5335,62 @@ async def approve_inbox_item(item_id: str):
     except Exception as e:
         logger.warning("Failed to trigger learning on approval", error=str(e))
 
+    # For email drafts, actually send the email
+    if item.item_type == "email_draft":
+        try:
+            from cognitex.services.gmail import GmailService
+            import asyncio
+
+            gmail = GmailService()
+            to = item.payload.get("to", "")
+            subject = item.payload.get("subject", "")
+            body = item.payload.get("body", item.payload.get("body_preview", ""))
+            thread_id = item.payload.get("thread_id")
+
+            if thread_id:
+                result = await asyncio.to_thread(
+                    gmail.send_reply,
+                    thread_id=thread_id,
+                    to=to,
+                    subject=subject,
+                    body=body,
+                )
+            else:
+                result = await asyncio.to_thread(
+                    gmail.send_message,
+                    to=to,
+                    subject=subject,
+                    body=body,
+                )
+
+            message_id = result.get("id", "unknown")
+            logger.info("Email sent via Gmail", to=to, message_id=message_id)
+
+            await log_action(
+                "email_sent",
+                "web_ui",
+                summary=f"Sent email to {to}: {subject[:50]}",
+                details={"item_id": item_id, "to": to, "subject": subject, "message_id": message_id}
+            )
+
+            return HTMLResponse(content=f"""
+                <div class="inbox-item" style="background: #d1fae5; border-color: #a7f3d0; opacity: 0.8;">
+                    <div class="inbox-item-title" style="color: #065f46;">
+                        ✓ Email sent to {html.escape(to)}
+                    </div>
+                </div>
+            """)
+
+        except Exception as e:
+            logger.error("Failed to send email", error=str(e))
+            return HTMLResponse(content=f"""
+                <div class="inbox-item" style="background: #fee2e2; border-color: #fca5a5;">
+                    <div class="inbox-item-title" style="color: #991b1b;">
+                        Failed to send email: {html.escape(str(e))}
+                    </div>
+                </div>
+            """, status_code=500)
+
     await log_action(
         "inbox_item_approved",
         "web_ui",
@@ -5347,6 +5403,169 @@ async def approve_inbox_item(item_id: str):
         <div class="inbox-item" style="background: #d1fae5; border-color: #a7f3d0; opacity: 0.8;">
             <div class="inbox-item-title" style="color: #065f46;">
                 ✓ Approved: {item.title}
+            </div>
+        </div>
+    """)
+
+
+@app.post("/api/inbox/{item_id}/edit-and-send", response_class=HTMLResponse)
+async def edit_and_send_email(
+    item_id: str,
+    to: str = Form(...),
+    subject: str = Form(...),
+    body: str = Form(...),
+    original_body: str = Form(""),
+):
+    """Edit an email draft and send it, learning from the edits."""
+    from cognitex.services.inbox import get_inbox_service
+    from cognitex.agent.action_log import log_action
+    from cognitex.agent.feedback_learning import record_feedback
+    from difflib import SequenceMatcher
+
+    inbox = get_inbox_service()
+    item = await inbox.get_item(item_id)
+
+    if not item:
+        return HTMLResponse(content="<div class='inbox-item'>Item not found</div>", status_code=404)
+
+    if item.item_type != "email_draft":
+        return HTMLResponse(content="<div class='inbox-item'>Not an email draft</div>", status_code=400)
+
+    # Calculate edit similarity (how much was changed)
+    similarity = SequenceMatcher(None, original_body, body).ratio()
+    edit_ratio = 1 - similarity  # Higher = more edits
+
+    # Analyze the edits for learning
+    edit_analysis = {
+        "similarity": similarity,
+        "edit_ratio": edit_ratio,
+        "original_length": len(original_body),
+        "final_length": len(body),
+        "length_change": len(body) - len(original_body),
+        "subject_changed": subject != item.payload.get("subject", ""),
+        "to_changed": to != item.payload.get("to", ""),
+    }
+
+    # Record for learning - this is valuable training data
+    try:
+        await record_feedback(
+            target_type="email_draft",
+            target_id=item_id,
+            feedback_category="edit_before_send",
+            feedback_text=f"User edited {edit_ratio:.0%} of the draft before sending",
+            was_rejection=False,
+            context={
+                "original_body": original_body[:1000],  # Store first 1000 chars
+                "edited_body": body[:1000],
+                "recipient": to,
+                "subject": subject,
+                **edit_analysis,
+            },
+        )
+    except Exception as e:
+        logger.warning("Failed to record edit feedback", error=str(e))
+
+    # Trigger expertise learning with edit data
+    try:
+        from cognitex.agent.expertise import get_expertise_manager
+        em = get_expertise_manager()
+
+        # Learn from the edit patterns
+        await em.self_improve(
+            domain="email_drafting",
+            action_type="draft_edited_and_sent",
+            action_result={
+                "edit_ratio": edit_ratio,
+                "subject_changed": edit_analysis["subject_changed"],
+                "length_change_percent": (edit_analysis["length_change"] / max(1, edit_analysis["original_length"])) * 100,
+            },
+            context={
+                "recipient": to,
+                "original_body_preview": original_body[:200],
+                "final_body_preview": body[:200],
+            }
+        )
+
+        # If significant edits, store as a learning example
+        if edit_ratio > 0.2:  # More than 20% edited
+            logger.info(
+                "Significant email edit for learning",
+                edit_ratio=edit_ratio,
+                recipient=to,
+            )
+    except Exception as e:
+        logger.warning("Failed to trigger learning on email edit", error=str(e))
+
+    # Actually send the email via Gmail API
+    try:
+        from cognitex.services.gmail import GmailService
+        import asyncio
+
+        gmail = GmailService()
+
+        # Check if this is a reply (has thread_id)
+        thread_id = item.payload.get("thread_id")
+
+        if thread_id:
+            # Send as reply to existing thread
+            result = await asyncio.to_thread(
+                gmail.send_reply,
+                thread_id=thread_id,
+                to=to,
+                subject=subject,
+                body=body,
+            )
+        else:
+            # Send as new message
+            result = await asyncio.to_thread(
+                gmail.send_message,
+                to=to,
+                subject=subject,
+                body=body,
+            )
+
+        message_id = result.get("id", "unknown")
+        logger.info("Email sent via Gmail", to=to, message_id=message_id)
+
+    except Exception as e:
+        logger.error("Failed to send email", error=str(e), to=to)
+        return HTMLResponse(content=f"""
+            <div class="inbox-item" style="background: #fee2e2; border-color: #fca5a5;">
+                <div class="inbox-item-title" style="color: #991b1b;">
+                    Failed to send email: {html.escape(str(e))}
+                </div>
+                <div style="font-size: 0.85rem; color: #b91c1c;">
+                    The email was not sent. Please try again or check your Gmail connection.
+                </div>
+            </div>
+        """, status_code=500)
+
+    # Mark item as approved
+    await inbox.approve_item(item_id)
+
+    await log_action(
+        "email_draft_edited_sent",
+        "web_ui",
+        summary=f"Edited and sent email to {to}: {subject[:50]}",
+        details={
+            "item_id": item_id,
+            "to": to,
+            "subject": subject,
+            "edit_ratio": edit_ratio,
+            "similarity": similarity,
+            "message_id": message_id,
+        }
+    )
+
+    # Return success message
+    edit_note = f" (edited {edit_ratio:.0%})" if edit_ratio > 0.05 else ""
+    return HTMLResponse(content=f"""
+        <div class="inbox-item" style="background: #d1fae5; border-color: #a7f3d0; opacity: 0.8;">
+            <div class="inbox-item-title" style="color: #065f46;">
+                ✓ Email sent to {html.escape(to)}{edit_note}
+            </div>
+            <div style="font-size: 0.85rem; color: #047857;">
+                Thanks for the edit - this helps improve future drafts!
             </div>
         </div>
     """)
@@ -5608,6 +5827,131 @@ async def dismiss_inbox_item(item_id: str):
     """)
 
 
+@app.post("/api/inbox/{item_id}/skip", response_class=HTMLResponse)
+async def skip_inbox_email(
+    item_id: str,
+    reason: str = Form(None),
+):
+    """Skip an email item (won't respond) and record for learning.
+
+    This endpoint specifically handles email-related inbox items and
+    records the decision to help learn which emails need responses.
+    """
+    from cognitex.services.inbox import get_inbox_service
+    from cognitex.agent.action_log import log_action
+
+    inbox = get_inbox_service()
+    item = await inbox.get_item(item_id)
+
+    if not item:
+        return HTMLResponse(content="<div class='inbox-item'>Item not found</div>", status_code=404)
+
+    # Record email response decision for learning
+    if item.item_type in ["email_draft", "email_review", "flagged_item"]:
+        await _record_email_skip_decision(item, reason)
+
+    # Dismiss the item
+    await inbox.dismiss_item(item_id)
+
+    await log_action(
+        "inbox_email_skipped",
+        "web_ui",
+        summary=f"Skipped email: {item.title[:50]}",
+        details={"item_id": item_id, "item_type": item.item_type, "reason": reason}
+    )
+
+    return HTMLResponse(content=f"""
+        <div class="inbox-item" style="background: #fef3c7; border-color: #fde68a; opacity: 0.8;">
+            <div class="inbox-item-title" style="color: #92400e;">
+                Skipped: {item.title}
+            </div>
+        </div>
+    """)
+
+
+async def _record_email_skip_decision(item, reason: str | None) -> None:
+    """Record an email skip decision for response pattern learning.
+
+    Args:
+        item: The inbox item being skipped
+        reason: Optional reason for skipping
+    """
+    from cognitex.db.postgres import get_session
+    from sqlalchemy import text
+    from datetime import datetime
+
+    try:
+        # Extract email details from payload
+        email_id = item.payload.get("email_id") or item.payload.get("gmail_id")
+        sender = item.payload.get("from") or item.payload.get("sender_email", "")
+        subject = item.payload.get("subject", item.title)
+        intent = item.payload.get("intent")
+        intent_confidence = item.payload.get("intent_confidence")
+
+        if not email_id:
+            return
+
+        # Extract sender domain
+        sender_domain = None
+        if "@" in sender:
+            sender_domain = sender.split("@")[1].lower()
+
+        # Get current context
+        hour_of_day = datetime.now().hour
+        day_of_week = datetime.now().weekday()
+
+        # Try to get operating mode
+        operating_mode = None
+        try:
+            from cognitex.agent.state_model import get_state_estimator
+            state = await get_state_estimator().get_current_state()
+            operating_mode = state.mode.value if state else None
+        except Exception:
+            pass
+
+        async for session in get_session():
+            try:
+                await session.execute(
+                    text("""
+                        INSERT INTO email_response_decisions (
+                            email_id, sender_email, sender_domain, subject,
+                            intent, intent_confidence, predicted_needs_response,
+                            user_decision, decision_reason,
+                            operating_mode, hour_of_day, day_of_week,
+                            did_respond
+                        ) VALUES (
+                            :email_id, :sender, :domain, :subject,
+                            :intent, :confidence, :predicted,
+                            'skipped', :reason,
+                            :mode, :hour, :day,
+                            false
+                        )
+                        ON CONFLICT DO NOTHING
+                    """),
+                    {
+                        "email_id": email_id,
+                        "sender": sender,
+                        "domain": sender_domain,
+                        "subject": subject[:200] if subject else None,
+                        "intent": intent,
+                        "confidence": intent_confidence,
+                        "predicted": item.payload.get("predicted_needs_response", True),
+                        "reason": reason,
+                        "mode": operating_mode,
+                        "hour": hour_of_day,
+                        "day": day_of_week,
+                    },
+                )
+                await session.commit()
+                logger.debug("Recorded email skip decision", email_id=email_id)
+            except Exception as e:
+                logger.warning("Failed to record email skip decision", error=str(e))
+            break
+
+    except Exception as e:
+        logger.warning("Error recording email skip", error=str(e))
+
+
 @app.post("/api/inbox/{item_id}/helpful")
 async def mark_inbox_item_helpful(item_id: str, helpful: bool = True):
     """Mark a context pack or similar item as helpful/not helpful."""
@@ -5642,6 +5986,232 @@ async def mark_inbox_item_helpful(item_id: str, helpful: bool = True):
     )
 
     return {"success": True, "helpful": helpful}
+
+
+@app.post("/api/inbox/{item_id}/rebuild", response_class=HTMLResponse)
+async def rebuild_context_pack(request: Request, item_id: str):
+    """Rebuild a context pack with fresh data."""
+    from cognitex.services.inbox import get_inbox_service
+    from cognitex.agent.context_pack import get_context_pack_compiler, BuildStage
+    from cognitex.services.calendar import CalendarService
+    from cognitex.agent.action_log import log_action
+    from datetime import datetime, timedelta
+    from dateutil.parser import parse as parse_dt
+
+    inbox = get_inbox_service()
+    item = await inbox.get_item(item_id)
+
+    if not item:
+        return HTMLResponse(content="<div class='alert alert-danger'>Item not found</div>", status_code=404)
+
+    if item.item_type != "context_pack":
+        return HTMLResponse(content="<div class='alert alert-danger'>Not a context pack</div>", status_code=400)
+
+    event_id = item.payload.get("event_id")
+    if not event_id:
+        return HTMLResponse(content="<div class='alert alert-danger'>No event ID in pack</div>", status_code=400)
+
+    try:
+        # Get the calendar event
+        calendar = CalendarService()
+        event = calendar.get_event(event_id)
+
+        if not event:
+            return HTMLResponse(content="<div class='alert alert-danger'>Calendar event not found</div>", status_code=404)
+
+        # Determine appropriate build stage based on time until event
+        event_time_str = event.get("start", {}).get("dateTime", "")
+        stage = BuildStage.T_24H
+        if event_time_str:
+            event_dt = parse_dt(event_time_str)
+            hours_until = (event_dt - datetime.now(event_dt.tzinfo)).total_seconds() / 3600
+
+            if hours_until <= 0.25:
+                stage = BuildStage.T_15M
+            elif hours_until <= 2:
+                stage = BuildStage.T_2H
+
+        # Compile fresh pack
+        compiler = get_context_pack_compiler()
+        pack = await compiler.compile_for_event(event, stage)
+
+        # Convert dataclasses to dicts for JSON serialization
+        attendee_profiles_data = []
+        for profile in pack.attendee_profiles:
+            profile_dict = {
+                "email": profile.email,
+                "name": profile.name,
+                "organization": profile.organization,
+                "role": profile.role,
+                "relationship_summary": profile.relationship_summary,
+                "email_count": profile.email_count,
+                "shared_projects": profile.shared_projects,
+                "open_tasks": profile.open_tasks,
+            }
+            attendee_profiles_data.append(profile_dict)
+
+        ambient_context_data = []
+        for ctx in pack.ambient_context:
+            ctx_dict = {
+                "person_email": ctx.person_email,
+                "person_name": ctx.person_name,
+                "last_meeting": ctx.last_meeting,
+                "emails_since": ctx.emails_since,
+                "emails_from_them": ctx.emails_from_them,
+                "emails_to_them": ctx.emails_to_them,
+                "email_topics": ctx.email_topics,
+                "pending_requests": ctx.pending_requests,
+                "awaiting_their_response": ctx.awaiting_their_response,
+                "summary": ctx.summary,
+            }
+            ambient_context_data.append(ctx_dict)
+
+        # Determine priority
+        priority = "normal"
+        if stage == BuildStage.T_15M:
+            priority = "urgent"
+        elif stage == BuildStage.T_2H:
+            priority = "high"
+
+        # Set expiry
+        expires_at = None
+        if event_time_str:
+            try:
+                event_dt = parse_dt(event_time_str)
+                expires_at = event_dt + timedelta(minutes=30)
+            except Exception:
+                pass
+
+        summary = event.get("summary", "Meeting")
+
+        # Update the existing inbox item with fresh data (don't dismiss and recreate)
+        new_payload = {
+            "pack_id": pack.pack_id,
+            "readiness": pack.readiness_score,
+            "event_id": event.get("id"),
+            "event_title": summary,
+            "event_time": event_time_str,
+            "stage": stage.value,
+            "missing_count": len(pack.missing_prerequisites),
+            # Rich content
+            "objective": pack.objective,
+            "what_you_need_to_know": pack.what_you_need_to_know,
+            "attendee_profiles": attendee_profiles_data,
+            "ambient_context": ambient_context_data,
+            "decision_list": pack.decision_list,
+            "dont_forget": pack.dont_forget,
+            "missing_prerequisites": pack.missing_prerequisites,
+            "artifact_links": pack.artifact_links,
+        }
+
+        # Update the item in place
+        await inbox.update_item(
+            item_id,
+            payload=new_payload,
+            summary=f"Readiness: {pack.readiness_score:.0%} | {len(pack.missing_prerequisites)} items need attention",
+            priority=priority,
+        )
+
+        await log_action(
+            "context_pack_rebuilt",
+            "web_ui",
+            summary=f"Rebuilt context pack for: {summary}",
+            details={"event_id": event_id, "stage": stage.value, "readiness": pack.readiness_score}
+        )
+
+        # Re-fetch the updated item and render it
+        updated_item = await inbox.get_item(item_id)
+        return templates.TemplateResponse(
+            "partials/inbox_item_single.html",
+            {"request": request, "item": updated_item}
+        )
+
+    except Exception as e:
+        logger.warning("Failed to rebuild context pack", error=str(e), item_id=item_id)
+        return HTMLResponse(
+            content=f"<div class='alert alert-danger'>Failed to rebuild: {html.escape(str(e))}</div>",
+            status_code=500
+        )
+
+
+@app.post("/api/inbox/{item_id}/notes")
+async def save_inbox_notes(item_id: str, notes: str = Form(...)):
+    """Save user notes on an inbox item for learning."""
+    from cognitex.services.inbox import get_inbox_service
+    from cognitex.agent.action_log import log_action
+    from cognitex.agent.feedback_learning import record_feedback
+
+    inbox = get_inbox_service()
+    item = await inbox.get_item(item_id)
+
+    if not item:
+        return {"success": False, "error": "Item not found"}
+
+    # Record for learning
+    try:
+        await record_feedback(
+            target_type=item.item_type,
+            target_id=item_id,
+            feedback_category="user_notes",
+            feedback_text=notes,
+            was_rejection=False,
+            context=item.payload,
+        )
+    except Exception as e:
+        logger.warning("Failed to record feedback", error=str(e))
+
+    # Also log the action
+    await log_action(
+        "inbox_item_notes",
+        "web_ui",
+        summary=f"User added notes to {item.item_type}: {item.title[:50]}",
+        details={"item_id": item_id, "notes": notes[:500], "item_type": item.item_type}
+    )
+
+    return {"success": True, "message": "Notes saved - thanks for the feedback!"}
+
+
+@app.get("/context-packs", response_class=HTMLResponse)
+async def context_packs_page(request: Request):
+    """View all context packs (pending and past)."""
+    from cognitex.services.inbox import get_inbox_service
+    from cognitex.db.postgres import get_session
+    from sqlalchemy import text
+
+    inbox = get_inbox_service()
+
+    # Get pending context packs from inbox
+    pending_items = await inbox.get_pending_items(item_type="context_pack", limit=20)
+
+    # Get recent approved/dismissed context packs
+    past_items = []
+    async for session in get_session():
+        try:
+            result = await session.execute(text("""
+                SELECT id, item_type, status, priority, title, summary,
+                       payload, source_id, source_type, created_at,
+                       decided_at, decision_reason, expires_at
+                FROM inbox_items
+                WHERE item_type = 'context_pack'
+                  AND status IN ('approved', 'dismissed')
+                ORDER BY decided_at DESC
+                LIMIT 20
+            """))
+            from cognitex.services.inbox import InboxItem
+            for row in result.fetchall():
+                past_items.append(InboxItem.from_row(row))
+        except Exception as e:
+            logger.warning("Failed to get past context packs", error=str(e))
+        break
+
+    return templates.TemplateResponse(
+        "context_packs.html",
+        {
+            "request": request,
+            "pending_items": pending_items,
+            "past_items": past_items,
+        }
+    )
 
 
 @app.get("/learning", response_class=HTMLResponse)
@@ -8365,6 +8935,515 @@ async def link_idea_to_project(
             "projects": projects,
         },
     )
+
+
+# -------------------------------------------------------------------
+# Help Page
+# -------------------------------------------------------------------
+
+
+@app.get("/help", response_class=HTMLResponse)
+async def help_page(request: Request):
+    """Help page with usage information and learning stats."""
+    from cognitex.db.postgres import get_session
+    from sqlalchemy import text
+
+    stats = {}
+
+    async for session in get_session():
+        try:
+            # Style profiles count
+            result = await session.execute(text(
+                "SELECT COUNT(*) FROM email_style_profiles"
+            ))
+            row = result.fetchone()
+            stats["style_profiles"] = row[0] if row else 0
+
+            # Response decisions count
+            result = await session.execute(text(
+                "SELECT COUNT(*) FROM email_response_decisions"
+            ))
+            row = result.fetchone()
+            stats["response_decisions"] = row[0] if row else 0
+
+            # Draft tracking stats
+            result = await session.execute(text("""
+                SELECT COUNT(*), AVG(edit_ratio)
+                FROM email_draft_lifecycle
+                WHERE status = 'sent'
+            """))
+            row = result.fetchone()
+            stats["drafts_tracked"] = row[0] if row else 0
+            stats["avg_edit_ratio"] = row[1] if row and row[1] else None
+
+        except Exception:
+            pass
+        break
+
+    return templates.TemplateResponse(
+        "help.html",
+        {"request": request, "stats": stats},
+    )
+
+
+# -------------------------------------------------------------------
+# Maintenance Endpoints
+# -------------------------------------------------------------------
+
+
+@app.post("/api/maintenance/clear-old-inbox", response_class=HTMLResponse)
+async def clear_old_inbox(request: Request):
+    """Clear inbox items older than 7 days."""
+    from cognitex.services.inbox import get_inbox_service
+
+    inbox = get_inbox_service()
+    cleared = await inbox.clear_old_items(days=7)
+
+    return f"""
+    <div class="alert alert-success" style="padding: 1rem; background: #166534; border-radius: 8px; margin: 1rem 0;">
+        Cleared {cleared} old inbox items. <a href="/help">Back to Help</a>
+    </div>
+    """
+
+
+@app.post("/api/maintenance/clear-old-drafts", response_class=HTMLResponse)
+async def clear_old_drafts(request: Request):
+    """Clear old email drafts from Neo4j."""
+    from cognitex.db.neo4j import get_neo4j_session
+
+    cleared = 0
+    async for session in get_neo4j_session():
+        try:
+            result = await session.run("""
+                MATCH (d:EmailDraft)
+                WHERE d.created_at < datetime() - duration('P7D')
+                DETACH DELETE d
+                RETURN count(*) as deleted
+            """)
+            record = await result.single()
+            cleared = record["deleted"] if record else 0
+        except Exception:
+            pass
+        break
+
+    return f"""
+    <div class="alert alert-success" style="padding: 1rem; background: #166534; border-radius: 8px; margin: 1rem 0;">
+        Cleared {cleared} old draft nodes. <a href="/help">Back to Help</a>
+    </div>
+    """
+
+
+@app.post("/api/maintenance/clear-dismissed", response_class=HTMLResponse)
+async def clear_dismissed_items(request: Request):
+    """Clear all dismissed inbox items."""
+    from cognitex.services.inbox import get_inbox_service
+
+    inbox = get_inbox_service()
+    cleared = await inbox.clear_dismissed()
+
+    return f"""
+    <div class="alert alert-success" style="padding: 1rem; background: #166534; border-radius: 8px; margin: 1rem 0;">
+        Cleared {cleared} dismissed items. <a href="/help">Back to Help</a>
+    </div>
+    """
+
+
+# =============================================================================
+# Bootstrap Routes - Personality, Identity, Context editing
+# =============================================================================
+
+
+@app.get("/bootstrap", response_class=HTMLResponse)
+async def bootstrap_page(request: Request):
+    """Bootstrap files editor page."""
+    from cognitex.agent.bootstrap import init_bootstrap, get_bootstrap_loader
+
+    await init_bootstrap()
+    loader = get_bootstrap_loader()
+    files = await loader.get_all()
+
+    return templates.TemplateResponse(
+        "bootstrap.html",
+        {
+            "request": request,
+            "files": files,
+            "soul": files.get("SOUL"),
+            "identity": files.get("IDENTITY"),
+            "context": files.get("CONTEXT"),
+        },
+    )
+
+
+@app.get("/api/bootstrap/{filename}", response_class=JSONResponse)
+async def get_bootstrap_file(filename: str):
+    """Get a bootstrap file's content."""
+    from cognitex.agent.bootstrap import get_bootstrap_loader
+
+    loader = get_bootstrap_loader()
+    file = await loader.get_file(f"{filename.upper()}.md")
+
+    if not file:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return {
+        "name": file.name,
+        "content": file.raw_content,
+        "last_modified": file.last_modified.isoformat() if file.last_modified else None,
+    }
+
+
+@app.post("/api/bootstrap/{filename}", response_class=HTMLResponse)
+async def save_bootstrap_file(
+    request: Request,
+    filename: str,
+    content: Annotated[str, Form()],
+):
+    """Save a bootstrap file."""
+    from cognitex.agent.bootstrap import get_bootstrap_loader
+
+    valid_files = ["soul", "identity", "context"]
+    if filename.lower() not in valid_files:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    loader = get_bootstrap_loader()
+    success = await loader.save_file(f"{filename.upper()}.md", content)
+
+    if not success:
+        return HTMLResponse('<div class="alert alert-danger">Failed to save</div>')
+
+    return HTMLResponse(f'<div class="alert alert-success" style="padding: 0.5rem; background: var(--success-bg); border-radius: 6px;">Saved {filename.upper()}.md</div>')
+
+
+@app.post("/api/bootstrap/test-voice", response_class=HTMLResponse)
+async def test_bootstrap_voice(
+    request: Request,
+    to: Annotated[str, Form()] = "colleague@example.com",
+    subject: Annotated[str, Form()] = "Test Email",
+    instructions: Annotated[str, Form()] = "Write a brief follow-up",
+):
+    """Test email drafting with current bootstrap voice settings."""
+    from cognitex.agent.executors import EmailExecutor
+
+    executor = EmailExecutor()
+
+    try:
+        result = await executor._draft_email(
+            args={
+                "to": to,
+                "subject": subject,
+                "instructions": instructions,
+            },
+            reasoning="Testing bootstrap voice settings",
+        )
+
+        if result.success and result.data:
+            body = result.data.get("body", "")
+            return HTMLResponse(f"""
+                <div style="background: var(--bg-card); padding: 1rem; border-radius: var(--radius); border: 1px solid var(--border);">
+                    <div style="font-weight: 600; margin-bottom: 0.5rem;">Generated Draft:</div>
+                    <div style="white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.9rem;">{html.escape(body)}</div>
+                </div>
+            """)
+        else:
+            return HTMLResponse(f'<div class="alert alert-danger">Error: {result.error}</div>')
+    except Exception as e:
+        return HTMLResponse(f'<div class="alert alert-danger">Error: {str(e)}</div>')
+
+
+# =============================================================================
+# Skills Routes - Teachable agent behaviors
+# =============================================================================
+
+
+@app.get("/skills", response_class=HTMLResponse)
+async def skills_page(request: Request):
+    """Skills editor page."""
+    from cognitex.agent.skills import init_skills, get_skills_loader
+
+    await init_skills()
+    loader = get_skills_loader()
+    skills = await loader.list_skills()
+
+    return templates.TemplateResponse(
+        "skills.html",
+        {
+            "request": request,
+            "skills": skills,
+        },
+    )
+
+
+@app.get("/api/skills/{name}", response_class=JSONResponse)
+async def get_skill(name: str):
+    """Get a skill's content."""
+    from cognitex.agent.skills import get_skills_loader
+
+    loader = get_skills_loader()
+    skill = await loader.get_skill(name)
+
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+    return {
+        "name": skill.name,
+        "content": skill.raw_content,
+        "purpose": skill.purpose,
+        "rules_count": len(skill.rules),
+        "is_user_skill": skill.is_user_skill,
+        "path": str(skill.path),
+    }
+
+
+@app.post("/api/skills/{name}", response_class=HTMLResponse)
+async def save_skill(
+    request: Request,
+    name: str,
+    content: Annotated[str, Form()],
+):
+    """Save a skill (creates user skill)."""
+    from cognitex.agent.skills import get_skills_loader
+
+    loader = get_skills_loader()
+    success = await loader.save_skill(name, content)
+
+    if not success:
+        return HTMLResponse('<div class="alert alert-danger">Failed to save</div>')
+
+    return HTMLResponse(f'<div class="alert alert-success" style="padding: 0.5rem; background: var(--success-bg); border-radius: 6px;">Saved skill: {name}</div>')
+
+
+@app.delete("/api/skills/{name}", response_class=HTMLResponse)
+async def delete_skill(name: str):
+    """Delete a user skill."""
+    from cognitex.agent.skills import get_skills_loader
+
+    loader = get_skills_loader()
+    success = await loader.delete_skill(name)
+
+    if not success:
+        return HTMLResponse('<div class="alert alert-warning">Cannot delete (only user skills can be deleted)</div>')
+
+    return HTMLResponse(f'<div class="alert alert-success">Deleted skill: {name}</div>')
+
+
+@app.post("/api/skills/test/{name}", response_class=HTMLResponse)
+async def test_skill(
+    request: Request,
+    name: str,
+    input_text: Annotated[str, Form()],
+):
+    """Test a skill with sample input."""
+    from cognitex.agent.skills import get_skills_loader
+    from cognitex.services.llm import get_llm_service
+
+    loader = get_skills_loader()
+    skill = await loader.get_skill(name)
+
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+    llm = get_llm_service()
+    skill_prompt = loader.format_skill_for_prompt(skill)
+
+    # Build test prompt
+    prompt = f"""Apply the following skill to the given input.
+
+## Skill: {skill.name}
+{skill_prompt}
+
+## Input:
+{input_text}
+
+## Task:
+Based on the skill rules and examples, analyze the input and provide the appropriate output.
+For task extraction skills, return a JSON array of tasks.
+For other skills, return the expected output format.
+
+Output:"""
+
+    try:
+        result = await llm.complete(prompt, max_tokens=1024, temperature=0.2)
+        return HTMLResponse(f"""
+            <div style="background: var(--bg-card); padding: 1rem; border-radius: var(--radius); border: 1px solid var(--border);">
+                <div style="font-weight: 600; margin-bottom: 0.5rem;">Skill Output:</div>
+                <div style="white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.9rem;">{html.escape(result)}</div>
+            </div>
+        """)
+    except Exception as e:
+        return HTMLResponse(f'<div class="alert alert-danger">Error: {str(e)}</div>')
+
+
+# =============================================================================
+# Memory Routes - Daily logs and curated knowledge
+# =============================================================================
+
+
+@app.get("/memory", response_class=HTMLResponse)
+async def memory_page(request: Request, date: str | None = None):
+    """Memory browser page."""
+    from datetime import date as date_type, datetime, timedelta
+    from cognitex.services.memory_files import init_memory_files, get_memory_file_service
+
+    await init_memory_files()
+    service = get_memory_file_service()
+
+    # Parse date or use today
+    if date:
+        try:
+            target_date = datetime.strptime(date, "%Y-%m-%d").date()
+        except ValueError:
+            target_date = date_type.today()
+    else:
+        target_date = date_type.today()
+
+    # Get daily log
+    daily_log = await service.get_daily_log(target_date)
+
+    # Get recent logs for navigation
+    recent_logs = await service.get_recent_logs(days=14)
+    available_dates = [log.date for log in recent_logs]
+
+    # Get curated memory
+    curated = await service.get_curated_memory()
+
+    return templates.TemplateResponse(
+        "memory.html",
+        {
+            "request": request,
+            "daily_log": daily_log,
+            "target_date": target_date,
+            "available_dates": available_dates,
+            "curated_memory": curated,
+            "entries": daily_log.entries if daily_log else [],
+            "timedelta": timedelta,  # Pass timedelta for template use
+        },
+    )
+
+
+@app.get("/api/memory/daily/{date_str}", response_class=JSONResponse)
+async def get_daily_memory(date_str: str):
+    """Get a daily memory log."""
+    from datetime import datetime
+    from cognitex.services.memory_files import get_memory_file_service
+
+    service = get_memory_file_service()
+
+    try:
+        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format")
+
+    log = await service.get_daily_log(target_date)
+
+    if not log:
+        return {"date": date_str, "entries": []}
+
+    return {
+        "date": date_str,
+        "entries": [
+            {
+                "id": e.id,
+                "timestamp": e.timestamp.isoformat(),
+                "category": e.category,
+                "content": e.content,
+                "tags": e.tags,
+                "source": e.source,
+            }
+            for e in log.entries
+        ],
+    }
+
+
+@app.post("/api/memory/write", response_class=HTMLResponse)
+async def write_memory_entry(
+    request: Request,
+    content: Annotated[str, Form()],
+    category: Annotated[str, Form()] = "User Note",
+):
+    """Write a new memory entry."""
+    from cognitex.services.memory_files import get_memory_file_service
+
+    service = get_memory_file_service()
+
+    entry = await service.write_entry(
+        content=content,
+        category=category,
+        source="user",
+    )
+
+    return HTMLResponse(f"""
+        <div class="alert alert-success" style="padding: 0.5rem; background: var(--success-bg); border-radius: 6px;">
+            Entry recorded (ID: {entry.id[:12]}...)
+        </div>
+    """)
+
+
+@app.get("/api/memory/curated", response_class=JSONResponse)
+async def get_curated_memory():
+    """Get curated memory content."""
+    from cognitex.services.memory_files import get_memory_file_service
+
+    service = get_memory_file_service()
+    content = await service.get_curated_memory()
+
+    return {"content": content}
+
+
+@app.post("/api/memory/curated", response_class=HTMLResponse)
+async def save_curated_memory(
+    request: Request,
+    content: Annotated[str, Form()],
+):
+    """Save curated memory."""
+    from cognitex.services.memory_files import get_memory_file_service
+
+    service = get_memory_file_service()
+    success = await service.save_curated_memory(content)
+
+    if not success:
+        return HTMLResponse('<div class="alert alert-danger">Failed to save</div>')
+
+    return HTMLResponse('<div class="alert alert-success" style="padding: 0.5rem; background: var(--success-bg); border-radius: 6px;">Saved curated memory</div>')
+
+
+@app.post("/api/memory/promote/{entry_id}", response_class=HTMLResponse)
+async def promote_to_curated(entry_id: str):
+    """Promote a daily entry to curated memory."""
+    from cognitex.services.memory_files import get_memory_file_service
+
+    service = get_memory_file_service()
+    success = await service.promote_to_curated(entry_id)
+
+    if not success:
+        return HTMLResponse('<div class="alert alert-warning">Entry not found or promotion failed</div>')
+
+    return HTMLResponse('<div class="alert alert-success" style="padding: 0.5rem; background: var(--success-bg); border-radius: 6px;">Promoted to long-term memory</div>')
+
+
+@app.get("/api/memory/search", response_class=JSONResponse)
+async def search_memory(
+    q: str,
+    days: int = 30,
+):
+    """Search memory entries."""
+    from cognitex.services.memory_files import get_memory_file_service
+
+    service = get_memory_file_service()
+    results = await service.search_memories(query=q, days=days)
+
+    return {
+        "query": q,
+        "results": [
+            {
+                "id": e.id,
+                "timestamp": e.timestamp.isoformat(),
+                "category": e.category,
+                "content": e.content,
+                "tags": e.tags,
+            }
+            for e in results[:50]
+        ],
+    }
 
 
 def run_server(host: str = "127.0.0.1", port: int = 8080):

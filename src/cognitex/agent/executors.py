@@ -44,15 +44,45 @@ class EmailExecutor(BaseExecutor):
     name = "email"
     description = "Handles email drafting, sending, and management"
 
-    # User's email style (should be loaded from config/learned)
-    EMAIL_STYLE = """
+    # Default style (used when no learned style is available)
+    DEFAULT_STYLE = """
 Writing style:
 - Tone: Professional but warm, not overly formal
 - Length: Concise, usually 2-4 short paragraphs
 - Structure: Brief acknowledgment, main point, clear next step
-- Sign-off: First name only (Chris)
+- Sign-off: First name only
 - Avoid: Excessive pleasantries, filler phrases, buzzwords
 """
+
+    async def _get_style_guidance(self, recipient_email: str | None) -> str:
+        """Get personalized style guidance for drafting emails.
+
+        Prioritizes bootstrap voice from SOUL.md (explicit user preferences),
+        falling back to learned style analyzer, then defaults.
+        """
+        # First try bootstrap voice (explicit user preferences)
+        try:
+            from cognitex.agent.bootstrap import get_bootstrap_loader
+            loader = get_bootstrap_loader()
+            bootstrap_voice = await loader.get_voice_guidance()
+
+            if bootstrap_voice and len(bootstrap_voice) > 30:
+                return bootstrap_voice
+        except Exception as e:
+            logger.debug("Failed to get bootstrap voice", error=str(e))
+
+        # Fall back to learned style analyzer
+        try:
+            from cognitex.services.email_style import get_email_style_analyzer
+            analyzer = get_email_style_analyzer()
+            guidance = await analyzer.generate_style_guidance(recipient_email)
+
+            if guidance and len(guidance) > 30:  # Has meaningful learned guidance
+                return f"Writing style (learned from your sent emails):\n{guidance}"
+        except Exception as e:
+            logger.warning("Failed to get style guidance", error=str(e))
+
+        return self.DEFAULT_STYLE
 
     async def execute(self, tool: str, args: dict, reasoning: str) -> ToolResult:
         """Execute an email tool."""
@@ -126,6 +156,10 @@ Writing style:
                 context_section += f"\n{sc.get('name', 'Unknown')} ({sc.get('org', 'Unknown org')})"
                 context_section += f" - {sc.get('email_count', 0)} prior emails, {sc.get('shared_task_count', 0)} shared tasks"
 
+        # Get personalized style guidance for this recipient
+        recipient = args.get('to')
+        style_guidance = await self._get_style_guidance(recipient)
+
         # Build the prompt with enhanced context
         prompt = f"""Write an email body for the following situation.
 
@@ -134,7 +168,7 @@ Writing style:
 To: {args.get('to', 'unknown')}
 Subject: {args.get('subject', 'No subject')}
 
-{self.EMAIL_STYLE}
+{style_guidance}
 
 Instructions:
 {args.get('instructions', 'Write an appropriate response.')}

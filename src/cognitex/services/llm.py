@@ -408,6 +408,9 @@ Return ONLY valid JSON, no other text."""
         """
         Infer actionable tasks from an email.
 
+        Uses the email-tasks skill for guidance on what constitutes a task
+        and what should be ignored.
+
         Args:
             email_data: Email metadata
             body: Optional full email body for better context
@@ -417,8 +420,11 @@ Return ONLY valid JSON, no other text."""
         """
         content = body[:2000] if body else email_data.get("snippet", "")
 
-        prompt = f"""Analyze this email and extract any actionable tasks for the recipient.
+        # Get skill guidance for task extraction
+        skill_guidance = await self._get_email_tasks_skill()
 
+        prompt = f"""Analyze this email and extract any actionable tasks for the recipient.
+{skill_guidance}
 Email:
 - From: {email_data.get('sender_name', '')} <{email_data.get('sender_email', '')}>
 - Subject: {email_data.get('subject', '')}
@@ -469,6 +475,31 @@ Return ONLY valid JSON, no other text."""
         except json.JSONDecodeError as e:
             logger.warning("Failed to parse LLM task inference response", error=str(e))
             return []
+
+    async def _get_email_tasks_skill(self) -> str:
+        """
+        Get the email-tasks skill for task extraction guidance.
+
+        Returns formatted skill content or empty string if not available.
+        """
+        try:
+            from cognitex.agent.skills import get_skills_loader
+
+            loader = get_skills_loader()
+            skill = await loader.get_skill("email-tasks")
+
+            if skill:
+                return f"""
+## Task Extraction Guidelines (from skill)
+
+{loader.format_skill_for_prompt(skill)}
+
+Apply these guidelines when deciding what to extract as tasks.
+"""
+            return ""
+        except Exception as e:
+            logger.debug("Failed to load email-tasks skill", error=str(e))
+            return ""
 
     async def draft_reply(
         self,

@@ -274,12 +274,19 @@ class Agent:
             except Exception as e:
                 logger.debug("Failed to load scratch pad context", error=str(e))
 
+        # Get bootstrap context (personality, identity, context)
+        bootstrap_context = await self._get_bootstrap_context()
+
+        # Get memory context (recent observations, curated knowledge)
+        memory_context = await self._get_memory_context()
+
         # Get current date/time for context
         now = datetime.now()
         current_date = now.strftime("%A, %B %d, %Y")
         current_time = now.strftime("%H:%M")
 
         return f"""You are Cognitex, a personal assistant with access to a knowledge graph containing emails, tasks, calendar events, contacts, and documents.
+{bootstrap_context}
 
 **Current date and time: {current_date} at {current_time}**
 
@@ -338,7 +345,40 @@ Example queries:
 - Recent emails: MATCH (e:Email) WHERE e.date > datetime() - duration('P7D') RETURN e ORDER BY e.date DESC LIMIT 10
 - Person's communication history: MATCH (p:Person {{email: $email}})<-[:SENT_BY]-(e:Email) RETURN e ORDER BY e.date DESC LIMIT 5
 {filter_notice}
-{scratch_context}"""
+{scratch_context}
+{memory_context}"""
+
+    async def _get_bootstrap_context(self) -> str:
+        """
+        Get bootstrap context from SOUL.md, IDENTITY.md, CONTEXT.md files.
+
+        Bootstrap files provide explicit personality and user context,
+        replacing algorithmic learning with human-editable files.
+        """
+        try:
+            from cognitex.agent.bootstrap import get_bootstrap_loader
+
+            loader = get_bootstrap_loader()
+            return await loader.get_formatted_prompt_section()
+        except Exception as e:
+            logger.debug("Failed to load bootstrap context", error=str(e))
+            return ""
+
+    async def _get_memory_context(self) -> str:
+        """
+        Get memory context from daily logs and curated memory.
+
+        Memory files provide human-readable, persistent observations
+        that the agent should remember across sessions.
+        """
+        try:
+            from cognitex.services.memory_files import get_memory_file_service
+
+            service = get_memory_file_service()
+            return await service.get_context_for_prompt(max_entries=10)
+        except Exception as e:
+            logger.debug("Failed to load memory context", error=str(e))
+            return ""
 
     async def _get_learned_context(self, message: str) -> str | None:
         """
@@ -918,6 +958,18 @@ Your response:"""
                     if edited_action:
                         result["was_edited"] = True
 
+                    # Track draft lifecycle (learn from edits)
+                    try:
+                        draft_id = approval["params"].get("draft_node_id")
+                        if draft_id:
+                            from cognitex.services.email_style import track_draft_sent
+                            await track_draft_sent(
+                                draft_id=draft_id,
+                                final_body=params["body"],
+                            )
+                    except Exception as track_e:
+                        logger.debug("Failed to track draft sent", error=str(track_e))
+
                     # Store to episodic memory (non-critical)
                     try:
                         await self.memory.episodic.store(
@@ -969,6 +1021,16 @@ Your response:"""
                     result["error"] = str(e)
 
         else:
+            # Track draft discarded if this was an email draft
+            if approval["action_type"] == "send_email":
+                try:
+                    draft_id = approval["params"].get("draft_node_id")
+                    if draft_id:
+                        from cognitex.services.email_style import track_draft_discarded
+                        await track_draft_discarded(draft_id)
+                except Exception as track_e:
+                    logger.debug("Failed to track draft discarded", error=str(track_e))
+
             if feedback:
                 try:
                     await self.memory.episodic.store(

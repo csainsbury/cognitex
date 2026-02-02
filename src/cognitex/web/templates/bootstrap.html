@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+
+{% block title %}Bootstrap - Cognitex{% endblock %}
+
+{% block content %}
+<h1>Bootstrap Files</h1>
+
+<p style="color: var(--text-muted); margin-bottom: 1.5rem;">
+    Bootstrap files define your communication style and context. Edit these markdown files to customize how Cognitex communicates.
+</p>
+
+<!-- Tab Navigation -->
+<div class="filters" style="margin-bottom: 1rem;">
+    <button class="btn btn-secondary tab-btn active" onclick="showTab('soul')">SOUL.md</button>
+    <button class="btn btn-secondary tab-btn" onclick="showTab('identity')">IDENTITY.md</button>
+    <button class="btn btn-secondary tab-btn" onclick="showTab('context')">CONTEXT.md</button>
+    <div style="flex: 1;"></div>
+    <button class="btn btn-primary" onclick="showTab('test')">Test Voice</button>
+</div>
+
+<!-- SOUL Tab -->
+<div id="tab-soul" class="tab-panel">
+    <div class="card">
+        <div class="card-header">
+            <h2>Communication Style & Voice</h2>
+            <span class="text-dim">~/.cognitex/bootstrap/SOUL.md</span>
+        </div>
+        <p style="color: var(--text-muted); margin-bottom: 1rem;">
+            Define how you want Cognitex to communicate: greeting style, tone, sign-off preferences, etc.
+        </p>
+        <form hx-post="/api/bootstrap/soul" hx-target="#soul-result" hx-swap="innerHTML">
+            <textarea name="content" rows="20" style="font-family: var(--font-mono); font-size: 0.9rem;">{{ soul.raw_content if soul else '' }}</textarea>
+            <div style="margin-top: 1rem; display: flex; gap: 0.5rem; align-items: center;">
+                <button type="submit" class="btn btn-primary">Save SOUL.md</button>
+                <span id="soul-result"></span>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- IDENTITY Tab -->
+<div id="tab-identity" class="tab-panel" style="display: none;">
+    <div class="card">
+        <div class="card-header">
+            <h2>User Context & Preferences</h2>
+            <span class="text-dim">~/.cognitex/bootstrap/IDENTITY.md</span>
+        </div>
+        <p style="color: var(--text-muted); margin-bottom: 1rem;">
+            Tell Cognitex about yourself: your role, key relationships, current priorities.
+        </p>
+        <form hx-post="/api/bootstrap/identity" hx-target="#identity-result" hx-swap="innerHTML">
+            <textarea name="content" rows="20" style="font-family: var(--font-mono); font-size: 0.9rem;">{{ identity.raw_content if identity else '' }}</textarea>
+            <div style="margin-top: 1rem; display: flex; gap: 0.5rem; align-items: center;">
+                <button type="submit" class="btn btn-primary">Save IDENTITY.md</button>
+                <span id="identity-result"></span>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- CONTEXT Tab -->
+<div id="tab-context" class="tab-panel" style="display: none;">
+    <div class="card">
+        <div class="card-header">
+            <h2>Ambient Context</h2>
+            <span class="text-dim">~/.cognitex/bootstrap/CONTEXT.md (auto-updated)</span>
+        </div>
+        <p style="color: var(--text-muted); margin-bottom: 1rem;">
+            This file is automatically updated with recent activity, open threads, and relationship notes.
+            You can also edit it manually.
+        </p>
+        <form hx-post="/api/bootstrap/context" hx-target="#context-result" hx-swap="innerHTML">
+            <textarea name="content" rows="20" style="font-family: var(--font-mono); font-size: 0.9rem;">{{ context.raw_content if context else '' }}</textarea>
+            <div style="margin-top: 1rem; display: flex; gap: 0.5rem; align-items: center;">
+                <button type="submit" class="btn btn-primary">Save CONTEXT.md</button>
+                <span id="context-result"></span>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Test Voice Tab -->
+<div id="tab-test" class="tab-panel" style="display: none;">
+    <div class="card">
+        <div class="card-header">
+            <h2>Test Your Voice Settings</h2>
+        </div>
+        <p style="color: var(--text-muted); margin-bottom: 1rem;">
+            Generate a sample email draft to see how your bootstrap settings affect writing style.
+        </p>
+        <form hx-post="/api/bootstrap/test-voice" hx-target="#test-result" hx-swap="innerHTML">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem;">
+                <div>
+                    <label style="font-weight: 500; display: block; margin-bottom: 0.25rem;">To:</label>
+                    <input type="email" name="to" value="colleague@example.com" placeholder="Recipient email">
+                </div>
+                <div>
+                    <label style="font-weight: 500; display: block; margin-bottom: 0.25rem;">Subject:</label>
+                    <input type="text" name="subject" value="Quick follow-up" placeholder="Email subject">
+                </div>
+            </div>
+            <div style="margin-bottom: 1rem;">
+                <label style="font-weight: 500; display: block; margin-bottom: 0.25rem;">Instructions:</label>
+                <textarea name="instructions" rows="3" placeholder="What should this email say?">Write a brief follow-up checking on the status of the project we discussed.</textarea>
+            </div>
+            <button type="submit" class="btn btn-primary">Generate Sample Draft</button>
+        </form>
+        <div id="test-result" style="margin-top: 1rem;"></div>
+    </div>
+</div>
+
+<style>
+.tab-btn.active {
+    background-color: var(--primary);
+    color: white;
+    border-color: var(--primary);
+}
+</style>
+
+<script>
+function showTab(name) {
+    // Hide all panels
+    document.querySelectorAll('.tab-panel').forEach(p => p.style.display = 'none');
+    // Show selected panel
+    document.getElementById('tab-' + name).style.display = 'block';
+    // Update button states
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    event.target.classList.add('active');
+}
+</script>
+{% endblock %}

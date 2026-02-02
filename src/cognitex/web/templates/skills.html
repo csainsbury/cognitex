@@ -1,0 +1,199 @@
+{% extends "base.html" %}
+
+{% block title %}Skills - Cognitex{% endblock %}
+
+{% block content %}
+<h1>Skills</h1>
+
+<p style="color: var(--text-muted); margin-bottom: 1.5rem;">
+    Skills are markdown files that teach Cognitex specific behaviors through rules and examples.
+    User skills override bundled skills with the same name.
+</p>
+
+<div class="two-col">
+    <!-- Skills List -->
+    <div>
+        <div class="card">
+            <div class="card-header">
+                <h2>Available Skills</h2>
+                <button class="btn btn-primary btn-sm" onclick="showNewSkillForm()">+ New Skill</button>
+            </div>
+
+            {% if skills %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Type</th>
+                        <th>Purpose</th>
+                        <th>Rules</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for skill in skills %}
+                    <tr class="skill-row" data-name="{{ skill.name }}" onclick="selectSkill('{{ skill.name }}')" style="cursor: pointer;">
+                        <td><strong>{{ skill.name }}</strong></td>
+                        <td>
+                            {% if skill.is_user_skill %}
+                            <span class="badge badge-active">user</span>
+                            {% else %}
+                            <span class="badge badge-archived">bundled</span>
+                            {% endif %}
+                        </td>
+                        <td class="text-dim" style="max-width: 200px; overflow: hidden; text-overflow: ellipsis;">
+                            {{ skill.purpose[:50] }}{% if skill.purpose|length > 50 %}...{% endif %}
+                        </td>
+                        <td>{{ skill.rules_count }}</td>
+                        <td>
+                            {% if skill.is_user_skill %}
+                            <button class="btn btn-danger btn-sm"
+                                    hx-delete="/api/skills/{{ skill.name }}"
+                                    hx-target="body"
+                                    hx-swap="outerHTML"
+                                    hx-confirm="Delete skill '{{ skill.name }}'?"
+                                    onclick="event.stopPropagation();">
+                                Delete
+                            </button>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="empty">
+                No skills found. Create one or check your skills directories.
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- New Skill Form (hidden by default) -->
+        <div id="new-skill-form" class="card" style="display: none;">
+            <div class="card-header">
+                <h2>Create New Skill</h2>
+                <button class="btn btn-secondary btn-sm" onclick="hideNewSkillForm()">Cancel</button>
+            </div>
+            <form hx-post="/api/skills/new-skill" hx-target="body" hx-swap="outerHTML">
+                <div style="margin-bottom: 1rem;">
+                    <label style="font-weight: 500; display: block; margin-bottom: 0.25rem;">Skill Name:</label>
+                    <input type="text" name="skill_name" placeholder="my-skill-name" pattern="[a-z0-9\-]+" required
+                           style="margin-bottom: 0.5rem;" onchange="updateSkillFormAction(this.value)">
+                    <div class="text-dim" style="font-size: 0.8rem;">Lowercase letters, numbers, and hyphens only</div>
+                </div>
+                <div style="margin-bottom: 1rem;">
+                    <label style="font-weight: 500; display: block; margin-bottom: 0.25rem;">Content:</label>
+                    <textarea name="content" rows="15" style="font-family: var(--font-mono); font-size: 0.9rem;"># My Skill
+
+## Purpose
+Describe what this skill accomplishes.
+
+## What IS
+- Example of what this skill should recognize
+
+## What is NOT
+- Example of what to ignore
+
+## Rules
+1. First rule
+2. Second rule
+
+## Examples
+
+### Example 1
+Input: ...
+Output: ...
+</textarea>
+                </div>
+                <button type="submit" class="btn btn-primary">Create Skill</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Skill Editor -->
+    <div>
+        <div class="card" id="skill-editor">
+            <div class="card-header">
+                <h2 id="editor-title">Select a Skill</h2>
+            </div>
+            <div id="editor-content">
+                <p class="text-dim">Click on a skill from the list to view and edit its definition.</p>
+            </div>
+        </div>
+
+        <!-- Test Skill -->
+        <div class="card" id="skill-tester" style="display: none;">
+            <div class="card-header">
+                <h2>Test Skill</h2>
+            </div>
+            <form id="test-skill-form" hx-swap="innerHTML">
+                <div style="margin-bottom: 1rem;">
+                    <label style="font-weight: 500; display: block; margin-bottom: 0.25rem;">Test Input:</label>
+                    <textarea name="input_text" rows="5" placeholder="Paste sample input to test the skill..."></textarea>
+                </div>
+                <button type="submit" class="btn btn-primary">Run Test</button>
+            </form>
+            <div id="test-result" style="margin-top: 1rem;"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+let currentSkill = null;
+
+function selectSkill(name) {
+    currentSkill = name;
+
+    // Highlight selected row
+    document.querySelectorAll('.skill-row').forEach(r => r.style.background = '');
+    document.querySelector(`.skill-row[data-name="${name}"]`).style.background = 'var(--primary-light)';
+
+    // Fetch skill content
+    fetch(`/api/skills/${name}`)
+        .then(r => r.json())
+        .then(skill => {
+            const isUser = skill.is_user_skill;
+            const typeLabel = isUser ? '<span class="badge badge-active">user</span>' : '<span class="badge badge-archived">bundled</span>';
+
+            document.getElementById('editor-title').innerHTML = `${skill.name} ${typeLabel}`;
+            document.getElementById('editor-content').innerHTML = `
+                <form hx-post="/api/skills/${skill.name}" hx-target="#save-result" hx-swap="innerHTML">
+                    <textarea name="content" rows="20" style="font-family: var(--font-mono); font-size: 0.9rem;">${escapeHtml(skill.content)}</textarea>
+                    <div style="margin-top: 1rem; display: flex; gap: 0.5rem; align-items: center;">
+                        <button type="submit" class="btn btn-primary">Save Changes</button>
+                        <span id="save-result"></span>
+                        ${!isUser ? '<span class="text-dim">(will create user override)</span>' : ''}
+                    </div>
+                </form>
+            `;
+
+            // Show and setup tester
+            document.getElementById('skill-tester').style.display = 'block';
+            document.getElementById('test-skill-form').setAttribute('hx-post', `/api/skills/test/${name}`);
+            document.getElementById('test-skill-form').setAttribute('hx-target', '#test-result');
+            htmx.process(document.getElementById('editor-content'));
+            htmx.process(document.getElementById('test-skill-form'));
+        });
+}
+
+function showNewSkillForm() {
+    document.getElementById('new-skill-form').style.display = 'block';
+}
+
+function hideNewSkillForm() {
+    document.getElementById('new-skill-form').style.display = 'none';
+}
+
+function updateSkillFormAction(name) {
+    const form = document.querySelector('#new-skill-form form');
+    form.setAttribute('hx-post', `/api/skills/${name}`);
+    htmx.process(form);
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+</script>
+{% endblock %}

@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+
+{% block title %}Memory - Cognitex{% endblock %}
+
+{% block content %}
+<h1>Memory</h1>
+
+<p style="color: var(--text-muted); margin-bottom: 1.5rem;">
+    Memory files store observations and knowledge that persist across sessions.
+    Daily logs are written by the agent; curated memory is edited by you.
+</p>
+
+<div class="two-col">
+    <!-- Daily Logs -->
+    <div>
+        <div class="card">
+            <div class="card-header">
+                <h2>Daily Log - {{ target_date.isoformat() }}</h2>
+                <div style="display: flex; gap: 0.5rem;">
+                    {% set prev_date = (target_date.toordinal() - 1)|string %}
+                    <a href="/memory?date={{ (target_date - timedelta(days=1)).isoformat() }}" class="btn btn-secondary btn-sm">&larr; Prev</a>
+                    <a href="/memory" class="btn btn-secondary btn-sm">Today</a>
+                    <a href="/memory?date={{ (target_date + timedelta(days=1)).isoformat() }}" class="btn btn-secondary btn-sm">Next &rarr;</a>
+                </div>
+            </div>
+
+            {% if entries %}
+            <div style="margin-bottom: 1rem;">
+                {% for entry in entries %}
+                <div style="padding: 0.75rem; border-bottom: 1px solid var(--border);">
+                    <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                        <div>
+                            <span style="font-weight: 600;">{{ entry.timestamp.strftime('%H:%M') }}</span>
+                            <span class="badge badge-{{ entry.source }}">{{ entry.category }}</span>
+                        </div>
+                        <button class="btn btn-secondary btn-sm"
+                                hx-post="/api/memory/promote/{{ entry.id }}"
+                                hx-target="#promote-result-{{ entry.id }}"
+                                hx-swap="innerHTML"
+                                title="Promote to long-term memory">
+                            &#x2605;
+                        </button>
+                    </div>
+                    <div style="margin-top: 0.5rem; white-space: pre-wrap;">{{ entry.content }}</div>
+                    {% if entry.tags %}
+                    <div style="margin-top: 0.5rem;">
+                        {% for tag in entry.tags %}
+                        <span class="topic-tag">#{{ tag }}</span>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+                    <span id="promote-result-{{ entry.id }}"></span>
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="empty">
+                No entries for {{ target_date.isoformat() }}.
+            </div>
+            {% endif %}
+
+            <!-- Write New Entry -->
+            <div style="border-top: 1px solid var(--border); padding-top: 1rem; margin-top: 1rem;">
+                <h3 style="font-size: 0.9rem; margin-bottom: 0.5rem;">Add Entry</h3>
+                <form hx-post="/api/memory/write" hx-target="#write-result" hx-swap="innerHTML">
+                    <div style="display: flex; gap: 0.5rem; margin-bottom: 0.5rem;">
+                        <input type="text" name="category" placeholder="Category" value="User Note" style="width: 150px;">
+                    </div>
+                    <textarea name="content" rows="3" placeholder="What do you want to remember?"></textarea>
+                    <div style="margin-top: 0.5rem; display: flex; gap: 0.5rem; align-items: center;">
+                        <button type="submit" class="btn btn-primary btn-sm">Add Entry</button>
+                        <span id="write-result"></span>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Date Navigation -->
+        <div class="card">
+            <h2>Recent Days</h2>
+            <div style="display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem;">
+                {% for d in available_dates %}
+                <a href="/memory?date={{ d.isoformat() }}"
+                   class="btn btn-sm {% if d == target_date %}btn-primary{% else %}btn-secondary{% endif %}">
+                    {{ d.strftime('%b %d') }}
+                </a>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+
+    <!-- Curated Memory -->
+    <div>
+        <div class="card">
+            <div class="card-header">
+                <h2>Curated Memory</h2>
+                <span class="text-dim">~/.cognitex/memory/MEMORY.md</span>
+            </div>
+            <p style="color: var(--text-muted); margin-bottom: 1rem;">
+                Long-term knowledge that should always be available. Edit this to add or correct information.
+            </p>
+            <form hx-post="/api/memory/curated" hx-target="#curated-result" hx-swap="innerHTML">
+                <textarea name="content" rows="25" style="font-family: var(--font-mono); font-size: 0.9rem;">{{ curated_memory }}</textarea>
+                <div style="margin-top: 1rem; display: flex; gap: 0.5rem; align-items: center;">
+                    <button type="submit" class="btn btn-primary">Save Curated Memory</button>
+                    <span id="curated-result"></span>
+                </div>
+            </form>
+        </div>
+
+        <!-- Search -->
+        <div class="card">
+            <h2>Search Memory</h2>
+            <div class="search-box" style="margin-top: 0.5rem;">
+                <input type="text" id="memory-search" placeholder="Search entries..."
+                       hx-get="/api/memory/search"
+                       hx-trigger="keyup changed delay:300ms"
+                       hx-target="#search-results"
+                       name="q">
+            </div>
+            <div id="search-results"></div>
+        </div>
+    </div>
+</div>
+
+<style>
+.badge-agent { background: var(--primary-light); color: var(--primary-text); }
+.badge-user { background: var(--success-bg); color: #065f46; }
+.badge-system { background: #f1f5f9; color: #475569; }
+</style>
+{% endblock %}

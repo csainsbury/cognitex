@@ -884,6 +884,7 @@
         <div class="nav-links" id="nav-links">
             <a href="/" {% if request.url.path == "/" %}class="active"{% endif %}>Dashboard</a>
             <a href="/today" {% if "/today" in request.url.path %}class="active"{% endif %}>Today</a>
+            <a href="/context-packs" {% if "/context-packs" in request.url.path %}class="active"{% endif %}>Context</a>
             <a href="/chat" {% if "/chat" in request.url.path %}class="active"{% endif %}>Chat</a>
             <a href="/inbox" {% if "/inbox" in request.url.path %}class="active"{% endif %} style="position: relative;">
                 Inbox
@@ -903,7 +904,11 @@
             <a href="/graph" {% if "/graph" in request.url.path %}class="active"{% endif %}>Graph</a>
             <a href="/learning" {% if "/learning" in request.url.path %}class="active"{% endif %}>Learning</a>
             <a href="/agent-log" {% if "/agent-log" in request.url.path %}class="active"{% endif %}>Agent Log</a>
+            <a href="/bootstrap" {% if "/bootstrap" in request.url.path %}class="active"{% endif %}>Bootstrap</a>
+            <a href="/skills" {% if "/skills" in request.url.path %}class="active"{% endif %}>Skills</a>
+            <a href="/memory" {% if "/memory" in request.url.path %}class="active"{% endif %}>Memory</a>
             <a href="/settings" {% if "/settings" in request.url.path %}class="active"{% endif %}>Settings</a>
+            <a href="/help" {% if "/help" in request.url.path %}class="active"{% endif %} style="color: #60a5fa;">Help</a>
             {% if request.state.user %}
             <div class="nav-user">
                 <span style="color: #64748b; font-size: 0.85rem;">{{ request.state.user.email }}</span>

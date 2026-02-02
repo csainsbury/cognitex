@@ -6797,5 +6797,452 @@ def consolidate_cmd(
     asyncio.run(run())
 
 
+# =============================================================================
+# Bootstrap Commands - Personality, Identity, Context files
+# =============================================================================
+
+bootstrap_app = typer.Typer(
+    name="bootstrap",
+    help="Manage bootstrap files (SOUL.md, IDENTITY.md, CONTEXT.md)",
+    no_args_is_help=True,
+)
+app.add_typer(bootstrap_app, name="bootstrap")
+
+
+@bootstrap_app.command("init")
+def bootstrap_init() -> None:
+    """Initialize bootstrap files in ~/.cognitex/bootstrap/."""
+
+    async def run_init():
+        from cognitex.agent.bootstrap import init_bootstrap, BOOTSTRAP_DIR
+
+        await init_bootstrap()
+
+        console.print("\n[bold green]Bootstrap files initialized![/bold green]")
+        console.print(f"Location: {BOOTSTRAP_DIR}")
+        console.print("\nFiles created:")
+        console.print("  [cyan]SOUL.md[/cyan] - Your communication style and voice")
+        console.print("  [cyan]IDENTITY.md[/cyan] - Your context and preferences")
+        console.print("  [cyan]CONTEXT.md[/cyan] - Auto-updated ambient context")
+        console.print("\nEdit these files to customize how Cognitex communicates.")
+        console.print("Use [bold]cognitex bootstrap edit soul[/bold] to open in your editor.")
+
+    asyncio.run(run_init())
+
+
+@bootstrap_app.command("edit")
+def bootstrap_edit(
+    file: str = typer.Argument(..., help="File to edit: soul, identity, or context"),
+) -> None:
+    """Open a bootstrap file in your editor."""
+    import os
+    import subprocess
+
+    from cognitex.agent.bootstrap import BOOTSTRAP_DIR
+
+    file_map = {
+        "soul": "SOUL.md",
+        "identity": "IDENTITY.md",
+        "context": "CONTEXT.md",
+    }
+
+    filename = file_map.get(file.lower())
+    if not filename:
+        console.print(f"[red]Unknown file: {file}[/red]")
+        console.print("Valid options: soul, identity, context")
+        raise typer.Exit(1)
+
+    filepath = BOOTSTRAP_DIR / filename
+
+    if not filepath.exists():
+        console.print(f"[yellow]File doesn't exist. Run 'cognitex bootstrap init' first.[/yellow]")
+        raise typer.Exit(1)
+
+    editor = os.environ.get("EDITOR", "nano")
+    try:
+        subprocess.run([editor, str(filepath)], check=True)
+        console.print(f"[green]Saved {filename}[/green]")
+    except subprocess.CalledProcessError:
+        console.print(f"[red]Editor exited with error[/red]")
+    except FileNotFoundError:
+        console.print(f"[red]Editor not found: {editor}[/red]")
+        console.print(f"Set EDITOR environment variable or edit directly: {filepath}")
+
+
+@bootstrap_app.command("show")
+def bootstrap_show(
+    file: str = typer.Argument(None, help="File to show: soul, identity, context (or all if omitted)"),
+) -> None:
+    """Display bootstrap file contents."""
+
+    async def run_show():
+        from cognitex.agent.bootstrap import get_bootstrap_loader, init_bootstrap
+
+        await init_bootstrap()
+        loader = get_bootstrap_loader()
+
+        file_map = {
+            "soul": "SOUL.md",
+            "identity": "IDENTITY.md",
+            "context": "CONTEXT.md",
+        }
+
+        if file:
+            filename = file_map.get(file.lower())
+            if not filename:
+                console.print(f"[red]Unknown file: {file}[/red]")
+                raise typer.Exit(1)
+            files = [filename]
+        else:
+            files = ["SOUL.md", "IDENTITY.md", "CONTEXT.md"]
+
+        for filename in files:
+            loaded = await loader.get_file(filename)
+            if loaded:
+                console.print(f"\n[bold cyan]═══ {filename} ═══[/bold cyan]")
+                console.print(loaded.raw_content)
+            else:
+                console.print(f"\n[yellow]{filename} not found[/yellow]")
+
+    asyncio.run(run_show())
+
+
+# =============================================================================
+# Skills Commands - Teachable agent behaviors
+# =============================================================================
+
+skills_app = typer.Typer(
+    name="skills",
+    help="Manage skills (teachable agent behaviors)",
+    no_args_is_help=True,
+)
+app.add_typer(skills_app, name="skills")
+
+
+@skills_app.command("list")
+def skills_list() -> None:
+    """List all available skills (bundled and user)."""
+
+    async def run_list():
+        from cognitex.agent.skills import init_skills, get_skills_loader
+
+        await init_skills()
+        loader = get_skills_loader()
+
+        skills = await loader.list_skills()
+
+        if not skills:
+            console.print("[yellow]No skills found.[/yellow]")
+            return
+
+        table = Table(title="Available Skills")
+        table.add_column("Name", style="cyan")
+        table.add_column("Type", style="dim")
+        table.add_column("Purpose", style="white")
+        table.add_column("Rules", justify="right")
+
+        for skill in skills:
+            skill_type = "[green]user[/green]" if skill["is_user_skill"] else "[dim]bundled[/dim]"
+            table.add_row(
+                skill["name"],
+                skill_type,
+                skill["purpose"][:50] + "..." if len(skill["purpose"]) > 50 else skill["purpose"],
+                str(skill["rules_count"]),
+            )
+
+        console.print(table)
+        console.print("\n[dim]User skills override bundled skills with the same name.[/dim]")
+        console.print("[dim]Use 'cognitex skills show <name>' to see full skill definition.[/dim]")
+
+    asyncio.run(run_list())
+
+
+@skills_app.command("show")
+def skills_show(
+    name: str = typer.Argument(..., help="Skill name to display"),
+) -> None:
+    """Display a skill's full definition."""
+
+    async def run_show():
+        from cognitex.agent.skills import init_skills, get_skills_loader
+
+        await init_skills()
+        loader = get_skills_loader()
+
+        skill = await loader.get_skill(name)
+        if not skill:
+            console.print(f"[red]Skill not found: {name}[/red]")
+            raise typer.Exit(1)
+
+        skill_type = "[green]user skill[/green]" if skill.is_user_skill else "[dim]bundled skill[/dim]"
+        console.print(f"\n[bold cyan]═══ {skill.name} ═══[/bold cyan] ({skill_type})")
+        console.print(f"Path: {skill.path}")
+        console.print("")
+        console.print(skill.raw_content)
+
+    asyncio.run(run_show())
+
+
+@skills_app.command("edit")
+def skills_edit(
+    name: str = typer.Argument(..., help="Skill name to edit (creates if doesn't exist)"),
+) -> None:
+    """Edit a skill in your editor (creates user skill if needed)."""
+    import os
+    import subprocess
+
+    from cognitex.agent.skills import USER_SKILLS_DIR, BUNDLED_SKILLS_DIR
+
+    # Check user skill first, then bundled
+    user_skill_path = USER_SKILLS_DIR / name / "SKILL.md"
+    bundled_skill_path = BUNDLED_SKILLS_DIR / name / "SKILL.md"
+
+    if user_skill_path.exists():
+        filepath = user_skill_path
+    elif bundled_skill_path.exists():
+        # Copy bundled to user for editing
+        console.print(f"[yellow]Copying bundled skill to user directory for editing...[/yellow]")
+        user_skill_path.parent.mkdir(parents=True, exist_ok=True)
+        user_skill_path.write_text(bundled_skill_path.read_text())
+        filepath = user_skill_path
+    else:
+        # Create new user skill
+        console.print(f"[yellow]Creating new skill: {name}[/yellow]")
+        user_skill_path.parent.mkdir(parents=True, exist_ok=True)
+        template = f"""# {name.replace('-', ' ').title()}
+
+## Purpose
+Describe what this skill helps the agent accomplish.
+
+## What IS
+- Example of what this skill should recognize
+- Another example
+
+## What is NOT
+- Example of what this skill should ignore
+- Another example
+
+## Rules
+1. First rule for the agent to follow
+2. Second rule
+
+## Examples
+
+### Example 1
+Input: ...
+Output: ...
+"""
+        user_skill_path.write_text(template)
+        filepath = user_skill_path
+
+    editor = os.environ.get("EDITOR", "nano")
+    try:
+        subprocess.run([editor, str(filepath)], check=True)
+        console.print(f"[green]Saved {name} skill[/green]")
+    except subprocess.CalledProcessError:
+        console.print(f"[red]Editor exited with error[/red]")
+
+
+# =============================================================================
+# Memory Commands - Daily logs and curated knowledge
+# =============================================================================
+
+memory_app = typer.Typer(
+    name="memory",
+    help="Manage memory files (daily logs and curated knowledge)",
+    no_args_is_help=True,
+)
+app.add_typer(memory_app, name="memory")
+
+
+@memory_app.command("init")
+def memory_init() -> None:
+    """Initialize memory directory and files."""
+
+    async def run_init():
+        from cognitex.services.memory_files import init_memory_files, MEMORY_DIR
+
+        await init_memory_files()
+
+        console.print("\n[bold green]Memory system initialized![/bold green]")
+        console.print(f"Location: {MEMORY_DIR}")
+        console.print("\nFiles:")
+        console.print("  [cyan]MEMORY.md[/cyan] - Curated long-term memory (you edit this)")
+        console.print("  [cyan]YYYY-MM-DD.md[/cyan] - Daily logs (agent writes these)")
+        console.print("\nThe agent will automatically record observations to daily logs.")
+        console.print("You can promote important entries to MEMORY.md for permanence.")
+
+    asyncio.run(run_init())
+
+
+@memory_app.command("today")
+def memory_today() -> None:
+    """Show today's memory log."""
+
+    async def run_show():
+        from datetime import date
+        from cognitex.services.memory_files import init_memory_files, get_memory_file_service
+
+        await init_memory_files()
+        service = get_memory_file_service()
+
+        log = await service.get_daily_log(date.today())
+
+        if not log or not log.entries:
+            console.print("[yellow]No entries for today yet.[/yellow]")
+            return
+
+        console.print(f"\n[bold cyan]═══ {date.today().isoformat()} ═══[/bold cyan]")
+        console.print(f"{len(log.entries)} entries\n")
+
+        for entry in log.entries:
+            time_str = entry.timestamp.strftime("%H:%M")
+            console.print(f"[bold]{time_str} - {entry.category}[/bold]")
+            console.print(f"  {entry.content[:200]}...")
+            if entry.tags:
+                console.print(f"  [dim]Tags: {', '.join(entry.tags)}[/dim]")
+            console.print()
+
+    asyncio.run(run_show())
+
+
+@memory_app.command("recent")
+def memory_recent(
+    days: int = typer.Option(7, "--days", "-d", help="Number of days to show"),
+) -> None:
+    """Show recent memory entries."""
+
+    async def run_recent():
+        from cognitex.services.memory_files import init_memory_files, get_memory_file_service
+
+        await init_memory_files()
+        service = get_memory_file_service()
+
+        logs = await service.get_recent_logs(days=days)
+
+        if not logs:
+            console.print(f"[yellow]No entries in the last {days} days.[/yellow]")
+            return
+
+        total_entries = sum(len(log.entries) for log in logs)
+        console.print(f"\n[bold]Recent Memory ({total_entries} entries)[/bold]\n")
+
+        for log in logs:
+            if log.entries:
+                console.print(f"[cyan]── {log.date.isoformat()} ──[/cyan]")
+                for entry in log.entries:
+                    time_str = entry.timestamp.strftime("%H:%M")
+                    content_preview = entry.content[:80].replace("\n", " ")
+                    console.print(f"  {time_str} [{entry.category}] {content_preview}...")
+                console.print()
+
+    asyncio.run(run_recent())
+
+
+@memory_app.command("write")
+def memory_write(
+    content: str = typer.Argument(..., help="Memory content to record"),
+    category: str = typer.Option("User Note", "--category", "-c", help="Entry category"),
+) -> None:
+    """Write a memory entry to today's log."""
+
+    async def run_write():
+        from cognitex.services.memory_files import init_memory_files, get_memory_file_service
+
+        await init_memory_files()
+        service = get_memory_file_service()
+
+        entry = await service.write_entry(
+            content=content,
+            category=category,
+            source="user",
+            sync_to_graph=True,
+        )
+
+        console.print(f"[green]Memory recorded[/green]")
+        console.print(f"  ID: {entry.id}")
+        console.print(f"  Category: {entry.category}")
+        if entry.tags:
+            console.print(f"  Tags: {', '.join(entry.tags)}")
+
+    asyncio.run(run_write())
+
+
+@memory_app.command("curated")
+def memory_curated() -> None:
+    """Show curated long-term memory."""
+
+    async def run_show():
+        from cognitex.services.memory_files import init_memory_files, get_memory_file_service
+
+        await init_memory_files()
+        service = get_memory_file_service()
+
+        content = await service.get_curated_memory()
+
+        if not content or len(content.strip()) < 50:
+            console.print("[yellow]Curated memory is empty or minimal.[/yellow]")
+            console.print("Edit ~/.cognitex/memory/MEMORY.md to add long-term knowledge.")
+            return
+
+        console.print("\n[bold cyan]═══ Curated Memory ═══[/bold cyan]")
+        console.print(content)
+
+    asyncio.run(run_show())
+
+
+@memory_app.command("edit")
+def memory_edit() -> None:
+    """Edit curated memory in your editor."""
+    import os
+    import subprocess
+
+    from cognitex.services.memory_files import MEMORY_DIR
+
+    filepath = MEMORY_DIR / "MEMORY.md"
+
+    if not filepath.exists():
+        console.print("[yellow]Memory file doesn't exist. Run 'cognitex memory init' first.[/yellow]")
+        raise typer.Exit(1)
+
+    editor = os.environ.get("EDITOR", "nano")
+    try:
+        subprocess.run([editor, str(filepath)], check=True)
+        console.print("[green]Saved curated memory[/green]")
+    except subprocess.CalledProcessError:
+        console.print("[red]Editor exited with error[/red]")
+
+
+@memory_app.command("search")
+def memory_search(
+    query: str = typer.Argument(..., help="Search query"),
+    days: int = typer.Option(30, "--days", "-d", help="Days to search"),
+) -> None:
+    """Search memory entries."""
+
+    async def run_search():
+        from cognitex.services.memory_files import init_memory_files, get_memory_file_service
+
+        await init_memory_files()
+        service = get_memory_file_service()
+
+        results = await service.search_memories(query=query, days=days)
+
+        if not results:
+            console.print(f"[yellow]No matches for '{query}'[/yellow]")
+            return
+
+        console.print(f"\n[bold]Found {len(results)} matches[/bold]\n")
+
+        for entry in results[:20]:
+            time_str = entry.timestamp.strftime("%Y-%m-%d %H:%M")
+            content_preview = entry.content[:100].replace("\n", " ")
+            console.print(f"[cyan]{time_str}[/cyan] [{entry.category}]")
+            console.print(f"  {content_preview}...")
+            console.print()
+
+    asyncio.run(run_search())
+
+
 if __name__ == "__main__":
     app()
