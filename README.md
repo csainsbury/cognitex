@@ -18,13 +18,31 @@ A personal cognitive assistant that manages your digital life through a semantic
 
 ### Autonomous Digital Twin Agent
 An LLM-powered agent that acts on your behalf when you're not available:
-- **Drafts email replies** in your voice (learns from your sent emails)
+- **Drafts email replies** in your voice (defined in bootstrap files)
 - **Compiles context packs** for upcoming meetings
 - **Suggests focus blocks** for projects needing attention
 - **Auto-links** documents, tasks, and projects in the knowledge graph
 - **Flags items** requiring human judgment
 - **Task proposals** with approval workflow (configurable auto vs propose mode)
 - **Decision memory** for learning from accepted/rejected proposals
+
+### Bootstrap, Skills & Memory System
+Human-editable configuration files that control agent behavior:
+
+**Bootstrap Files** (`~/.cognitex/bootstrap/`)
+- **SOUL.md**: Communication style, tone, greeting/sign-off preferences
+- **IDENTITY.md**: User context - role, relationships, priorities
+- **CONTEXT.md**: Auto-updated ambient context from recent activity
+
+**Skills** (`~/.cognitex/skills/` + bundled)
+- Markdown files that teach specific behaviors through rules and examples
+- User skills override bundled skills with the same name
+- Bundled: `email-tasks` (task extraction), `meeting-prep`, `goal-linking`
+
+**Memory Files** (`~/.cognitex/memory/`)
+- **Daily logs** (`YYYY-MM-DD.md`): Append-only observations synced to graph
+- **MEMORY.md**: Curated long-term knowledge always loaded into context
+- Tags like `#person/name` auto-link entries to graph entities
 
 ### Executive Function Layer
 - **Operating Modes**: Deep Focus, Fragmented, Overloaded, Hyperfocus, Avoidant, Transition
@@ -56,6 +74,9 @@ An LLM-powered agent that acts on your behalf when you're not available:
 - **Settings page**: Runtime configuration of LLM providers and preferences
 - **Semantic graph visualization**: Interactive knowledge graph explorer
 - **Learning dashboard**: View learning patterns and feedback history
+- **Bootstrap editor**: Edit SOUL.md, IDENTITY.md, CONTEXT.md with voice testing
+- **Skills editor**: View/edit bundled and user skills, test extraction
+- **Memory browser**: Browse daily logs, edit curated memory, search entries
 
 ## Architecture
 
@@ -124,6 +145,25 @@ cognitex init-phase3  # Initialize schema
 ```
 
 ## Configuration
+
+### User Files
+
+Cognitex stores user-specific configuration in `~/.cognitex/`:
+
+```
+~/.cognitex/
+├── bootstrap/           # Voice & personality
+│   ├── SOUL.md         # Communication style, tone
+│   ├── IDENTITY.md     # User context, relationships
+│   └── CONTEXT.md      # Auto-updated ambient context
+├── skills/             # User skills (override bundled)
+│   └── my-skill/SKILL.md
+└── memory/             # Agent memory
+    ├── MEMORY.md       # Curated long-term knowledge
+    └── 2024-02-02.md   # Daily observation logs
+```
+
+### Environment Variables
 
 Key environment variables in `.env`:
 
@@ -206,6 +246,25 @@ cognitex goal-parse "..."  # Parse goal into projects/tasks
 cognitex agent-chat        # Interactive chat with agent
 cognitex briefing          # Get daily briefing
 
+# Bootstrap (voice & personality)
+cognitex bootstrap init    # Create default bootstrap files
+cognitex bootstrap edit soul      # Edit SOUL.md in $EDITOR
+cognitex bootstrap edit identity  # Edit IDENTITY.md
+cognitex bootstrap show soul      # Display SOUL.md contents
+
+# Skills (teachable behaviors)
+cognitex skills list       # List available skills (bundled + user)
+cognitex skills show email-tasks  # Show skill content
+cognitex skills edit my-skill     # Edit/create a user skill
+
+# Memory (daily logs & curated knowledge)
+cognitex memory init       # Create memory directory
+cognitex memory today      # Show today's memory entries
+cognitex memory write "Observation" --category "User Note"
+cognitex memory curated    # Show MEMORY.md
+cognitex memory edit       # Edit MEMORY.md in $EDITOR
+cognitex memory search "keyword"  # Search memory entries
+
 # Web interfaces
 cognitex web               # Start web dashboard (port 8080)
 cognitex api               # Start API server (port 8000)
@@ -228,6 +287,9 @@ Navigate to `http://localhost:8080`:
 - **Documents**: Semantic search across indexed content
 - **Ideas**: Scratch pad for quick idea capture, convert to tasks
 - **Graph**: Interactive knowledge graph visualization
+- **Bootstrap**: Edit voice/personality files (SOUL, IDENTITY, CONTEXT)
+- **Skills**: View and edit skills that teach agent behaviors
+- **Memory**: Browse daily logs and edit curated memory
 - **Learning**: Learning patterns and feedback history
 - **Agent Log**: Action history and decision trail
 - **Settings**: Configure LLM providers and preferences
@@ -268,6 +330,8 @@ cognitex/
 │   │   ├── autonomous.py    # Main agent loop
 │   │   ├── graph_observer.py # Graph state monitoring
 │   │   ├── context_pack.py  # Meeting context compilation
+│   │   ├── bootstrap.py     # Bootstrap file loader (SOUL/IDENTITY/CONTEXT)
+│   │   ├── skills.py        # Skills loader (user + bundled)
 │   │   ├── triggers.py      # Event-driven triggers
 │   │   ├── tools.py         # Agent tools
 │   │   ├── decision_memory.py # Learning from decisions
@@ -280,6 +344,10 @@ cognitex/
 │   │   ├── postgres.py
 │   │   └── graph_schema.py
 │   ├── prompts/         # LLM prompt templates
+│   ├── skills/          # Bundled skills (markdown)
+│   │   ├── email-tasks/SKILL.md
+│   │   ├── meeting-prep/SKILL.md
+│   │   └── goal-linking/SKILL.md
 │   ├── services/        # Business logic
 │   │   ├── gmail.py
 │   │   ├── calendar.py
@@ -291,10 +359,14 @@ cognitex/
 │   │   ├── inbox.py           # Unified inbox service
 │   │   ├── ingestion.py       # Document chunking & embedding
 │   │   ├── linking.py         # Auto-linking documents to projects
+│   │   ├── memory_files.py    # Daily logs + curated memory service
 │   │   └── llm.py             # Multi-provider LLM with fallback
 │   └── web/             # Web dashboard
 │       ├── app.py
 │       └── templates/
+│           ├── bootstrap.html  # Bootstrap file editor
+│           ├── skills.html     # Skills editor
+│           └── memory.html     # Memory browser
 ├── docs/                # Documentation
 ├── data/                # Local data (credentials, etc.)
 └── tests/
@@ -321,6 +393,7 @@ cognitex/
 | EmailDraft | Agent-drafted replies |
 | ContextPack | Meeting preparation briefings |
 | SuggestedBlock | Focus time suggestions |
+| MemoryEntry | Daily memory log entries (synced from files) |
 
 ## Documentation
 
