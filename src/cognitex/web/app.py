@@ -622,7 +622,7 @@ async def auth_middleware(request: Request, call_next):
 async def home(request: Request):
     """Dashboard home page with comprehensive overview."""
     from cognitex.services.inbox import get_inbox_service
-    from cognitex.services.ideas import get_idea_service
+    from cognitex.services.ideas import list_ideas
     from cognitex.db.neo4j import get_neo4j_session
     from cognitex.agent.action_log import get_recent_actions
     from datetime import datetime, timedelta
@@ -651,8 +651,7 @@ async def home(request: Request):
 
     # Get ideas count
     try:
-        idea_service = get_idea_service()
-        ideas = await idea_service.list(status="active", limit=100)
+        ideas = await list_ideas(status="active", limit=100)
         idea_count = len(ideas)
     except Exception:
         idea_count = 0

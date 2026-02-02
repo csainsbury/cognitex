@@ -247,7 +247,7 @@
                 <a href="/agent-log" class="activity-item">
                     <span class="activity-type">{{ action.action_type|replace('_', ' ')|title }}</span>
                     <span class="activity-summary">{{ action.summary[:50] if action.summary else '' }}{% if action.summary and action.summary|length > 50 %}...{% endif %}</span>
-                    <span class="activity-time">{{ action.timestamp.strftime('%H:%M') if action.timestamp else '' }}</span>
+                    <span class="activity-time">{{ action.timestamp[:16].split('T')[1] if action.timestamp and 'T' in action.timestamp else (action.timestamp[:5] if action.timestamp else '') }}</span>
                 </a>
                 {% endfor %}
             </div>
