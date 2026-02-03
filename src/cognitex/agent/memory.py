@@ -23,7 +23,6 @@ class WorkingMemory:
     - Current context/conversation
     - Pending approvals
     - Recent observations
-    - Scratch pad for intermediate reasoning
     """
 
     def __init__(self, redis_client):
@@ -163,17 +162,6 @@ class WorkingMemory:
             observations = [o for o in observations if o["category"] == category]
 
         return observations[:limit]
-
-    async def set_scratch(self, key: str, value: Any) -> None:
-        """Store something in the scratch pad."""
-        full_key = f"{self.prefix}:scratch:{key}"
-        await self.redis.set(full_key, json.dumps(value), ex=WORKING_MEMORY_TTL)
-
-    async def get_scratch(self, key: str) -> Any:
-        """Get something from the scratch pad."""
-        full_key = f"{self.prefix}:scratch:{key}"
-        data = await self.redis.get(key)
-        return json.loads(data) if data else None
 
     async def clear(self) -> None:
         """Clear all working memory."""

@@ -237,18 +237,6 @@ class Settings(BaseSettings):
         description="Number of recent conversation turns to keep verbatim",
     )
 
-    # Scratch Pad
-    scratch_pad_enabled: bool = Field(
-        default=True,
-        description="Enable the scratch pad active memory system",
-    )
-    scratch_archive_days: int = Field(
-        default=7,
-        ge=1,
-        le=30,
-        description="Days before scratch pad entries are archived",
-    )
-
     @property
     def is_development(self) -> bool:
         return self.environment == "development"

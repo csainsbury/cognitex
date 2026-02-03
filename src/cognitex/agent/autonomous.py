@@ -180,20 +180,6 @@ class AutonomousAgent:
             actions_taken=len(actions_taken)
         )
 
-        # Periodic maintenance: archive old scratch pad entries
-        await self._cleanup_scratch_pad()
-
-    async def _cleanup_scratch_pad(self) -> None:
-        """Archive old scratch pad entries (runs once per cycle)."""
-        try:
-            from cognitex.services.scratch_pad import get_scratch_pad_service
-            scratch_service = get_scratch_pad_service()
-            archived_count = await scratch_service.archive_old_entries()
-            if archived_count > 0:
-                logger.info("Archived scratch pad entries", count=archived_count)
-        except Exception as e:
-            logger.debug("Scratch pad cleanup skipped", error=str(e))
-
     async def _check_clinical_recovery(self) -> bool:
         """Check if user is currently in post-clinical recovery mode.
 

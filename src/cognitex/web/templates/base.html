@@ -1396,13 +1396,5 @@
     });
     </script>
 
-    <!-- Scratch Pad Panel (loads via HTMX) - skip on auth pages -->
-    {% if (show_scratch_pad is not defined or show_scratch_pad) and "/auth/" not in request.url.path %}
-    <div hx-get="/api/scratch/panel"
-         hx-trigger="load"
-         hx-swap="innerHTML"
-         id="scratch-panel-container">
-    </div>
-    {% endif %}
 </body>
 </html>

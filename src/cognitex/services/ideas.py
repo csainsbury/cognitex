@@ -1,4 +1,4 @@
-"""Ideas service - scratch pad for quick capture of thoughts and ideas.
+"""Ideas service - quick capture of thoughts and ideas.
 
 Ideas are lightweight nodes that can be quickly captured from:
 - Web form

@@ -4576,151 +4576,6 @@ async def api_state_tool_override_disable():
 
 
 # -------------------------------------------------------------------
-# Scratch Pad API
-# -------------------------------------------------------------------
-
-
-@app.get("/api/scratch/panel", response_class=HTMLResponse)
-async def api_scratch_panel(
-    request: Request,
-    space: str = "general",
-):
-    """Get the scratch panel HTML partial."""
-    from cognitex.services.scratch_pad import get_scratch_pad_service
-
-    scratch_service = get_scratch_pad_service()
-
-    # Get or create the requested space
-    scratch_space = await scratch_service.get_or_create_space(space)
-
-    # Get list of all spaces for selector
-    all_spaces = await scratch_service.list_spaces()
-
-    # Get recent non-archived entries
-    entries = [e for e in scratch_space.entries if not e.archived][-10:]
-
-    return templates.TemplateResponse(
-        "partials/scratch_panel.html",
-        {
-            "request": request,
-            "space": scratch_space,
-            "entries": entries,
-            "available_spaces": all_spaces,
-        },
-    )
-
-
-@app.get("/api/scratch/{space_name}")
-async def api_scratch_get(space_name: str):
-    """Get a scratch space by name."""
-    from cognitex.services.scratch_pad import get_scratch_pad_service
-
-    scratch_service = get_scratch_pad_service()
-    space = await scratch_service.get_space(space_name)
-
-    if not space:
-        raise HTTPException(status_code=404, detail="Scratch space not found")
-
-    return space.to_dict()
-
-
-@app.post("/api/scratch/{space_name}", response_class=HTMLResponse)
-async def api_scratch_create(request: Request, space_name: str):
-    """Create a new scratch space."""
-    from cognitex.services.scratch_pad import get_scratch_pad_service
-
-    scratch_service = get_scratch_pad_service()
-
-    # Determine space type from name
-    if space_name.startswith("project:"):
-        space_type = "project"
-        linked_id = space_name.split(":", 1)[1]
-    elif space_name.startswith("task:"):
-        space_type = "task"
-        linked_id = space_name.split(":", 1)[1]
-    else:
-        space_type = "general"
-        linked_id = None
-
-    space = await scratch_service.create_space(space_name, space_type, linked_id)
-
-    # Return updated panel
-    all_spaces = await scratch_service.list_spaces()
-    entries = [e for e in space.entries if not e.archived][-10:]
-
-    return templates.TemplateResponse(
-        "partials/scratch_panel.html",
-        {
-            "request": request,
-            "space": space,
-            "entries": entries,
-            "available_spaces": all_spaces,
-        },
-    )
-
-
-@app.put("/api/scratch/{space_name}", response_class=HTMLResponse)
-async def api_scratch_update(
-    request: Request,
-    space_name: str,
-    content: str = Form(""),
-):
-    """Update scratch space content (user edit)."""
-    from cognitex.services.scratch_pad import get_scratch_pad_service
-
-    scratch_service = get_scratch_pad_service()
-    await scratch_service.update_content(space_name, content)
-
-    # Return empty response for hx-swap="none"
-    return HTMLResponse("")
-
-
-@app.post("/api/scratch/{space_name}/entry", response_class=HTMLResponse)
-async def api_scratch_add_entry(
-    request: Request,
-    space_name: str,
-    text: str = Form(""),
-):
-    """Add an entry to a scratch space."""
-    from cognitex.services.scratch_pad import get_scratch_pad_service
-
-    scratch_service = get_scratch_pad_service()
-
-    # Only add entry if text is non-empty
-    if text.strip():
-        await scratch_service.append_entry(space_name, text, source="user")
-
-    # Return updated panel
-    space = await scratch_service.get_space(space_name)
-    all_spaces = await scratch_service.list_spaces()
-    entries = [e for e in space.entries if not e.archived][-10:] if space else []
-
-    return templates.TemplateResponse(
-        "partials/scratch_panel.html",
-        {
-            "request": request,
-            "space": space,
-            "entries": entries,
-            "available_spaces": all_spaces,
-        },
-    )
-
-
-@app.delete("/api/scratch/{space_name}")
-async def api_scratch_delete(space_name: str):
-    """Delete a scratch space."""
-    from cognitex.services.scratch_pad import get_scratch_pad_service
-
-    scratch_service = get_scratch_pad_service()
-    success = await scratch_service.delete_space(space_name)
-
-    if not success:
-        raise HTTPException(status_code=404, detail="Scratch space not found")
-
-    return {"status": "ok", "deleted": space_name}
-
-
-# -------------------------------------------------------------------
 # Focus Mode Dashboard
 # -------------------------------------------------------------------
 
@@ -8828,13 +8683,13 @@ async def api_sessions_skip(session_id: Annotated[str, Form()]):
 
 
 # -------------------------------------------------------------------
-# Ideas (Scratch Pad)
+# Ideas
 # -------------------------------------------------------------------
 
 
 @app.get("/ideas", response_class=HTMLResponse)
 async def ideas_page(request: Request, status: str | None = None):
-    """Ideas scratch pad page."""
+    """Ideas capture and triage page."""
     from cognitex.services.ideas import list_ideas, get_idea_stats
 
     # Default to showing pending ideas

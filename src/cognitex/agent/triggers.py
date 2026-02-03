@@ -254,7 +254,6 @@ class TriggerSystem:
             "cognitex:events:calendar",
             "cognitex:events:task",
             "cognitex:events:drive",
-            "cognitex:events:scratch_pad",
         )
 
         # Start listener task
@@ -293,8 +292,6 @@ class TriggerSystem:
                         await self._on_task_event(event_data)
                     elif channel_str == "cognitex:events:drive":
                         await self._on_drive_change(event_data)
-                    elif channel_str == "cognitex:events:scratch_pad":
-                        await self._on_scratch_pad_entry(event_data)
                     else:
                         logger.warning("Unknown event channel", channel=channel_str)
 
@@ -2008,16 +2005,12 @@ class TriggerSystem:
                     if record:
                         next_title = record["title"]
                         next_priority = record["priority"] or "medium"
-
-                        # Add to scratch pad as a gentle suggestion
-                        from cognitex.services.scratch_pad import get_scratch_pad_service
-                        scratch = get_scratch_pad_service()
-                        await scratch.append_entry(
-                            "general",
-                            f"You completed '{title}'. Next up in this project: '{next_title}' ({next_priority})",
-                            source="agent"
+                        logger.info(
+                            "Next task available after completion",
+                            completed=title[:30],
+                            next_task=next_title[:30],
+                            priority=next_priority
                         )
-                        logger.info("Suggested next task after completion", next_task=next_title[:30])
                     break
 
             except Exception as e:
@@ -2144,52 +2137,6 @@ class TriggerSystem:
             except Exception:
                 pass
         return False
-
-    async def _on_scratch_pad_entry(self, event_data: dict) -> None:
-        """Handle user scratch pad entries - agent can respond if helpful.
-
-        This enables proactive assistance when users write notes in the scratch pad.
-        The agent analyzes the entry and optionally responds with relevant info.
-        """
-        space_name = event_data.get("space_name", "general")
-        text = event_data.get("text", "")
-        source = event_data.get("source", "")
-
-        # Only respond to user entries, not agent entries
-        if source != "user" or not text:
-            return
-
-        logger.info("Processing scratch pad entry", space=space_name, text_preview=text[:50])
-
-        try:
-            if not self.agent:
-                return
-
-            # Ask agent if it can help with this note
-            prompt = f"""The user just wrote this in their scratch pad (space: {space_name}):
-
-"{text}"
-
-If you can provide helpful context, a reminder, or assistance related to this note,
-respond briefly (1-3 sentences). If this is just a personal note that doesn't need
-a response, just say "acknowledged" and nothing else.
-
-Consider:
-- Does this relate to an upcoming meeting or task?
-- Is there relevant information in their documents/emails?
-- Could you remind them of something related?"""
-
-            response = await self.agent.chat(prompt)
-
-            # If agent has something helpful to add, write it to the scratch pad
-            if response and "acknowledged" not in response.lower():
-                from cognitex.services.scratch_pad import get_scratch_pad_service
-                scratch = get_scratch_pad_service()
-                await scratch.append_entry(space_name, response.strip(), source="agent")
-                logger.info("Agent responded to scratch pad entry", space=space_name)
-
-        except Exception as e:
-            logger.warning("Failed to process scratch pad entry", error=str(e))
 
     # =========================================================================
     # Email Filtering

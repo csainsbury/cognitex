@@ -258,22 +258,6 @@ class Agent:
         if filtered_tools:
             filter_notice = self.tool_filter.format_filter_notice(filtered_tools, current_mode)
 
-        # Get scratch pad context if enabled
-        scratch_context = ""
-        settings = get_settings()
-        if settings.scratch_pad_enabled:
-            try:
-                from cognitex.services.scratch_pad import get_scratch_pad_service
-
-                scratch_service = get_scratch_pad_service()
-                scratch_context = await scratch_service.get_context_for_prompt(
-                    space_names=["general"],
-                    max_entries=8,
-                    max_length=1500,
-                )
-            except Exception as e:
-                logger.debug("Failed to load scratch pad context", error=str(e))
-
         # Get bootstrap context (personality, identity, context)
         bootstrap_context = await self._get_bootstrap_context()
 
@@ -345,7 +329,6 @@ Example queries:
 - Recent emails: MATCH (e:Email) WHERE e.date > datetime() - duration('P7D') RETURN e ORDER BY e.date DESC LIMIT 10
 - Person's communication history: MATCH (p:Person {{email: $email}})<-[:SENT_BY]-(e:Email) RETURN e ORDER BY e.date DESC LIMIT 5
 {filter_notice}
-{scratch_context}
 {memory_context}"""
 
     async def _get_bootstrap_context(self) -> str:
@@ -729,26 +712,6 @@ Example queries:
                     except Exception as e:
                         logger.warning("Failed to create decision trace", error=str(e))
 
-                # Append to scratch pad if enabled
-                settings = get_settings()
-                if settings.scratch_pad_enabled:
-                    try:
-                        from cognitex.services.scratch_pad import get_scratch_pad_service
-
-                        scratch_service = get_scratch_pad_service()
-                        # Ensure general space exists
-                        await scratch_service.get_or_create_space("general")
-                        # Create concise summary of action
-                        action_summary = self._format_action_summary(action, action_input, result)
-                        if action_summary:
-                            await scratch_service.append_entry(
-                                space_name="general",
-                                text=action_summary,
-                                source="agent",
-                            )
-                    except Exception as e:
-                        logger.debug("Failed to update scratch pad", error=str(e))
-
                 # Format the observation
                 if result.needs_approval:
                     return f"Action staged for approval (ID: {result.approval_id}). Details: {result.data}", result.approval_id, trace_id
@@ -783,48 +746,6 @@ Example queries:
         except Exception as e:
             logger.error("Tool execution failed", tool=action, error=str(e))
             return f"Error executing {action}: {str(e)}", None, None
-
-    def _format_action_summary(self, action: str, action_input: dict, result: ToolResult) -> str | None:
-        """Format a concise summary of an action for the scratch pad.
-
-        Returns None for read-only queries to avoid cluttering the scratch pad.
-        """
-        # Skip read-only queries - they don't change state
-        tool = self.tool_registry.get(action)
-        if tool and tool.risk == ToolRisk.READONLY:
-            return None
-
-        # Format based on action type
-        if action == "create_task":
-            title = action_input.get("title", "Unknown")
-            return f"Created task: {title}"
-        elif action == "update_task":
-            task_id = action_input.get("task_id", "")[:8]
-            status = action_input.get("status", "")
-            if status:
-                return f"Updated task {task_id}: status={status}"
-            return f"Updated task {task_id}"
-        elif action == "draft_email":
-            to = action_input.get("to", "")
-            subject = action_input.get("subject", "")[:30]
-            return f"Drafted email to {to}: {subject}"
-        elif action == "create_event":
-            title = action_input.get("title", "")
-            return f"Created calendar event: {title}"
-        elif action == "send_notification":
-            return f"Sent notification"
-        elif action == "add_memory":
-            content = action_input.get("content", "")[:50]
-            return f"Stored memory: {content}..."
-        elif action in ["create_project", "update_project"]:
-            title = action_input.get("title", "Unknown")
-            return f"{'Created' if action == 'create_project' else 'Updated'} project: {title}"
-        elif action in ["create_goal", "update_goal"]:
-            title = action_input.get("title", "Unknown")
-            return f"{'Created' if action == 'create_goal' else 'Updated'} goal: {title}"
-        else:
-            # Generic summary for other mutation actions
-            return f"Executed: {action}"
 
     async def _generate_summary(self, original_message: str, trace: ReactTrace) -> str:
         """Generate a natural summary when hitting max iterations."""
