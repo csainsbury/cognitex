@@ -1759,9 +1759,11 @@ class ContextPackTriggerSystem:
     async def _check_upcoming_events(self) -> None:
         """Check for calendar events needing context packs."""
         from cognitex.services.calendar import CalendarService
+        from cognitex.agent.bootstrap import get_bootstrap_loader
 
         try:
             cal = CalendarService()
+            bootstrap = get_bootstrap_loader()
             now = datetime.now()
 
             # Get events in next 48 hours
@@ -1802,12 +1804,23 @@ class ContextPackTriggerSystem:
                     is_whisper = True
 
                 if stage:
+                    # Check bootstrap rules for events to skip
+                    event_title = event.get("summary", "")
+                    should_skip, skip_reason = await bootstrap.should_skip_context_pack(event_title)
+                    if should_skip:
+                        logger.debug(
+                            "Skipping context pack per user rules",
+                            event=event_title[:30],
+                            reason=skip_reason,
+                        )
+                        continue
+
                     # Check if pack already exists for this stage
                     existing = await self._get_existing_pack(event_id, stage)
                     if not existing:
                         logger.info(
                             "Building context pack",
-                            event_title=event.get("summary", "Unknown")[:30],
+                            event_title=event_title[:30],
                             stage=stage.value,
                             whisper=is_whisper,
                         )

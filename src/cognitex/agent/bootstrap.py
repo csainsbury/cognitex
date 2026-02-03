@@ -377,6 +377,75 @@ class BootstrapLoader:
         # Fall back to full SOUL content
         return f"Writing style:\n{soul.raw_content.strip()}"
 
+    async def should_skip_context_pack(self, event_title: str) -> tuple[bool, str | None]:
+        """
+        Check if an event should skip context pack generation based on IDENTITY.md rules.
+
+        Looks for "Context Packs" section in IDENTITY.md for skip rules like:
+        - "do not need to create these for clinical events"
+        - "do not need to create context packs for Lunch events"
+
+        Args:
+            event_title: The calendar event title to check
+
+        Returns:
+            Tuple of (should_skip, reason) - reason is None if not skipping
+        """
+        identity = await self.get_identity()
+        if not identity:
+            return False, None
+
+        # Find Context Packs section
+        context_pack_section = None
+        for section in identity.sections:
+            if "context pack" in section.name.lower():
+                context_pack_section = section
+                break
+
+        if not context_pack_section:
+            return False, None
+
+        content_lower = context_pack_section.content.lower()
+        title_lower = event_title.lower()
+
+        # Parse skip rules from the content
+        skip_patterns = []
+
+        # Look for patterns like "do not need to create" or "don't need"
+        lines = context_pack_section.content.split('\n')
+        for line in lines:
+            line_lower = line.lower()
+            if 'do not need' in line_lower or "don't need" in line_lower or 'skip' in line_lower:
+                # Extract keywords from this line
+                # Common patterns: clinical, MDT, lunch, prep for
+                if 'clinical' in line_lower:
+                    skip_patterns.append(('clinic', 'clinical event'))
+                    skip_patterns.append(('mdt', 'clinical event (MDT)'))
+                if 'mdt' in line_lower and 'clinical' not in line_lower:
+                    skip_patterns.append(('mdt', 'MDT'))
+                if 'lunch' in line_lower:
+                    skip_patterns.append(('lunch', 'lunch event'))
+                if 'prep for mdt' in line_lower or 'prep for' in line_lower:
+                    skip_patterns.append(('prep for', 'prep event'))
+                if 'diabetes' in line_lower:
+                    skip_patterns.append(('diabetes', 'diabetes clinic'))
+                if 'type 1' in line_lower:
+                    skip_patterns.append(('type 1', 'Type 1 clinic'))
+                if 'type 2' in line_lower:
+                    skip_patterns.append(('type 2', 'Type 2 clinic'))
+
+        # Check if event title matches any skip pattern
+        for pattern, reason in skip_patterns:
+            if pattern in title_lower:
+                logger.debug(
+                    "Skipping context pack per IDENTITY.md rules",
+                    event=event_title[:30],
+                    reason=reason,
+                )
+                return True, reason
+
+        return False, None
+
 
 # Singleton instance
 _bootstrap_loader: BootstrapLoader | None = None
