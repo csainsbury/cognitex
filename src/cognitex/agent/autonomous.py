@@ -553,8 +553,25 @@ class AutonomousAgent:
         # =====================================================================
         state_context_text = await self._build_state_context()
 
+        # =====================================================================
+        # BOOTSTRAP CONTEXT - Personality, safety rules, operational memory
+        # =====================================================================
+        bootstrap_section = ""
+        try:
+            from cognitex.agent.bootstrap import get_bootstrap_loader
+
+            loader = get_bootstrap_loader()
+            bootstrap_section = await loader.get_formatted_prompt_section()
+        except Exception as e:
+            logger.debug("Failed to load bootstrap context", error=str(e))
+
+        # Escape curly braces so str.format() doesn't choke on bootstrap content
+        bootstrap_section = bootstrap_section.replace("{", "{{").replace("}", "}}")
+
         prompt = format_prompt(
             "autonomous_agent",
+            # Bootstrap context (personality, safety, memory)
+            bootstrap_section=bootstrap_section,
             # Summary stats
             inbox_count=summary.get('inbox_count', 0),
             emails_needing_response=summary.get('emails_needing_response', 0),

@@ -9003,6 +9003,10 @@ async def bootstrap_page(request: Request):
             "request": request,
             "files": files,
             "soul": files.get("SOUL"),
+            "user": files.get("USER"),
+            "agents": files.get("AGENTS"),
+            "tools": files.get("TOOLS"),
+            "memory": files.get("MEMORY"),
             "identity": files.get("IDENTITY"),
             "context": files.get("CONTEXT"),
         },
@@ -9036,7 +9040,7 @@ async def save_bootstrap_file(
     """Save a bootstrap file."""
     from cognitex.agent.bootstrap import get_bootstrap_loader
 
-    valid_files = ["soul", "identity", "context"]
+    valid_files = ["soul", "user", "agents", "tools", "memory", "identity", "context"]
     if filename.lower() not in valid_files:
         raise HTTPException(status_code=400, detail="Invalid filename")
 

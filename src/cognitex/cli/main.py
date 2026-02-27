@@ -6803,7 +6803,7 @@ def consolidate_cmd(
 
 bootstrap_app = typer.Typer(
     name="bootstrap",
-    help="Manage bootstrap files (SOUL.md, IDENTITY.md, CONTEXT.md)",
+    help="Manage bootstrap files (SOUL, USER, AGENTS, TOOLS, MEMORY, IDENTITY, CONTEXT)",
     no_args_is_help=True,
 )
 app.add_typer(bootstrap_app, name="bootstrap")
@@ -6821,10 +6821,14 @@ def bootstrap_init() -> None:
         console.print("\n[bold green]Bootstrap files initialized![/bold green]")
         console.print(f"Location: {BOOTSTRAP_DIR}")
         console.print("\nFiles created:")
-        console.print("  [cyan]SOUL.md[/cyan] - Your communication style and voice")
-        console.print("  [cyan]IDENTITY.md[/cyan] - Your context and preferences")
+        console.print("  [cyan]SOUL.md[/cyan] - Communication style and voice")
+        console.print("  [cyan]USER.md[/cyan] - Operator profile (replaces IDENTITY.md)")
+        console.print("  [cyan]AGENTS.md[/cyan] - Operating constitution and safety rules")
+        console.print("  [cyan]TOOLS.md[/cyan] - Infrastructure and tool configuration")
+        console.print("  [cyan]MEMORY.md[/cyan] - Curated operational memory")
+        console.print("  [cyan]IDENTITY.md[/cyan] - Legacy user context (fallback)")
         console.print("  [cyan]CONTEXT.md[/cyan] - Auto-updated ambient context")
-        console.print("\nEdit these files to customize how Cognitex communicates.")
+        console.print("\nEdit these files to customize how Cognitex operates.")
         console.print("Use [bold]cognitex bootstrap edit soul[/bold] to open in your editor.")
 
     asyncio.run(run_init())
@@ -6832,7 +6836,9 @@ def bootstrap_init() -> None:
 
 @bootstrap_app.command("edit")
 def bootstrap_edit(
-    file: str = typer.Argument(..., help="File to edit: soul, identity, or context"),
+    file: str = typer.Argument(
+        ..., help="File to edit: soul, user, agents, tools, memory, identity, or context"
+    ),
 ) -> None:
     """Open a bootstrap file in your editor."""
     import os
@@ -6842,6 +6848,10 @@ def bootstrap_edit(
 
     file_map = {
         "soul": "SOUL.md",
+        "user": "USER.md",
+        "agents": "AGENTS.md",
+        "tools": "TOOLS.md",
+        "memory": "MEMORY.md",
         "identity": "IDENTITY.md",
         "context": "CONTEXT.md",
     }
@@ -6849,7 +6859,7 @@ def bootstrap_edit(
     filename = file_map.get(file.lower())
     if not filename:
         console.print(f"[red]Unknown file: {file}[/red]")
-        console.print("Valid options: soul, identity, context")
+        console.print(f"Valid options: {', '.join(file_map.keys())}")
         raise typer.Exit(1)
 
     filepath = BOOTSTRAP_DIR / filename
@@ -6871,18 +6881,28 @@ def bootstrap_edit(
 
 @bootstrap_app.command("show")
 def bootstrap_show(
-    file: str = typer.Argument(None, help="File to show: soul, identity, context (or all if omitted)"),
+    file: str = typer.Argument(
+        None, help="File to show: soul, user, agents, tools, memory, identity, context (or all)"
+    ),
 ) -> None:
     """Display bootstrap file contents."""
 
     async def run_show():
-        from cognitex.agent.bootstrap import get_bootstrap_loader, init_bootstrap
+        from cognitex.agent.bootstrap import (
+            BOOTSTRAP_FILES,
+            get_bootstrap_loader,
+            init_bootstrap,
+        )
 
         await init_bootstrap()
         loader = get_bootstrap_loader()
 
         file_map = {
             "soul": "SOUL.md",
+            "user": "USER.md",
+            "agents": "AGENTS.md",
+            "tools": "TOOLS.md",
+            "memory": "MEMORY.md",
             "identity": "IDENTITY.md",
             "context": "CONTEXT.md",
         }
@@ -6891,10 +6911,11 @@ def bootstrap_show(
             filename = file_map.get(file.lower())
             if not filename:
                 console.print(f"[red]Unknown file: {file}[/red]")
+                console.print(f"Valid options: {', '.join(file_map.keys())}")
                 raise typer.Exit(1)
             files = [filename]
         else:
-            files = ["SOUL.md", "IDENTITY.md", "CONTEXT.md"]
+            files = list(BOOTSTRAP_FILES.keys())
 
         for filename in files:
             loaded = await loader.get_file(filename)

@@ -6,12 +6,16 @@
 <h1>Bootstrap Files</h1>
 
 <p style="color: var(--text-muted); margin-bottom: 1.5rem;">
-    Bootstrap files define your communication style and context. Edit these markdown files to customize how Cognitex communicates.
+    Bootstrap files define your personality, safety rules, and operational context. Edit these markdown files to customize how Cognitex operates.
 </p>
 
 <!-- Tab Navigation -->
-<div class="filters" style="margin-bottom: 1rem;">
+<div class="filters" style="margin-bottom: 1rem; flex-wrap: wrap;">
     <button class="btn btn-secondary tab-btn active" onclick="showTab('soul')">SOUL.md</button>
+    <button class="btn btn-secondary tab-btn" onclick="showTab('user')">USER.md</button>
+    <button class="btn btn-secondary tab-btn" onclick="showTab('agents')">AGENTS.md</button>
+    <button class="btn btn-secondary tab-btn" onclick="showTab('tools')">TOOLS.md</button>
+    <button class="btn btn-secondary tab-btn" onclick="showTab('memory')">MEMORY.md</button>
     <button class="btn btn-secondary tab-btn" onclick="showTab('identity')">IDENTITY.md</button>
     <button class="btn btn-secondary tab-btn" onclick="showTab('context')">CONTEXT.md</button>
     <div style="flex: 1;"></div>
@@ -38,15 +42,95 @@
     </div>
 </div>
 
+<!-- USER Tab -->
+<div id="tab-user" class="tab-panel" style="display: none;">
+    <div class="card">
+        <div class="card-header">
+            <h2>Operator Profile</h2>
+            <span class="text-dim">~/.cognitex/bootstrap/USER.md</span>
+        </div>
+        <p style="color: var(--text-muted); margin-bottom: 1rem;">
+            Your role, relationships, and priorities. Replaces IDENTITY.md &mdash; sections with [FILL] are skipped in prompts.
+        </p>
+        <form hx-post="/api/bootstrap/user" hx-target="#user-result" hx-swap="innerHTML">
+            <textarea name="content" rows="20" style="font-family: var(--font-mono); font-size: 0.9rem;">{{ user.raw_content if user else '' }}</textarea>
+            <div style="margin-top: 1rem; display: flex; gap: 0.5rem; align-items: center;">
+                <button type="submit" class="btn btn-primary">Save USER.md</button>
+                <span id="user-result"></span>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- AGENTS Tab -->
+<div id="tab-agents" class="tab-panel" style="display: none;">
+    <div class="card">
+        <div class="card-header">
+            <h2>Operating Constitution</h2>
+            <span class="text-dim">~/.cognitex/bootstrap/AGENTS.md</span>
+        </div>
+        <p style="color: var(--text-muted); margin-bottom: 1rem;">
+            Agent mission, principles, and safety boundaries. Section 5 (Safety) is injected as hard constraints into every agent prompt.
+        </p>
+        <form hx-post="/api/bootstrap/agents" hx-target="#agents-result" hx-swap="innerHTML">
+            <textarea name="content" rows="20" style="font-family: var(--font-mono); font-size: 0.9rem;">{{ agents.raw_content if agents else '' }}</textarea>
+            <div style="margin-top: 1rem; display: flex; gap: 0.5rem; align-items: center;">
+                <button type="submit" class="btn btn-primary">Save AGENTS.md</button>
+                <span id="agents-result"></span>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- TOOLS Tab -->
+<div id="tab-tools" class="tab-panel" style="display: none;">
+    <div class="card">
+        <div class="card-header">
+            <h2>Tools & Infrastructure</h2>
+            <span class="text-dim">~/.cognitex/bootstrap/TOOLS.md</span>
+        </div>
+        <p style="color: var(--text-muted); margin-bottom: 1rem;">
+            SSH hosts, API services, and infrastructure details. Sections with [FILL] are skipped in prompts.
+        </p>
+        <form hx-post="/api/bootstrap/tools" hx-target="#tools-result" hx-swap="innerHTML">
+            <textarea name="content" rows="20" style="font-family: var(--font-mono); font-size: 0.9rem;">{{ tools.raw_content if tools else '' }}</textarea>
+            <div style="margin-top: 1rem; display: flex; gap: 0.5rem; align-items: center;">
+                <button type="submit" class="btn btn-primary">Save TOOLS.md</button>
+                <span id="tools-result"></span>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- MEMORY Tab -->
+<div id="tab-memory" class="tab-panel" style="display: none;">
+    <div class="card">
+        <div class="card-header">
+            <h2>Operational Memory</h2>
+            <span class="text-dim">~/.cognitex/bootstrap/MEMORY.md</span>
+        </div>
+        <p style="color: var(--text-muted); margin-bottom: 1rem;">
+            Curated operational memory &mdash; key decisions, recurring patterns, and learned preferences. Distinct from daily memory logs (~/.cognitex/memory/).
+        </p>
+        <form hx-post="/api/bootstrap/memory" hx-target="#memory-result" hx-swap="innerHTML">
+            <textarea name="content" rows="20" style="font-family: var(--font-mono); font-size: 0.9rem;">{{ memory.raw_content if memory else '' }}</textarea>
+            <div style="margin-top: 1rem; display: flex; gap: 0.5rem; align-items: center;">
+                <button type="submit" class="btn btn-primary">Save MEMORY.md</button>
+                <span id="memory-result"></span>
+            </div>
+        </form>
+    </div>
+</div>
+
 <!-- IDENTITY Tab -->
 <div id="tab-identity" class="tab-panel" style="display: none;">
     <div class="card">
         <div class="card-header">
-            <h2>User Context & Preferences</h2>
+            <h2>User Context & Preferences <span style="color: var(--text-muted); font-size: 0.8rem;">(Legacy)</span></h2>
             <span class="text-dim">~/.cognitex/bootstrap/IDENTITY.md</span>
         </div>
         <p style="color: var(--text-muted); margin-bottom: 1rem;">
-            Tell Cognitex about yourself: your role, key relationships, current priorities.
+            Legacy file &mdash; superseded by USER.md. Kept for backward compatibility; used as fallback if USER.md doesn't exist.
         </p>
         <form hx-post="/api/bootstrap/identity" hx-target="#identity-result" hx-swap="innerHTML">
             <textarea name="content" rows="20" style="font-family: var(--font-mono); font-size: 0.9rem;">{{ identity.raw_content if identity else '' }}</textarea>

@@ -1,8 +1,12 @@
 """Bootstrap file loader for personality, identity, and context.
 
-Implements OpenClaw-inspired bootstrap pattern:
+Implements OpenClaw-inspired bootstrap pattern with 7 files:
 - SOUL.md - Core personality and voice
-- IDENTITY.md - User context and preferences
+- USER.md - Operator profile (replaces IDENTITY.md)
+- AGENTS.md - Operating constitution and safety boundaries
+- TOOLS.md - Infrastructure and tool configuration
+- MEMORY.md - Curated operational memory
+- IDENTITY.md - Legacy fallback (superseded by USER.md)
 - CONTEXT.md - Agent-maintained ambient context
 
 Files are loaded from ~/.cognitex/bootstrap/ with file-watch invalidation.
@@ -10,7 +14,6 @@ Files are loaded from ~/.cognitex/bootstrap/ with file-watch invalidation.
 
 import asyncio
 import hashlib
-import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +25,17 @@ logger = structlog.get_logger()
 
 # Default bootstrap directory
 BOOTSTRAP_DIR = Path.home() / ".cognitex" / "bootstrap"
+
+# Registry of all bootstrap files
+BOOTSTRAP_FILES = {
+    "SOUL.md": {"writable_by_agent": False, "required": True},
+    "USER.md": {"writable_by_agent": False, "required": True},
+    "AGENTS.md": {"writable_by_agent": False, "required": True},
+    "TOOLS.md": {"writable_by_agent": False, "required": False},
+    "MEMORY.md": {"writable_by_agent": True, "required": False},
+    "IDENTITY.md": {"writable_by_agent": False, "required": False},  # Legacy fallback
+    "CONTEXT.md": {"writable_by_agent": True, "required": False},
+}
 
 # Default file templates
 DEFAULT_SOUL = """## Communication Style
@@ -76,6 +90,81 @@ _No upcoming deadlines._
 _No recent interactions recorded._
 """
 
+DEFAULT_USER = """## About Me
+<!-- Fill in your details -->
+- Role: [FILL]
+- Company/Organization: [FILL]
+- Key projects: [FILL]
+- Communication preferences: [FILL]
+
+## Key Relationships
+<!-- Who you work with frequently -->
+- [FILL] - [Role/Context]
+
+## Current Priorities
+<!-- What matters this week/month -->
+- [FILL]
+
+## Context Packs
+<!-- Rules for automatic context pack generation -->
+- Generate context packs for all meetings by default
+"""
+
+DEFAULT_AGENTS = """## 1. Core Mission
+Act as a digital twin that advances the user's work, responds in their voice,
+and maintains their knowledge graph.
+
+## 2. Operating Principles
+- Lead with action, flag only genuine ambiguity
+- Respect calendar boundaries and energy state
+- Never fabricate information; say "I don't know" when uncertain
+
+## 3. Communication Standards
+- Match the user's voice from SOUL.md
+- Keep notifications concise and actionable
+- Batch low-priority updates
+
+## 4. Decision Authority
+- AUTO: Graph linking, context pack compilation, low-risk email drafts
+- APPROVAL: Sending emails, creating calendar events, task deletion
+- NEVER: Financial actions, sharing private data, contacting people not in graph
+
+## 5. Safety and Action Boundaries
+- Never send emails without user approval
+- Never delete data without explicit confirmation
+- Never share personal or medical information
+- Never take actions outside the user's defined tool set
+- Rate-limit outbound actions: max 5 emails/hour, max 10 notifications/hour
+- All drafted content must be reviewed before sending
+"""
+
+DEFAULT_TOOLS = """## Infrastructure
+<!-- Fill in your tool and infrastructure details -->
+- Primary email: [FILL]
+- Calendar system: [FILL]
+
+## SSH Hosts
+<!-- Remote machines the agent can reference -->
+- [FILL]
+
+## API Keys & Services
+<!-- Services available to the agent (not the keys themselves) -->
+- [FILL]
+"""
+
+DEFAULT_MEMORY = """## Key Decisions
+<!-- Curated decisions and their rationale -->
+_No decisions recorded yet._
+
+## Recurring Patterns
+<!-- Patterns the agent has observed -->
+_No patterns recorded yet._
+
+## User Preferences Learned
+<!-- Preferences discovered through interaction -->
+_No preferences recorded yet._
+"""
+
 
 @dataclass
 class BootstrapSection:
@@ -104,7 +193,11 @@ class BootstrapLoader:
 
     Bootstrap files are markdown files that define:
     - SOUL.md: Communication style and voice
-    - IDENTITY.md: User context and preferences
+    - USER.md: Operator profile (replaces IDENTITY.md)
+    - AGENTS.md: Operating constitution and safety boundaries
+    - TOOLS.md: Infrastructure and tool configuration
+    - MEMORY.md: Curated operational memory
+    - IDENTITY.md: Legacy fallback (superseded by USER.md)
     - CONTEXT.md: Ambient context (agent-maintained)
     """
 
@@ -122,6 +215,10 @@ class BootstrapLoader:
         # Create default files if they don't exist
         defaults = {
             "SOUL.md": DEFAULT_SOUL,
+            "USER.md": DEFAULT_USER,
+            "AGENTS.md": DEFAULT_AGENTS,
+            "TOOLS.md": DEFAULT_TOOLS,
+            "MEMORY.md": DEFAULT_MEMORY,
             "IDENTITY.md": DEFAULT_IDENTITY,
             "CONTEXT.md": DEFAULT_CONTEXT,
         }
@@ -232,10 +329,29 @@ class BootstrapLoader:
         """Get CONTEXT.md - ambient context."""
         return await self.get_file("CONTEXT.md")
 
+    async def get_user(self) -> BootstrapFile | None:
+        """Get USER.md - operator profile. Falls back to IDENTITY.md."""
+        user = await self.get_file("USER.md")
+        if user:
+            return user
+        return await self.get_identity()
+
+    async def get_agents(self) -> BootstrapFile | None:
+        """Get AGENTS.md - operating constitution."""
+        return await self.get_file("AGENTS.md")
+
+    async def get_tools(self) -> BootstrapFile | None:
+        """Get TOOLS.md - infrastructure and tool configuration."""
+        return await self.get_file("TOOLS.md")
+
+    async def get_memory_file(self) -> BootstrapFile | None:
+        """Get MEMORY.md - curated operational memory."""
+        return await self.get_file("MEMORY.md")
+
     async def get_all(self) -> dict[str, BootstrapFile]:
         """Get all bootstrap files."""
         result = {}
-        for filename in ["SOUL.md", "IDENTITY.md", "CONTEXT.md"]:
+        for filename in BOOTSTRAP_FILES:
             loaded = await self.get_file(filename)
             if loaded:
                 result[loaded.name] = loaded
@@ -294,7 +410,7 @@ class BootstrapLoader:
         Returns:
             True if successful
         """
-        if filename not in ["SOUL.md", "IDENTITY.md", "CONTEXT.md"]:
+        if filename not in BOOTSTRAP_FILES:
             logger.error("Invalid bootstrap filename", filename=filename)
             return False
 
@@ -312,45 +428,124 @@ class BootstrapLoader:
             logger.error("Failed to save bootstrap file", file=filename, error=str(e))
             return False
 
+    def _has_real_content(self, content: str) -> bool:
+        """Check if content has real user data (not just [FILL] placeholders)."""
+        lines = content.strip().split("\n")
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("#") or stripped.startswith("<!--"):
+                continue
+            if "[FILL]" in stripped:
+                continue
+            if stripped.startswith("_No ") and stripped.endswith("_"):
+                continue
+            if stripped.startswith("-") and "[FILL]" in stripped:
+                continue
+            # Found a line with real content
+            return True
+        return False
+
+    def _extract_sections_by_name(
+        self, bf: BootstrapFile, match_terms: list[str]
+    ) -> tuple[list[BootstrapSection], list[BootstrapSection]]:
+        """Split sections into matched and unmatched by name keywords."""
+        matched = []
+        unmatched = []
+        for section in bf.sections:
+            name_lower = section.name.lower()
+            if any(term in name_lower for term in match_terms):
+                matched.append(section)
+            else:
+                unmatched.append(section)
+        return matched, unmatched
+
     def format_for_prompt(self, files: dict[str, BootstrapFile]) -> str:
         """
         Format bootstrap files for injection into system prompt.
 
-        Args:
-            files: Dict of name -> BootstrapFile
-
-        Returns:
-            Formatted string for system prompt
+        Differential injection order:
+        1. SOUL.md → full injection as "Communication Style & Voice"
+        2. AGENTS.md → safety sections full, other sections summarised
+        3. USER.md (fallback: IDENTITY) → skip [FILL] sections
+        4. MEMORY.md → full injection as "Operational Memory"
+        5. TOOLS.md → non-placeholder sections as "Tools & Infrastructure"
+        6. CONTEXT.md → full injection as "Current Context"
         """
-        sections = []
+        parts = []
 
-        # SOUL first (communication style)
+        # 1. SOUL — full injection
         if "SOUL" in files:
-            soul = files["SOUL"]
-            sections.append("## Communication Style & Voice\n")
-            sections.append(soul.raw_content.strip())
-            sections.append("")
+            parts.append("## Communication Style & Voice\n")
+            parts.append(files["SOUL"].raw_content.strip())
+            parts.append("")
 
-        # IDENTITY second (user context)
-        if "IDENTITY" in files:
-            identity = files["IDENTITY"]
-            # Filter out placeholder content
-            content = identity.raw_content
-            if "[Your role" not in content and "[Your company" not in content:
-                sections.append("## User Context\n")
-                sections.append(content.strip())
-                sections.append("")
+        # 2. AGENTS — safety sections full, others summarised (first line each)
+        if "AGENTS" in files:
+            agents = files["AGENTS"]
+            safety, others = self._extract_sections_by_name(agents, ["safety", "boundar"])
+            if safety:
+                parts.append("## Operating Constitution\n")
+                for s in safety:
+                    parts.append(f"### {s.name}")
+                    parts.append(s.content.strip())
+                    parts.append("")
+            if others:
+                if not safety:
+                    parts.append("## Operating Constitution\n")
+                for s in others:
+                    # Summarise: first non-empty line only
+                    first_line = ""
+                    for line in s.content.strip().split("\n"):
+                        stripped = line.strip()
+                        if stripped and not stripped.startswith("<!--"):
+                            first_line = stripped
+                            break
+                    if first_line:
+                        parts.append(f"- **{s.name}**: {first_line}")
+                parts.append("")
 
-        # CONTEXT last (ambient state)
+        # 3. USER (fallback: IDENTITY) — skip [FILL] placeholder sections
+        user_file = files.get("USER") or files.get("IDENTITY")
+        if user_file:
+            # Filter sections that have real content
+            real_sections = [s for s in user_file.sections if self._has_real_content(s.content)]
+            if real_sections:
+                parts.append("## Operator Profile\n")
+                for s in real_sections:
+                    parts.append(f"### {s.name}")
+                    parts.append(s.content.strip())
+                    parts.append("")
+
+        # 4. MEMORY — full injection if real content
+        if "MEMORY" in files:
+            memory = files["MEMORY"]
+            if self._has_real_content(memory.raw_content):
+                parts.append("## Operational Memory\n")
+                parts.append(memory.raw_content.strip())
+                parts.append("")
+
+        # 5. TOOLS — non-placeholder sections
+        if "TOOLS" in files:
+            tools = files["TOOLS"]
+            real_sections = [s for s in tools.sections if self._has_real_content(s.content)]
+            if real_sections:
+                parts.append("## Tools & Infrastructure\n")
+                for s in real_sections:
+                    parts.append(f"### {s.name}")
+                    parts.append(s.content.strip())
+                    parts.append("")
+
+        # 6. CONTEXT — full injection (existing _No check)
         if "CONTEXT" in files:
             context = files["CONTEXT"]
-            # Only include if there's real content (not just placeholders)
             if "_No " not in context.raw_content:
-                sections.append("## Current Context\n")
-                sections.append(context.raw_content.strip())
-                sections.append("")
+                parts.append("## Current Context\n")
+                parts.append(context.raw_content.strip())
+                parts.append("")
 
-        return "\n".join(sections)
+        return "\n".join(parts)
 
     async def get_formatted_prompt_section(self) -> str:
         """Get all bootstrap files formatted for prompt injection."""
@@ -377,11 +572,33 @@ class BootstrapLoader:
         # Fall back to full SOUL content
         return f"Writing style:\n{soul.raw_content.strip()}"
 
+    async def get_safety_rules(self) -> str:
+        """
+        Extract safety section from AGENTS.md for injection into LLM calls.
+
+        Returns formatted string of safety rules, or empty string if not available.
+        """
+        agents = await self.get_agents()
+        if not agents:
+            return ""
+
+        safety_sections, _ = self._extract_sections_by_name(agents, ["safety", "boundar"])
+        if not safety_sections:
+            return ""
+
+        parts = []
+        for s in safety_sections:
+            parts.append(f"### {s.name}")
+            parts.append(s.content.strip())
+            parts.append("")
+
+        return "\n".join(parts).strip()
+
     async def should_skip_context_pack(self, event_title: str) -> tuple[bool, str | None]:
         """
-        Check if an event should skip context pack generation based on IDENTITY.md rules.
+        Check if an event should skip context pack generation based on USER.md rules.
 
-        Looks for "Context Packs" section in IDENTITY.md for skip rules like:
+        Looks for "Context Packs" section in USER.md (falls back to IDENTITY.md) for skip rules like:
         - "do not need to create these for clinical events"
         - "do not need to create context packs for Lunch events"
 
@@ -391,13 +608,13 @@ class BootstrapLoader:
         Returns:
             Tuple of (should_skip, reason) - reason is None if not skipping
         """
-        identity = await self.get_identity()
-        if not identity:
+        user = await self.get_user()
+        if not user:
             return False, None
 
         # Find Context Packs section
         context_pack_section = None
-        for section in identity.sections:
+        for section in user.sections:
             if "context pack" in section.name.lower():
                 context_pack_section = section
                 break
@@ -405,40 +622,39 @@ class BootstrapLoader:
         if not context_pack_section:
             return False, None
 
-        content_lower = context_pack_section.content.lower()
         title_lower = event_title.lower()
 
         # Parse skip rules from the content
         skip_patterns = []
 
         # Look for patterns like "do not need to create" or "don't need"
-        lines = context_pack_section.content.split('\n')
+        lines = context_pack_section.content.split("\n")
         for line in lines:
             line_lower = line.lower()
-            if 'do not need' in line_lower or "don't need" in line_lower or 'skip' in line_lower:
+            if "do not need" in line_lower or "don't need" in line_lower or "skip" in line_lower:
                 # Extract keywords from this line
                 # Common patterns: clinical, MDT, lunch, prep for
-                if 'clinical' in line_lower:
-                    skip_patterns.append(('clinic', 'clinical event'))
-                    skip_patterns.append(('mdt', 'clinical event (MDT)'))
-                if 'mdt' in line_lower and 'clinical' not in line_lower:
-                    skip_patterns.append(('mdt', 'MDT'))
-                if 'lunch' in line_lower:
-                    skip_patterns.append(('lunch', 'lunch event'))
-                if 'prep for mdt' in line_lower or 'prep for' in line_lower:
-                    skip_patterns.append(('prep for', 'prep event'))
-                if 'diabetes' in line_lower:
-                    skip_patterns.append(('diabetes', 'diabetes clinic'))
-                if 'type 1' in line_lower:
-                    skip_patterns.append(('type 1', 'Type 1 clinic'))
-                if 'type 2' in line_lower:
-                    skip_patterns.append(('type 2', 'Type 2 clinic'))
+                if "clinical" in line_lower:
+                    skip_patterns.append(("clinic", "clinical event"))
+                    skip_patterns.append(("mdt", "clinical event (MDT)"))
+                if "mdt" in line_lower and "clinical" not in line_lower:
+                    skip_patterns.append(("mdt", "MDT"))
+                if "lunch" in line_lower:
+                    skip_patterns.append(("lunch", "lunch event"))
+                if "prep for mdt" in line_lower or "prep for" in line_lower:
+                    skip_patterns.append(("prep for", "prep event"))
+                if "diabetes" in line_lower:
+                    skip_patterns.append(("diabetes", "diabetes clinic"))
+                if "type 1" in line_lower:
+                    skip_patterns.append(("type 1", "Type 1 clinic"))
+                if "type 2" in line_lower:
+                    skip_patterns.append(("type 2", "Type 2 clinic"))
 
         # Check if event title matches any skip pattern
         for pattern, reason in skip_patterns:
             if pattern in title_lower:
                 logger.debug(
-                    "Skipping context pack per IDENTITY.md rules",
+                    "Skipping context pack per USER.md rules",
                     event=event_title[:30],
                     reason=reason,
                 )
@@ -467,10 +683,11 @@ async def init_bootstrap() -> BootstrapLoader:
 
 
 __all__ = [
-    "BootstrapLoader",
+    "BOOTSTRAP_DIR",
+    "BOOTSTRAP_FILES",
     "BootstrapFile",
+    "BootstrapLoader",
     "BootstrapSection",
     "get_bootstrap_loader",
     "init_bootstrap",
-    "BOOTSTRAP_DIR",
 ]
