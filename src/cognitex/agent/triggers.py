@@ -239,6 +239,26 @@ class TriggerSystem:
             replace_existing=True,
         )
 
+        # Weekly memory distillation — Sunday at 8pm
+        # Proposes MEMORY.md updates from the week's observations
+        self.scheduler.add_job(
+            self._run_weekly_distillation,
+            CronTrigger(day_of_week="sun", hour=20, minute=0),
+            id="weekly_distillation",
+            name="Weekly Memory Distillation",
+            replace_existing=True,
+        )
+
+        # Monthly archive — 1st of month at 3:30am
+        # Moves daily log files older than 30 days to archive/
+        self.scheduler.add_job(
+            self._run_monthly_archive,
+            CronTrigger(day=1, hour=3, minute=30),
+            id="monthly_archive",
+            name="Monthly Log Archive",
+            replace_existing=True,
+        )
+
         logger.info("Scheduled triggers configured")
 
     async def _start_event_listeners(self) -> None:
@@ -638,6 +658,20 @@ class TriggerSystem:
                 details={"consolidation": result, "pruning": prune_result}
             )
 
+            # Daily forgetting: remove trivial entries from yesterday's log
+            try:
+                from cognitex.services.memory_files import get_memory_file_service
+
+                memory_svc = get_memory_file_service()
+                forget_result = await memory_svc.apply_daily_forgetting()
+                if forget_result["removed"] > 0:
+                    logger.info(
+                        "Daily forgetting applied",
+                        removed=forget_result["removed"],
+                    )
+            except Exception as fe:
+                logger.warning("Daily forgetting failed", error=str(fe))
+
         except Exception as e:
             logger.error("Memory consolidation failed", error=str(e))
             await log_action(
@@ -645,6 +679,80 @@ class TriggerSystem:
                 "trigger",
                 status="failed",
                 summary=f"Consolidation failed: {str(e)}"
+            )
+
+    async def _run_weekly_distillation(self) -> None:
+        """Run weekly memory distillation.
+
+        Reviews last week's daily logs and proposes MEMORY.md updates
+        as an inbox item for operator approval.
+        """
+        logger.info("Starting weekly memory distillation")
+        from cognitex.agent.action_log import log_action
+
+        try:
+            from cognitex.agent.consolidation import MemoryConsolidator
+
+            consolidator = MemoryConsolidator()
+            result = await consolidator.run_weekly_distillation()
+
+            updates_count = len(result.get("proposed_updates", []))
+            logger.info(
+                "Weekly distillation completed",
+                updates=updates_count,
+                discarded=result.get("discarded_count", 0),
+            )
+
+            await log_action(
+                "weekly_distillation",
+                "trigger",
+                summary=f"Weekly distillation: {updates_count} updates proposed, "
+                        f"{result.get('discarded_count', 0)} observations discarded",
+                details=result,
+            )
+
+        except Exception as e:
+            logger.error("Weekly distillation failed", error=str(e))
+            await log_action(
+                "weekly_distillation",
+                "trigger",
+                status="failed",
+                summary=f"Weekly distillation failed: {str(e)}",
+            )
+
+    async def _run_monthly_archive(self) -> None:
+        """Archive daily log files older than 30 days.
+
+        Moves old .md files to ~/.cognitex/memory/archive/.
+        """
+        logger.info("Starting monthly log archive")
+        from cognitex.agent.action_log import log_action
+
+        try:
+            from cognitex.services.memory_files import get_memory_file_service
+
+            memory_svc = get_memory_file_service()
+            result = await memory_svc.archive_old_daily_logs(older_than_days=30)
+
+            logger.info(
+                "Monthly archive completed",
+                archived=result["archived_count"],
+            )
+
+            await log_action(
+                "monthly_archive",
+                "trigger",
+                summary=f"Monthly archive: {result['archived_count']} log files archived",
+                details=result,
+            )
+
+        except Exception as e:
+            logger.error("Monthly archive failed", error=str(e))
+            await log_action(
+                "monthly_archive",
+                "trigger",
+                status="failed",
+                summary=f"Monthly archive failed: {str(e)}",
             )
 
     async def _drive_poll(self) -> None:

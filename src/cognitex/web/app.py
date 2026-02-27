@@ -5249,6 +5249,91 @@ async def inbox_items_partial(request: Request, type: str | None = None):
     )
 
 
+def _apply_memory_updates(current_content: str, proposed_updates: list[dict]) -> str:
+    """Apply proposed memory updates to MEMORY.md content.
+
+    Inserts new entries into the correct section, merges with existing
+    entries when indicated, and creates missing sections as needed.
+
+    Args:
+        current_content: Current MEMORY.md text.
+        proposed_updates: List of update dicts from the distillation LLM.
+
+    Returns:
+        Updated MEMORY.md text.
+    """
+    # Section name mapping: skill output name -> MEMORY.md header
+    section_map = {
+        "User Preferences": "## User Preferences",
+        "Important Relationships": "## Important Relationships",
+        "Recurring Patterns": "## Recurring Patterns",
+        "Corrections": "## Corrections",
+        "Key Decisions": "## Key Decisions",
+    }
+
+    lines = current_content.split("\n")
+
+    for update in proposed_updates:
+        section_name = update.get("section", "Recurring Patterns")
+        content = update.get("content", "")
+        merge_target = update.get("merge_with_existing")
+        source_dates = update.get("source_dates", [])
+        date_prefix = source_dates[0] if source_dates else datetime.now().strftime("%Y-%m-%d")
+        entry_line = f"- [{date_prefix}] {content}"
+
+        header = section_map.get(section_name, f"## {section_name}")
+
+        if merge_target:
+            # Find and replace the existing entry
+            replaced = False
+            for i, line in enumerate(lines):
+                # Match on the content portion (after any date prefix)
+                stripped = line.strip()
+                if stripped.startswith("- ") and merge_target in stripped:
+                    lines[i] = entry_line
+                    replaced = True
+                    break
+            if not replaced:
+                # Fallback: append to section
+                lines = _append_to_section(lines, header, entry_line)
+        else:
+            lines = _append_to_section(lines, header, entry_line)
+
+    return "\n".join(lines)
+
+
+def _append_to_section(lines: list[str], header: str, entry: str) -> list[str]:
+    """Append an entry to a section, creating the section if needed."""
+    # Find the section header
+    header_idx = None
+    for i, line in enumerate(lines):
+        if line.strip() == header:
+            header_idx = i
+            break
+
+    if header_idx is None:
+        # Create section at end
+        lines.append("")
+        lines.append(header)
+        lines.append(entry)
+        return lines
+
+    # Find end of section (next ## header or end of file)
+    insert_idx = len(lines)
+    for i in range(header_idx + 1, len(lines)):
+        if lines[i].strip().startswith("## "):
+            insert_idx = i
+            break
+
+    # Insert before the next section (or at end), after any existing content
+    # Skip backwards over blank lines to insert right after last content
+    while insert_idx > header_idx + 1 and not lines[insert_idx - 1].strip():
+        insert_idx -= 1
+
+    lines.insert(insert_idx, entry)
+    return lines
+
+
 @app.post("/api/inbox/{item_id}/approve", response_class=HTMLResponse)
 async def approve_inbox_item(item_id: str):
     """Approve an inbox item."""
@@ -5279,6 +5364,25 @@ async def approve_inbox_item(item_id: str):
                     break
         except Exception as e:
             logger.warning("Failed to accept commitment", error=str(e))
+
+    elif item.item_type == "memory_update_proposal":
+        # Apply proposed updates to bootstrap MEMORY.md
+        try:
+            from cognitex.agent.bootstrap import get_bootstrap_loader
+
+            loader = get_bootstrap_loader()
+            memory_file = await loader.get_memory_file()
+            current_content = memory_file.raw_content if memory_file else ""
+            proposed_updates = item.payload.get("proposed_updates", [])
+
+            new_content = _apply_memory_updates(current_content, proposed_updates)
+            await loader.save_file("MEMORY.md", new_content)
+            logger.info(
+                "Applied memory distillation updates",
+                updates=len(proposed_updates),
+            )
+        except Exception as e:
+            logger.error("Failed to apply memory updates", error=str(e))
 
     # Mark item as approved
     await inbox.approve_item(item_id)

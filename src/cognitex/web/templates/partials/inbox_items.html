@@ -229,6 +229,53 @@
         {% endif %}
     </div>
 
+    {% elif item.item_type == 'memory_update_proposal' %}
+    <div class="inbox-item-payload">
+        {% if item.payload.summary %}
+        <div style="font-style: italic; margin-bottom: 0.75rem; color: #94a3b8;">{{ item.payload.summary }}</div>
+        {% endif %}
+
+        {% if item.payload.source_date_range %}
+        <div style="font-size: 0.85rem; color: #888; margin-bottom: 0.75rem;">
+            Week of {{ item.payload.source_date_range.start }} to {{ item.payload.source_date_range.end }}
+        </div>
+        {% endif %}
+
+        {% if item.payload.proposed_updates and item.payload.proposed_updates | length > 0 %}
+        <div style="margin: 0.5rem 0;">
+            {% for update in item.payload.proposed_updates %}
+            <div style="padding: 0.75rem; background: var(--bg-secondary); border-radius: 4px; margin: 0.4rem 0; border-left: 3px solid {% if update.confidence >= 0.8 %}#22c55e{% elif update.confidence >= 0.6 %}#eab308{% else %}#f97316{% endif %};">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">
+                    <span class="badge" style="background: #1e3a5f; color: #93c5fd; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem;">
+                        {{ update.section }}
+                    </span>
+                    <span style="font-size: 0.75rem; color: {% if update.confidence >= 0.8 %}#22c55e{% elif update.confidence >= 0.6 %}#eab308{% else %}#f97316{% endif %};">
+                        {{ (update.confidence * 100) | int }}% confidence
+                    </span>
+                </div>
+                <div style="margin-top: 0.25rem;">{{ update.content }}</div>
+                {% if update.merge_with_existing %}
+                <div style="font-size: 0.8rem; color: #f59e0b; margin-top: 0.25rem;">
+                    Merges with: "{{ update.merge_with_existing[:80] }}{% if update.merge_with_existing | length > 80 %}...{% endif %}"
+                </div>
+                {% endif %}
+                {% if update.source_dates %}
+                <div style="font-size: 0.75rem; color: #666; margin-top: 0.25rem;">
+                    Sources: {{ update.source_dates | join(', ') }}
+                </div>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        {% if item.payload.discarded_count %}
+        <div style="font-size: 0.8rem; color: #666; margin-top: 0.5rem;">
+            {{ item.payload.discarded_count }} observations reviewed and discarded
+        </div>
+        {% endif %}
+    </div>
+
     {% elif item.item_type == 'email_review' %}
     <!-- Email review with document analysis -->
     <div class="inbox-item-payload email-review-payload">

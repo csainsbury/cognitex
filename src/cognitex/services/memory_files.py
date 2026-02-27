@@ -10,9 +10,10 @@ Memory entries are both human-readable AND queryable.
 
 import asyncio
 import re
+import shutil
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,9 @@ logger = structlog.get_logger()
 
 # Memory directory
 MEMORY_DIR = Path.home() / ".cognitex" / "memory"
+
+# Categories considered trivial for daily forgetting
+TRIVIAL_CATEGORIES = {"Sync", "Check", "Poll", "Heartbeat", "System"}
 
 # Default curated memory template
 DEFAULT_CURATED_MEMORY = """# Long-Term Memory
@@ -314,6 +318,121 @@ class MemoryFileService:
                     )
             break
 
+    async def archive_old_daily_logs(self, older_than_days: int = 30) -> dict:
+        """Move daily log files older than threshold to archive/.
+
+        Args:
+            older_than_days: Archive files older than this many days.
+
+        Returns:
+            Dict with archived_count and archived_files.
+        """
+        archive_dir = self.memory_dir / "archive"
+        if not archive_dir.exists():
+            await asyncio.to_thread(archive_dir.mkdir, parents=True, exist_ok=True)
+
+        cutoff = date.today() - timedelta(days=older_than_days)
+        date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}\.md$")
+        archived_files: list[str] = []
+
+        for path in self.memory_dir.iterdir():
+            if not path.is_file() or not date_pattern.match(path.name):
+                continue
+            try:
+                file_date = date.fromisoformat(path.stem)
+            except ValueError:
+                continue
+            if file_date < cutoff:
+                dest = archive_dir / path.name
+                await asyncio.to_thread(shutil.move, str(path), str(dest))
+                archived_files.append(path.name)
+
+        if archived_files:
+            logger.info(
+                "Archived old daily logs",
+                count=len(archived_files),
+                oldest=archived_files[0] if archived_files else None,
+            )
+
+        return {"archived_count": len(archived_files), "archived_files": archived_files}
+
+    async def apply_daily_forgetting(self, target_date: date | None = None) -> dict:
+        """Remove trivial entries from a daily log.
+
+        Strips entries whose category is in TRIVIAL_CATEGORIES or whose
+        content is shorter than 20 characters, then rewrites the file.
+
+        Args:
+            target_date: Date to clean (defaults to yesterday).
+
+        Returns:
+            Dict with entries_before, entries_after, removed counts.
+        """
+        target_date = target_date or (date.today() - timedelta(days=1))
+        path = self._get_daily_path(target_date)
+
+        if not path.exists():
+            return {"entries_before": 0, "entries_after": 0, "removed": 0}
+
+        content = await asyncio.to_thread(path.read_text)
+        entries = self._parse_daily_log(content, target_date)
+        entries_before = len(entries)
+
+        kept = [
+            e
+            for e in entries
+            if e.category not in TRIVIAL_CATEGORIES and len(e.content.strip()) >= 20
+        ]
+        removed = entries_before - len(kept)
+
+        if removed > 0:
+            # Rebuild file with kept entries only
+            header = f"## {target_date.isoformat()}\n"
+            lines = [header]
+            for entry in kept:
+                time_str = entry.timestamp.strftime("%H:%M")
+                lines.append(f"\n### {time_str} - {entry.category}\n{entry.content}\n")
+            await asyncio.to_thread(path.write_text, "\n".join(lines))
+            logger.debug(
+                "Daily forgetting applied",
+                date=target_date.isoformat(),
+                removed=removed,
+            )
+
+        return {
+            "entries_before": entries_before,
+            "entries_after": len(kept),
+            "removed": removed,
+        }
+
+    async def get_weekly_logs_for_distillation(
+        self, weeks_back: int = 1
+    ) -> list["DailyMemory"]:
+        """Get daily logs for a full ISO week ending at the most recent Sunday.
+
+        Args:
+            weeks_back: How many weeks back (1 = last complete week).
+
+        Returns:
+            List of non-None DailyMemory objects for the 7-day window.
+        """
+        today = date.today()
+        # Find the most recent Sunday (weekday 6)
+        days_since_sunday = (today.weekday() + 1) % 7
+        last_sunday = today - timedelta(days=days_since_sunday)
+        # Go further back if weeks_back > 1
+        end_date = last_sunday - timedelta(weeks=weeks_back - 1)
+        start_date = end_date - timedelta(days=6)
+
+        logs: list[DailyMemory] = []
+        for i in range(7):
+            d = start_date + timedelta(days=i)
+            log = await self.get_daily_log(d)
+            if log:
+                logs.append(log)
+
+        return logs
+
     async def get_curated_memory(self) -> str:
         """Get the curated long-term memory content."""
         path = self.memory_dir / "MEMORY.md"
@@ -560,4 +679,5 @@ __all__ = [
     "get_memory_file_service",
     "init_memory_files",
     "MEMORY_DIR",
+    "TRIVIAL_CATEGORIES",
 ]

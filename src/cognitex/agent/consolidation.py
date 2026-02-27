@@ -5,17 +5,22 @@ Implements nightly memory consolidation inspired by human sleep:
 - Extracts behavioral patterns for learning
 - Archives old raw logs to reduce noise
 - Strengthens important memories for better retrieval
+- Weekly distillation: promotes insights to bootstrap MEMORY.md
 
 Run via: cognitex consolidate (or schedule via cron at 3am)
 """
 
-from datetime import datetime, timedelta
-from typing import Any
+import json
+import re
+from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import structlog
 from sqlalchemy import text
 
 logger = structlog.get_logger()
+
+PROMPT_TEMPLATE_PATH = Path(__file__).parent.parent / "prompts" / "memory_distillation.md"
 
 
 # PostgreSQL schema for consolidation
@@ -186,6 +191,164 @@ class MemoryConsolidator:
             }
 
         return results
+
+    async def run_weekly_distillation(self, dry_run: bool = False) -> dict:
+        """Run weekly memory distillation.
+
+        Reviews last week's daily logs and consolidated summaries,
+        then proposes MEMORY.md updates as an inbox item for operator approval.
+
+        Args:
+            dry_run: If True, return proposals without creating an inbox item.
+
+        Returns:
+            Dict with distillation results.
+        """
+        logger.info("Starting weekly memory distillation", dry_run=dry_run)
+
+        # 1. Load last week's daily .md logs
+        from cognitex.services.memory_files import get_memory_file_service
+
+        memory_svc = get_memory_file_service()
+        weekly_logs = await memory_svc.get_weekly_logs_for_distillation(weeks_back=1)
+
+        if not weekly_logs:
+            logger.info("No daily logs found for last week, skipping distillation")
+            return {"status": "no_data", "proposed_updates": [], "dry_run": dry_run}
+
+        # 2. Load last week's daily_summaries from PostgreSQL
+        date_range = sorted(log.date for log in weekly_logs)
+        start_date = date_range[0]
+        end_date = date_range[-1]
+        weekly_summaries = await self._get_weekly_summaries(start_date, end_date)
+
+        # 3. Load current bootstrap MEMORY.md
+        from cognitex.agent.bootstrap import get_bootstrap_loader
+
+        bootstrap = get_bootstrap_loader()
+        memory_file = await bootstrap.get_memory_file()
+        current_memory = memory_file.raw_content if memory_file else ""
+
+        # 4. Load memory-curation skill
+        from cognitex.agent.skills import get_skills_loader
+
+        skills_loader = get_skills_loader()
+        skill = await skills_loader.get_skill("memory-curation")
+        skill_guidance = skill.raw_content if skill else ""
+
+        # 5. Build prompt from template
+        template = PROMPT_TEMPLATE_PATH.read_text()
+
+        # Format daily logs for the prompt
+        logs_text = ""
+        for log in weekly_logs:
+            logs_text += f"\n### {log.date.isoformat()}\n{log.raw_content}\n"
+
+        # Format summaries
+        summaries_text = ""
+        for s in weekly_summaries:
+            summaries_text += f"\n### {s['date']}\n"
+            summaries_text += f"Summary: {s['summary']}\n"
+            if s.get("patterns"):
+                summaries_text += f"Patterns: {s['patterns']}\n"
+            if s.get("key_events"):
+                summaries_text += f"Key events: {s['key_events']}\n"
+
+        prompt = template.replace("{{ skill_guidance }}", skill_guidance)
+        prompt = prompt.replace("{{ current_memory }}", current_memory)
+        prompt = prompt.replace("{{ daily_logs }}", logs_text)
+        prompt = prompt.replace("{{ daily_summaries }}", summaries_text or "No summaries available.")
+
+        # 6. Call LLM
+        llm = await self._get_llm()
+        try:
+            response = await llm.complete(prompt, max_tokens=2000)
+            # Strip code fences if present
+            cleaned = re.sub(r"^```(?:json)?\s*", "", response.strip())
+            cleaned = re.sub(r"\s*```$", "", cleaned)
+            result = json.loads(cleaned)
+        except (json.JSONDecodeError, Exception) as e:
+            logger.error("Failed to parse distillation response", error=str(e))
+            return {"status": "llm_error", "error": str(e), "dry_run": dry_run}
+
+        proposed_updates = result.get("proposed_updates", [])
+        discarded_count = result.get("discarded_count", 0)
+        summary = result.get("summary", "")
+
+        # 7. Create inbox item if not dry_run
+        if not dry_run and proposed_updates:
+            from cognitex.services.inbox import get_inbox_service
+
+            inbox = get_inbox_service()
+            await inbox.create_item(
+                item_type="memory_update_proposal",
+                title="Weekly Memory Distillation",
+                summary=summary,
+                payload={
+                    "proposed_updates": proposed_updates,
+                    "source_date_range": {
+                        "start": start_date.isoformat(),
+                        "end": end_date.isoformat(),
+                    },
+                    "discarded_count": discarded_count,
+                    "summary": summary,
+                },
+                priority="normal",
+            )
+            logger.info(
+                "Created memory distillation inbox item",
+                updates=len(proposed_updates),
+                discarded=discarded_count,
+            )
+
+        return {
+            "status": "completed" if not dry_run else "dry_run_complete",
+            "proposed_updates": proposed_updates,
+            "discarded_count": discarded_count,
+            "summary": summary,
+            "dry_run": dry_run,
+            "date_range": {
+                "start": start_date.isoformat(),
+                "end": end_date.isoformat(),
+            },
+        }
+
+    async def _get_weekly_summaries(
+        self, start_date: date, end_date: date
+    ) -> list[dict]:
+        """Fetch daily_summaries from PostgreSQL for a date range.
+
+        Args:
+            start_date: Start of range (inclusive).
+            end_date: End of range (inclusive).
+
+        Returns:
+            List of dicts with summary, patterns, key_events.
+        """
+        from cognitex.db.postgres import get_session
+
+        summaries: list[dict] = []
+        async for session in get_session():
+            result = await session.execute(
+                text("""
+                    SELECT date, summary, productivity_patterns, communication_patterns,
+                           deferral_patterns, key_events
+                    FROM daily_summaries
+                    WHERE date >= :start AND date <= :end
+                    ORDER BY date
+                """),
+                {"start": start_date, "end": end_date},
+            )
+            for row in result.mappings():
+                summaries.append({
+                    "date": row["date"].isoformat() if hasattr(row["date"], "isoformat") else str(row["date"]),
+                    "summary": row["summary"],
+                    "patterns": row.get("productivity_patterns") or row.get("communication_patterns"),
+                    "key_events": row.get("key_events"),
+                })
+            break
+
+        return summaries
 
     async def archive_old_memories(
         self,
