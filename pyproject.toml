@@ -49,6 +49,7 @@ dependencies = [
     "python-multipart>=0.0.9",
 
     # Utilities
+    "pyyaml>=6.0",
     "python-dateutil>=2.9.0",
     "structlog>=24.4.0",
     "itsdangerous>=2.1.0",

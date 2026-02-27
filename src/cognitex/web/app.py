@@ -9127,9 +9127,15 @@ async def get_skill(name: str):
         "name": skill.name,
         "content": skill.raw_content,
         "purpose": skill.purpose,
+        "description": skill.description,
         "rules_count": len(skill.rules),
         "is_user_skill": skill.is_user_skill,
         "path": str(skill.path),
+        "format": skill.format,
+        "version": skill.version,
+        "eligible": skill.eligible,
+        "ineligibility_reason": skill.ineligibility_reason,
+        "source": skill.source,
     }
 
 
@@ -9210,6 +9216,59 @@ Output:"""
         """)
     except Exception as e:
         return HTMLResponse(f'<div class="alert alert-danger">Error: {str(e)}</div>')
+
+
+# --- Community skill registry routes ---
+
+
+@app.get("/api/skills/community/search", response_class=JSONResponse)
+async def community_skill_search(q: str = ""):
+    """Search community skill registry."""
+    from cognitex.services.skill_registry import get_skill_registry
+
+    registry = get_skill_registry()
+    results = await registry.search(q) if q else []
+    return [
+        {
+            "slug": r.slug,
+            "name": r.name,
+            "description": r.description,
+            "version": r.version,
+            "installed": r.installed,
+        }
+        for r in results
+    ]
+
+
+@app.post("/api/skills/community/install/{slug}", response_class=HTMLResponse)
+async def community_skill_install(slug: str):
+    """Install a community skill."""
+    from cognitex.services.skill_registry import get_skill_registry
+
+    registry = get_skill_registry()
+    success = await registry.install(slug)
+    if success:
+        return HTMLResponse(
+            f'<div class="alert alert-success" style="padding: 0.5rem; background: var(--success-bg); border-radius: 6px;">Installed: {html.escape(slug)}</div>'
+        )
+    return HTMLResponse(
+        f'<div class="alert alert-danger">Failed to install {html.escape(slug)}. Run sync first.</div>'
+    )
+
+
+@app.post("/api/skills/community/sync", response_class=HTMLResponse)
+async def community_skill_sync():
+    """Sync the community skill registry."""
+    from cognitex.services.skill_registry import get_skill_registry
+
+    registry = get_skill_registry()
+    try:
+        count = await registry.sync_registry()
+        return HTMLResponse(
+            f'<div class="alert alert-success" style="padding: 0.5rem; background: var(--success-bg); border-radius: 6px;">Registry synced — {count} skill(s) available.</div>'
+        )
+    except RuntimeError as e:
+        return HTMLResponse(f'<div class="alert alert-danger">{html.escape(str(e))}</div>')
 
 
 # =============================================================================

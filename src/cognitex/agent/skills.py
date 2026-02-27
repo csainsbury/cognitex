@@ -4,22 +4,58 @@ Implements OpenClaw-inspired skills pattern:
 - Skills are markdown files that define specific behaviors
 - Each skill has: Purpose, Rules, Examples
 - User skills (~/.cognitex/skills/) override bundled skills (src/cognitex/skills/)
+- Supports both AgentSkills YAML frontmatter format and legacy section-header format
 """
 
 import asyncio
 import hashlib
+import os
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import structlog
+import yaml
 
 logger = structlog.get_logger()
 
 # Skill directories
 BUNDLED_SKILLS_DIR = Path(__file__).parent.parent / "skills"
 USER_SKILLS_DIR = Path.home() / ".cognitex" / "skills"
+
+
+def parse_frontmatter(content: str) -> tuple[dict, str]:
+    """Detect YAML frontmatter delimited by --- lines.
+
+    Returns (frontmatter_dict, body). No frontmatter -> ({}, original content).
+    """
+    stripped = content.lstrip()
+    if not stripped.startswith("---"):
+        return {}, content
+
+    # Find end delimiter
+    first_newline = stripped.index("\n")
+    rest = stripped[first_newline + 1 :]
+    end_idx = rest.find("\n---")
+
+    if end_idx == -1:
+        return {}, content
+
+    yaml_block = rest[:end_idx]
+    # Body starts after the closing ---\n
+    body_start = end_idx + 4  # len("\n---")
+    body = rest[body_start:].lstrip("\n")
+
+    try:
+        frontmatter = yaml.safe_load(yaml_block)
+        if not isinstance(frontmatter, dict):
+            return {}, content
+        return frontmatter, body
+    except yaml.YAMLError:
+        logger.warning("Malformed YAML frontmatter, falling back to legacy format")
+        return {}, content
 
 
 @dataclass
@@ -40,12 +76,23 @@ class Skill:
     purpose: str
     rules: list[str]
     examples: list[SkillExample]
-    what_is: list[str] = field(default_factory=list)  # What IS a thing
-    what_is_not: list[str] = field(default_factory=list)  # What is NOT
+    what_is: list[str] = field(default_factory=list)
+    what_is_not: list[str] = field(default_factory=list)
     raw_content: str = ""
     is_user_skill: bool = False
     last_modified: datetime | None = None
     content_hash: str = ""
+    # AgentSkills format fields
+    version: str = "1.0.0"
+    description: str = ""
+    metadata: dict = field(default_factory=dict)
+    format: Literal["agentskills", "cognitex_legacy"] = "cognitex_legacy"
+    requires_bins: list[str] = field(default_factory=list)
+    requires_env: list[str] = field(default_factory=list)
+    requires_config: list[str] = field(default_factory=list)
+    eligible: bool = True
+    ineligibility_reason: str = ""
+    source: Literal["bundled", "user", "community"] = "bundled"
 
 
 class SkillsLoader:
@@ -59,6 +106,7 @@ class SkillsLoader:
     - What IS/NOT: Classification guidance
 
     User skills override bundled skills with the same name.
+    Supports both AgentSkills YAML frontmatter and legacy section-header formats.
     """
 
     def __init__(
@@ -88,7 +136,67 @@ class SkillsLoader:
         return hashlib.md5(content.encode()).hexdigest()
 
     def _parse_skill_file(self, content: str, name: str, path: Path, is_user: bool) -> Skill:
-        """Parse a SKILL.md file into a Skill object."""
+        """Parse a SKILL.md file into a Skill object (dual-format dispatch)."""
+        frontmatter, body = parse_frontmatter(content)
+        if frontmatter and "name" in frontmatter:
+            return self._parse_agentskills_format(frontmatter, body, content, name, path, is_user)
+        else:
+            return self._parse_legacy_format(content, name, path, is_user)
+
+    def _parse_agentskills_format(
+        self,
+        frontmatter: dict,
+        body: str,
+        raw_content: str,
+        name: str,
+        path: Path,
+        is_user: bool,
+    ) -> Skill:
+        """Parse AgentSkills YAML frontmatter format."""
+        metadata = frontmatter.get("metadata", {})
+
+        # Extract requires from metadata.cognitex.requires or metadata.openclaw.requires
+        requires = {}
+        for ns in ("cognitex", "openclaw"):
+            ns_data = metadata.get(ns, {})
+            if isinstance(ns_data, dict) and "requires" in ns_data:
+                requires = ns_data["requires"]
+                break
+
+        # Parse purpose from body (first paragraph after title)
+        purpose = frontmatter.get("description", "")
+        if not purpose:
+            for line in body.split("\n"):
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#"):
+                    purpose = stripped
+                    break
+
+        skill = Skill(
+            name=frontmatter.get("name", name),
+            path=path,
+            purpose=purpose,
+            rules=[],
+            examples=[],
+            raw_content=raw_content,
+            is_user_skill=is_user,
+            content_hash=self._compute_hash(raw_content),
+            version=str(frontmatter.get("version", "1.0.0")),
+            description=frontmatter.get("description", ""),
+            metadata=metadata,
+            format="agentskills",
+            requires_bins=requires.get("bins", []) if isinstance(requires, dict) else [],
+            requires_env=requires.get("env", []) if isinstance(requires, dict) else [],
+            requires_config=requires.get("config", []) if isinstance(requires, dict) else [],
+        )
+
+        # Also parse the body with legacy parser for rules/what_is/examples
+        self._parse_body_sections(skill, body)
+
+        return skill
+
+    def _parse_legacy_format(self, content: str, name: str, path: Path, is_user: bool) -> Skill:
+        """Parse legacy section-header format (## Purpose, ## Rules, etc.)."""
         skill = Skill(
             name=name,
             path=path,
@@ -98,12 +206,17 @@ class SkillsLoader:
             raw_content=content,
             is_user_skill=is_user,
             content_hash=self._compute_hash(content),
+            format="cognitex_legacy",
         )
 
+        self._parse_body_sections(skill, content)
+        return skill
+
+    def _parse_body_sections(self, skill: Skill, content: str) -> None:
+        """Parse section headers from markdown body into skill fields."""
         current_section = None
         current_example_input = None
         current_example_output = []
-        in_example = False
 
         lines = content.split("\n")
         i = 0
@@ -115,11 +228,9 @@ class SkillsLoader:
             if line.startswith("## "):
                 section = line[3:].strip().lower()
                 current_section = section
-                in_example = False
 
                 # Handle example blocks
                 if section.startswith("example"):
-                    in_example = True
                     current_example_input = None
                     current_example_output = []
 
@@ -127,10 +238,10 @@ class SkillsLoader:
                 # Subsection - often example input/output
                 subsection = line[4:].strip().lower()
                 if "email:" in subsection or "input:" in subsection:
-                    # Start of example input
-                    current_example_input = subsection.split(":", 1)[1].strip() if ":" in subsection else ""
+                    current_example_input = (
+                        subsection.split(":", 1)[1].strip() if ":" in subsection else ""
+                    )
                 elif "task" in subsection or "output" in subsection:
-                    # Start of example output
                     pass
 
             elif current_section:
@@ -140,25 +251,24 @@ class SkillsLoader:
                     if stripped:
                         skill.purpose += " " + stripped if skill.purpose else stripped
 
-                elif current_section == "what is a task" or current_section == "what is":
+                elif current_section in ("what is a task", "what is"):
                     if stripped.startswith("- "):
                         skill.what_is.append(stripped[2:])
 
-                elif current_section == "what is not a task" or current_section == "what is not":
+                elif current_section in ("what is not a task", "what is not"):
                     if stripped.startswith("- "):
                         skill.what_is_not.append(stripped[2:])
 
                 elif "rule" in current_section or current_section == "extraction rules":
-                    if stripped.startswith(("- ", "1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9.")):
-                        # Strip leading number/bullet
+                    if stripped.startswith(
+                        ("- ", "1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9.")
+                    ):
                         rule = stripped.lstrip("- 0123456789.").strip()
                         if rule:
                             skill.rules.append(rule)
 
                 elif current_section.startswith("example"):
-                    # Accumulate example content
                     if stripped.startswith("Tasks:"):
-                        # Output section
                         pass
                     elif stripped.startswith("- [ ]") or stripped.startswith("- [x]"):
                         current_example_output.append(stripped)
@@ -167,7 +277,31 @@ class SkillsLoader:
 
             i += 1
 
-        return skill
+    def _check_eligibility(self, skill: Skill) -> None:
+        """Check whether a skill's requirements are met."""
+        reasons = []
+        for bin_name in skill.requires_bins:
+            if shutil.which(bin_name) is None:
+                reasons.append(f"binary '{bin_name}' not found on PATH")
+        for env_var in skill.requires_env:
+            if not os.environ.get(env_var):
+                reasons.append(f"env var '{env_var}' not set")
+        # Config keys could be checked against get_settings() but we keep it
+        # lightweight — just note them as requirements for now
+        for config_key in skill.requires_config:
+            reasons.append(f"config key '{config_key}' required (unchecked)")
+        if reasons:
+            skill.eligible = False
+            skill.ineligibility_reason = "; ".join(reasons)
+
+    def _determine_source(
+        self, skill_dir: Path, is_user: bool
+    ) -> Literal["bundled", "user", "community"]:
+        """Determine skill source based on location and .community marker."""
+        marker = skill_dir / ".community"
+        if marker.exists():
+            return "community"
+        return "user" if is_user else "bundled"
 
     async def _load_skill(self, skill_dir: Path, is_user: bool) -> Skill | None:
         """Load a skill from its directory."""
@@ -187,6 +321,11 @@ class SkillsLoader:
                 is_user=is_user,
             )
             skill.last_modified = datetime.fromtimestamp(stat.st_mtime)
+            skill.source = self._determine_source(skill_dir, is_user)
+
+            # Check eligibility for agentskills format
+            if skill.format == "agentskills":
+                self._check_eligibility(skill)
 
             return skill
         except Exception as e:
@@ -270,17 +409,29 @@ class SkillsLoader:
         skill_paths = await self._discover_skills()
         skills = []
 
-        for name, path in skill_paths.items():
+        for name in skill_paths:
             skill = await self.get_skill(name)
             if skill:
-                skills.append({
-                    "name": skill.name,
-                    "purpose": skill.purpose[:100] + "..." if len(skill.purpose) > 100 else skill.purpose,
-                    "rules_count": len(skill.rules),
-                    "examples_count": len(skill.examples),
-                    "is_user_skill": skill.is_user_skill,
-                    "path": str(skill.path),
-                })
+                skills.append(
+                    {
+                        "name": skill.name,
+                        "purpose": (
+                            skill.purpose[:100] + "..."
+                            if len(skill.purpose) > 100
+                            else skill.purpose
+                        ),
+                        "description": skill.description,
+                        "rules_count": len(skill.rules),
+                        "examples_count": len(skill.examples),
+                        "is_user_skill": skill.is_user_skill,
+                        "path": str(skill.path),
+                        "format": skill.format,
+                        "version": skill.version,
+                        "eligible": skill.eligible,
+                        "ineligibility_reason": skill.ineligibility_reason,
+                        "source": skill.source,
+                    }
+                )
 
         return sorted(skills, key=lambda x: x["name"])
 
@@ -297,18 +448,27 @@ class SkillsLoader:
         return result
 
     def format_skill_for_prompt(self, skill: Skill) -> str:
-        """
-        Format a skill for injection into a prompt.
+        """Format a skill for injection into a prompt.
 
-        Provides structured guidance based on the skill definition.
+        AgentSkills format: returns the markdown body directly.
+        Legacy format: returns structured Purpose/Rules/Examples.
         """
+        if skill.format == "agentskills":
+            return self._format_agentskills_for_prompt(skill)
+        return self._format_legacy_for_prompt(skill)
+
+    def _format_agentskills_for_prompt(self, skill: Skill) -> str:
+        """Format AgentSkills skill — return markdown body after frontmatter."""
+        _, body = parse_frontmatter(skill.raw_content)
+        return body
+
+    def _format_legacy_for_prompt(self, skill: Skill) -> str:
+        """Format legacy skill with structured sections."""
         sections = []
 
-        # Purpose
         if skill.purpose:
             sections.append(f"**Purpose:** {skill.purpose}")
 
-        # What IS / IS NOT
         if skill.what_is:
             sections.append("\n**What IS:**")
             for item in skill.what_is:
@@ -319,16 +479,14 @@ class SkillsLoader:
             for item in skill.what_is_not:
                 sections.append(f"- {item}")
 
-        # Rules
         if skill.rules:
             sections.append("\n**Rules:**")
             for i, rule in enumerate(skill.rules, 1):
                 sections.append(f"{i}. {rule}")
 
-        # Examples (if any parsed)
         if skill.examples:
             sections.append("\n**Examples:**")
-            for ex in skill.examples[:3]:  # Limit to 3
+            for ex in skill.examples[:3]:
                 sections.append(f"\nInput: {ex.input_text}")
                 sections.append(f"Output: {ex.output_text}")
 
@@ -392,8 +550,6 @@ class SkillsLoader:
             return False
 
         try:
-            import shutil
-
             await asyncio.to_thread(shutil.rmtree, skill_dir)
 
             # Invalidate cache
@@ -432,6 +588,7 @@ __all__ = [
     "SkillsLoader",
     "get_skills_loader",
     "init_skills",
+    "parse_frontmatter",
     "BUNDLED_SKILLS_DIR",
     "USER_SKILLS_DIR",
 ]

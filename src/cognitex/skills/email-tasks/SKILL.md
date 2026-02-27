@@ -1,3 +1,10 @@
+---
+name: email-tasks
+description: Extract actionable tasks from emails while avoiding false positives.
+version: 1.0.0
+metadata: { "cognitex": {} }
+---
+
 # Email Task Extraction
 
 ## Purpose

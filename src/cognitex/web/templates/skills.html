@@ -25,8 +25,11 @@
                     <tr>
                         <th>Name</th>
                         <th>Type</th>
+                        <th>Format</th>
+                        <th>Version</th>
                         <th>Purpose</th>
                         <th>Rules</th>
+                        <th>Eligible</th>
                         <th></th>
                     </tr>
                 </thead>
@@ -35,16 +38,27 @@
                     <tr class="skill-row" data-name="{{ skill.name }}" onclick="selectSkill('{{ skill.name }}')" style="cursor: pointer;">
                         <td><strong>{{ skill.name }}</strong></td>
                         <td>
-                            {% if skill.is_user_skill %}
+                            {% if skill.source == "community" %}
+                            <span class="badge" style="background: #a855f7; color: white;">community</span>
+                            {% elif skill.is_user_skill %}
                             <span class="badge badge-active">user</span>
                             {% else %}
                             <span class="badge badge-archived">bundled</span>
                             {% endif %}
                         </td>
+                        <td class="text-dim" style="font-size: 0.8rem;">{{ skill.format }}</td>
+                        <td class="text-dim" style="font-size: 0.8rem;">{{ skill.version }}</td>
                         <td class="text-dim" style="max-width: 200px; overflow: hidden; text-overflow: ellipsis;">
                             {{ skill.purpose[:50] }}{% if skill.purpose|length > 50 %}...{% endif %}
                         </td>
                         <td>{{ skill.rules_count }}</td>
+                        <td>
+                            {% if skill.eligible %}
+                            <span style="color: var(--success);">yes</span>
+                            {% else %}
+                            <span style="color: var(--danger);" title="{{ skill.ineligibility_reason }}">no</span>
+                            {% endif %}
+                        </td>
                         <td>
                             {% if skill.is_user_skill %}
                             <button class="btn btn-danger btn-sm"
@@ -66,6 +80,29 @@
                 No skills found. Create one or check your skills directories.
             </div>
             {% endif %}
+        </div>
+
+        <!-- Community Skills -->
+        <div class="card" style="margin-top: 1rem;">
+            <div class="card-header">
+                <h2>Community Skills</h2>
+                <button class="btn btn-secondary btn-sm"
+                        hx-post="/api/skills/community/sync"
+                        hx-target="#sync-result"
+                        hx-swap="innerHTML">
+                    Sync Registry
+                </button>
+            </div>
+            <div id="sync-result" style="margin-bottom: 0.5rem;"></div>
+            <div style="margin-bottom: 1rem;">
+                <input type="text" id="community-search" placeholder="Search community skills..."
+                       hx-get="/api/skills/community/search"
+                       hx-trigger="keyup changed delay:300ms"
+                       hx-target="#community-results"
+                       hx-swap="innerHTML"
+                       name="q">
+            </div>
+            <div id="community-results"></div>
         </div>
 
         <!-- New Skill Form (hidden by default) -->
@@ -153,10 +190,20 @@ function selectSkill(name) {
         .then(r => r.json())
         .then(skill => {
             const isUser = skill.is_user_skill;
-            const typeLabel = isUser ? '<span class="badge badge-active">user</span>' : '<span class="badge badge-archived">bundled</span>';
+            let typeLabel;
+            if (skill.source === 'community') {
+                typeLabel = '<span class="badge" style="background: #a855f7; color: white;">community</span>';
+            } else if (isUser) {
+                typeLabel = '<span class="badge badge-active">user</span>';
+            } else {
+                typeLabel = '<span class="badge badge-archived">bundled</span>';
+            }
+
+            const metaInfo = `<div class="text-dim" style="font-size: 0.8rem; margin-bottom: 0.5rem;">Format: ${skill.format} | Version: ${skill.version}${skill.eligible ? '' : ' | <span style="color: var(--danger);">Ineligible: ' + escapeHtml(skill.ineligibility_reason) + '</span>'}</div>`;
 
             document.getElementById('editor-title').innerHTML = `${skill.name} ${typeLabel}`;
             document.getElementById('editor-content').innerHTML = `
+                ${metaInfo}
                 <form hx-post="/api/skills/${skill.name}" hx-target="#save-result" hx-swap="innerHTML">
                     <textarea name="content" rows="20" style="font-family: var(--font-mono); font-size: 0.9rem;">${escapeHtml(skill.content)}</textarea>
                     <div style="margin-top: 1rem; display: flex; gap: 0.5rem; align-items: center;">
@@ -195,5 +242,30 @@ function escapeHtml(text) {
     div.textContent = text;
     return div.innerHTML;
 }
+
+// Render community search results as a table
+document.body.addEventListener('htmx:afterSwap', function(event) {
+    if (event.detail.target.id === 'community-results') {
+        try {
+            const data = JSON.parse(event.detail.target.textContent);
+            if (!Array.isArray(data) || data.length === 0) {
+                event.detail.target.innerHTML = '<p class="text-dim">No results found. Try syncing the registry first.</p>';
+                return;
+            }
+            let html = '<table><thead><tr><th>Name</th><th>Version</th><th>Description</th><th></th></tr></thead><tbody>';
+            data.forEach(s => {
+                const action = s.installed
+                    ? '<span class="text-dim">installed</span>'
+                    : `<button class="btn btn-primary btn-sm" hx-post="/api/skills/community/install/${s.slug}" hx-target="#sync-result" hx-swap="innerHTML">Install</button>`;
+                html += `<tr><td><strong>${escapeHtml(s.name)}</strong></td><td>${escapeHtml(s.version)}</td><td class="text-dim">${escapeHtml(s.description).substring(0, 60)}</td><td>${action}</td></tr>`;
+            });
+            html += '</tbody></table>';
+            event.detail.target.innerHTML = html;
+            htmx.process(event.detail.target);
+        } catch (e) {
+            // Not JSON — leave as-is (probably HTML from a non-search endpoint)
+        }
+    }
+});
 </script>
 {% endblock %}

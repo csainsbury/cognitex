@@ -1,3 +1,10 @@
+---
+name: goal-linking
+description: Connect tasks to projects and goals for context and prioritization.
+version: 1.0.0
+metadata: { "cognitex": {} }
+---
+
 # Goal Linking
 
 ## Purpose

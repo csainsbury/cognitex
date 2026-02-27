@@ -6959,16 +6959,25 @@ def skills_list() -> None:
         table = Table(title="Available Skills")
         table.add_column("Name", style="cyan")
         table.add_column("Type", style="dim")
+        table.add_column("Format", style="dim")
+        table.add_column("Version", style="dim")
         table.add_column("Purpose", style="white")
         table.add_column("Rules", justify="right")
+        table.add_column("Eligible", justify="center")
 
         for skill in skills:
             skill_type = "[green]user[/green]" if skill["is_user_skill"] else "[dim]bundled[/dim]"
+            if skill.get("source") == "community":
+                skill_type = "[magenta]community[/magenta]"
+            eligible = "[green]yes[/green]" if skill.get("eligible", True) else "[red]no[/red]"
             table.add_row(
                 skill["name"],
                 skill_type,
+                skill.get("format", "cognitex_legacy"),
+                skill.get("version", "1.0.0"),
                 skill["purpose"][:50] + "..." if len(skill["purpose"]) > 50 else skill["purpose"],
                 str(skill["rules_count"]),
+                eligible,
             )
 
         console.print(table)
@@ -7062,6 +7071,145 @@ Output: ...
         console.print(f"[green]Saved {name} skill[/green]")
     except subprocess.CalledProcessError:
         console.print(f"[red]Editor exited with error[/red]")
+
+
+@skills_app.command("info")
+def skills_info(
+    name: str = typer.Argument(..., help="Skill name to inspect"),
+) -> None:
+    """Show detailed info about a skill (format, version, eligibility, requires)."""
+
+    async def run_info():
+        from cognitex.agent.skills import init_skills, get_skills_loader
+
+        await init_skills()
+        loader = get_skills_loader()
+
+        skill = await loader.get_skill(name)
+        if not skill:
+            console.print(f"[red]Skill not found: {name}[/red]")
+            raise typer.Exit(1)
+
+        skill_type = "[green]user[/green]" if skill.is_user_skill else "[dim]bundled[/dim]"
+        if skill.source == "community":
+            skill_type = "[magenta]community[/magenta]"
+
+        console.print(f"\n[bold cyan]{skill.name}[/bold cyan] ({skill_type})")
+        console.print(f"  Format:      {skill.format}")
+        console.print(f"  Version:     {skill.version}")
+        console.print(f"  Path:        {skill.path}")
+
+        if skill.description:
+            console.print(f"  Description: {skill.description}")
+        if skill.purpose:
+            console.print(f"  Purpose:     {skill.purpose[:80]}")
+
+        eligible_str = "[green]yes[/green]" if skill.eligible else f"[red]no[/red] — {skill.ineligibility_reason}"
+        console.print(f"  Eligible:    {eligible_str}")
+
+        if skill.requires_bins:
+            console.print(f"  Bins:        {', '.join(skill.requires_bins)}")
+        if skill.requires_env:
+            console.print(f"  Env vars:    {', '.join(skill.requires_env)}")
+        if skill.requires_config:
+            console.print(f"  Config keys: {', '.join(skill.requires_config)}")
+
+        console.print(f"  Rules:       {len(skill.rules)}")
+        console.print(f"  Examples:    {len(skill.examples)}")
+
+    asyncio.run(run_info())
+
+
+@skills_app.command("search")
+def skills_search(
+    query: str = typer.Argument(..., help="Search term for community skills"),
+) -> None:
+    """Search the community skill registry."""
+
+    async def run_search():
+        from cognitex.services.skill_registry import get_skill_registry
+
+        registry = get_skill_registry()
+        results = await registry.search(query)
+
+        if not results:
+            console.print(f"[yellow]No community skills matching '{query}'.[/yellow]")
+            console.print("[dim]Run 'cognitex skills sync' first to download the registry.[/dim]")
+            return
+
+        table = Table(title=f"Community Skills matching '{query}'")
+        table.add_column("Slug", style="cyan")
+        table.add_column("Version", style="dim")
+        table.add_column("Description", style="white")
+        table.add_column("Installed", justify="center")
+
+        for listing in results:
+            installed = "[green]yes[/green]" if listing.installed else "[dim]no[/dim]"
+            table.add_row(listing.slug, listing.version, listing.description[:60], installed)
+
+        console.print(table)
+
+    asyncio.run(run_search())
+
+
+@skills_app.command("install")
+def skills_install(
+    slug: str = typer.Argument(..., help="Community skill slug to install"),
+) -> None:
+    """Install a skill from the community registry."""
+
+    async def run_install():
+        from cognitex.services.skill_registry import get_skill_registry
+
+        registry = get_skill_registry()
+        success = await registry.install(slug)
+
+        if success:
+            console.print(f"[green]Installed community skill: {slug}[/green]")
+        else:
+            console.print(f"[red]Failed to install '{slug}'. Run 'cognitex skills sync' first.[/red]")
+
+    asyncio.run(run_install())
+
+
+@skills_app.command("update")
+def skills_update(
+    slug: str = typer.Argument(None, help="Specific skill slug to update (default: all)"),
+    all_skills: bool = typer.Option(False, "--all", help="Update all community skills"),
+) -> None:
+    """Update installed community skills."""
+
+    async def run_update():
+        from cognitex.services.skill_registry import get_skill_registry
+
+        registry = get_skill_registry()
+
+        target = None if all_skills else slug
+        updated = await registry.update(target)
+
+        if updated:
+            console.print(f"[green]Updated {len(updated)} skill(s): {', '.join(updated)}[/green]")
+        else:
+            console.print("[yellow]No skills were updated.[/yellow]")
+
+    asyncio.run(run_update())
+
+
+@skills_app.command("sync")
+def skills_sync() -> None:
+    """Clone or pull the community skill registry."""
+
+    async def run_sync():
+        from cognitex.services.skill_registry import get_skill_registry
+
+        registry = get_skill_registry()
+        try:
+            count = await registry.sync_registry()
+            console.print(f"[green]Registry synced — {count} skill(s) available.[/green]")
+        except RuntimeError as e:
+            console.print(f"[red]{e}[/red]")
+
+    asyncio.run(run_sync())
 
 
 # =============================================================================

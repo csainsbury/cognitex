@@ -1,3 +1,10 @@
+---
+name: meeting-prep
+description: Prepare comprehensive context packs for upcoming meetings.
+version: 1.0.0
+metadata: { "cognitex": {} }
+---
+
 # Meeting Preparation
 
 ## Purpose
