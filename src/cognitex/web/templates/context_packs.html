@@ -1,0 +1,364 @@
+{% extends "base.html" %}
+
+{% block title %}Context Packs - Cognitex{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Context Packs</h1>
+    <p class="subtitle">Meeting prep and anticipatory context for upcoming events</p>
+</div>
+
+<div class="context-packs-container">
+    <!-- Pending Packs -->
+    <section class="context-packs-section">
+        <h2>Upcoming Events</h2>
+        {% if pending_items %}
+        <div class="context-packs-list">
+            {% for item in pending_items %}
+            <div class="context-pack-card" id="pack-{{ item.id }}">
+                <div class="pack-header">
+                    <h3>{{ item.payload.event_title or item.title }}</h3>
+                    <div class="pack-meta">
+                        {% if item.payload.event_time %}
+                        <span class="event-time">{{ item.payload.event_time }}</span>
+                        {% endif %}
+                        {% if item.payload.readiness %}
+                        <span class="readiness-badge" style="background: {% if item.payload.readiness >= 0.7 %}#166534{% elif item.payload.readiness >= 0.4 %}#ca8a04{% else %}#dc2626{% endif %};">
+                            {{ (item.payload.readiness * 100) | int }}% ready
+                        </span>
+                        {% endif %}
+                    </div>
+                </div>
+
+                {% if item.payload.what_you_need_to_know and item.payload.what_you_need_to_know | length > 0 %}
+                <div class="what-to-know">
+                    <strong>What you need to know:</strong>
+                    <ul>
+                    {% for point in item.payload.what_you_need_to_know %}
+                        <li>{{ point }}</li>
+                    {% endfor %}
+                    </ul>
+                </div>
+                {% elif not item.payload.objective %}
+                <div class="pack-empty">
+                    <p>No rich content yet.</p>
+                    <button class="btn btn-primary btn-sm"
+                            hx-post="/api/inbox/{{ item.id }}/rebuild"
+                            hx-target="#pack-{{ item.id }}"
+                            hx-swap="outerHTML">
+                        Load Full Context
+                    </button>
+                </div>
+                {% endif %}
+
+                {% if item.payload.objective %}
+                <div class="pack-objective">
+                    <strong>Objective:</strong> {{ item.payload.objective }}
+                </div>
+                {% endif %}
+
+                {% if item.payload.attendee_profiles and item.payload.attendee_profiles | length > 0 %}
+                <details class="pack-section">
+                    <summary>Attendees ({{ item.payload.attendee_profiles | length }})</summary>
+                    <div class="attendees-list">
+                    {% for profile in item.payload.attendee_profiles %}
+                        <div class="attendee">
+                            <strong>{{ profile.name or profile.email }}</strong>
+                            {% if profile.organization %}<span class="org">{{ profile.organization }}</span>{% endif %}
+                            {% if profile.relationship_summary %}
+                            <p class="relationship">{{ profile.relationship_summary }}</p>
+                            {% endif %}
+                        </div>
+                    {% endfor %}
+                    </div>
+                </details>
+                {% endif %}
+
+                {% if item.payload.ambient_context and item.payload.ambient_context | length > 0 %}
+                <details class="pack-section">
+                    <summary>Relationship History</summary>
+                    {% for ctx in item.payload.ambient_context %}
+                        <div class="context-item">
+                            <strong>{{ ctx.person_name or ctx.person_email }}</strong>
+                            {% if ctx.summary %}<p>{{ ctx.summary }}</p>{% endif %}
+                        </div>
+                    {% endfor %}
+                </details>
+                {% endif %}
+
+                {% if item.payload.decision_list and item.payload.decision_list | length > 0 %}
+                <details class="pack-section" open>
+                    <summary>Decisions to Make ({{ item.payload.decision_list | length }})</summary>
+                    <ul>
+                    {% for decision in item.payload.decision_list %}
+                        <li>{{ decision }}</li>
+                    {% endfor %}
+                    </ul>
+                </details>
+                {% endif %}
+
+                {% if item.payload.dont_forget and item.payload.dont_forget | length > 0 %}
+                <div class="dont-forget">
+                    <strong>Don't forget:</strong>
+                    <ul>
+                    {% for reminder in item.payload.dont_forget %}
+                        <li>{{ reminder }}</li>
+                    {% endfor %}
+                    </ul>
+                </div>
+                {% endif %}
+
+                <div class="pack-actions">
+                    <button class="btn btn-sm"
+                            hx-post="/api/inbox/{{ item.id }}/rebuild"
+                            hx-target="#pack-{{ item.id }}"
+                            hx-swap="outerHTML">
+                        Refresh
+                    </button>
+                    <a href="/inbox" class="btn btn-sm btn-secondary">Go to Inbox</a>
+                </div>
+
+                <!-- Notes section -->
+                <details class="pack-notes">
+                    <summary>Add Notes</summary>
+                    <form hx-post="/api/inbox/{{ item.id }}/notes" hx-swap="none">
+                        <textarea name="notes" placeholder="What would make this more helpful?"></textarea>
+                        <button type="submit" class="btn btn-sm">Save Notes</button>
+                    </form>
+                </details>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="empty">No upcoming context packs. They'll appear here as events approach.</p>
+        {% endif %}
+    </section>
+
+    <!-- Past Packs -->
+    <section class="context-packs-section">
+        <h2>Past Context Packs</h2>
+        {% if past_items %}
+        <div class="past-packs-list">
+            {% for item in past_items %}
+            <details class="past-pack">
+                <summary>
+                    <span class="pack-title">{{ item.payload.event_title or item.title }}</span>
+                    <span class="pack-date">{{ item.decided_at.strftime('%b %d') if item.decided_at else item.created_at.strftime('%b %d') }}</span>
+                    <span class="pack-status badge badge-{{ item.status }}">{{ item.status }}</span>
+                </summary>
+                <div class="past-pack-content">
+                    {% if item.payload.what_you_need_to_know %}
+                    <div class="what-to-know">
+                        <strong>What you needed to know:</strong>
+                        <ul>
+                        {% for point in item.payload.what_you_need_to_know %}
+                            <li>{{ point }}</li>
+                        {% endfor %}
+                        </ul>
+                    </div>
+                    {% endif %}
+
+                    {% if item.payload.objective %}
+                    <p><strong>Objective:</strong> {{ item.payload.objective }}</p>
+                    {% endif %}
+
+                    {% if item.payload.decision_list %}
+                    <p><strong>Decisions:</strong> {{ item.payload.decision_list | join(', ') }}</p>
+                    {% endif %}
+                </div>
+            </details>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="empty">No past context packs yet.</p>
+        {% endif %}
+    </section>
+</div>
+
+<style>
+.context-packs-container {
+    max-width: 900px;
+    margin: 0 auto;
+}
+
+.context-packs-section {
+    margin-bottom: 2rem;
+}
+
+.context-packs-section h2 {
+    margin-bottom: 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.context-pack-card {
+    background: var(--bg-secondary);
+    border-radius: 8px;
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+    border-left: 4px solid var(--accent);
+}
+
+.pack-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 1rem;
+}
+
+.pack-header h3 {
+    margin: 0;
+    font-size: 1.1rem;
+}
+
+.pack-meta {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.readiness-badge {
+    color: white;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+}
+
+.what-to-know {
+    background: #1e3a5f;
+    padding: 1rem;
+    border-radius: 8px;
+    margin: 1rem 0;
+    border-left: 4px solid #3b82f6;
+}
+
+.what-to-know strong {
+    color: #93c5fd;
+}
+
+.what-to-know ul {
+    margin: 0.5rem 0 0 1rem;
+    padding: 0;
+    color: #e0e7ff;
+}
+
+.what-to-know li {
+    margin: 0.3rem 0;
+    color: #e0e7ff;
+}
+
+.pack-objective {
+    margin: 0.5rem 0;
+}
+
+.pack-section {
+    margin: 0.5rem 0;
+}
+
+.pack-section summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--accent);
+}
+
+.attendee {
+    padding: 0.5rem;
+    background: var(--bg);
+    border-radius: 4px;
+    margin: 0.3rem 0;
+}
+
+.attendee .org {
+    color: #888;
+    margin-left: 0.5rem;
+}
+
+.attendee .relationship {
+    font-size: 0.85rem;
+    color: #aaa;
+    margin: 0.25rem 0 0 0;
+}
+
+.dont-forget {
+    margin-top: 0.5rem;
+    padding: 0.5rem;
+    background: #451a03;
+    border-radius: 4px;
+    border-left: 3px solid #f59e0b;
+}
+
+.dont-forget strong {
+    color: #fcd34d;
+}
+
+.pack-actions {
+    margin-top: 1rem;
+    display: flex;
+    gap: 0.5rem;
+}
+
+.pack-notes {
+    margin-top: 1rem;
+}
+
+.pack-notes summary {
+    cursor: pointer;
+    font-size: 0.85rem;
+    color: #888;
+}
+
+.pack-notes textarea {
+    width: 100%;
+    min-height: 60px;
+    margin-top: 0.5rem;
+    padding: 0.5rem;
+    border: 1px solid #444;
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--text);
+}
+
+.pack-empty {
+    padding: 1rem;
+    text-align: center;
+    color: #888;
+}
+
+.past-packs-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.past-pack {
+    background: var(--bg-secondary);
+    border-radius: 4px;
+    padding: 0.5rem 1rem;
+}
+
+.past-pack summary {
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.past-pack .pack-title {
+    flex: 1;
+}
+
+.past-pack .pack-date {
+    color: #888;
+    font-size: 0.85rem;
+}
+
+.past-pack-content {
+    padding: 1rem 0;
+}
+
+.empty {
+    color: #888;
+    font-style: italic;
+}
+</style>
+{% endblock %}

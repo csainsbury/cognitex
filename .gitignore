@@ -69,3 +69,5 @@ dmypy.json
 postgres_data/
 neo4j_data/
 redis_data/
+docs/openclaw
+reference/

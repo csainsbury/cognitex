@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+
+{% block title %}Help - Cognitex{% endblock %}
+
+{% block content %}
+<h1>Cognitex Help</h1>
+
+<div class="card" style="margin-bottom: 1.5rem;">
+    <div class="card-header">
+        <h2>What's New: Proactive Learning (v2.0)</h2>
+    </div>
+    <div style="padding: 1rem;">
+        <p style="margin-bottom: 1rem;">Cognitex now learns from your behavior to become more helpful over time:</p>
+
+        <h3 style="color: var(--accent); margin: 1rem 0 0.5rem;">Email Style Learning</h3>
+        <ul style="margin-left: 1.5rem; margin-bottom: 1rem;">
+            <li><strong>Learns your voice</strong> - Analyzes sent emails to understand your writing style (tone, formality, greetings, closings)</li>
+            <li><strong>Per-recipient profiles</strong> - Learns how you write to different people</li>
+            <li><strong>Draft improvement</strong> - Applies learned style to future email drafts</li>
+            <li><strong>Edit tracking</strong> - Learns from edits you make to drafts</li>
+        </ul>
+
+        <h3 style="color: var(--accent); margin: 1rem 0 0.5rem;">Response Pattern Learning</h3>
+        <ul style="margin-left: 1.5rem; margin-bottom: 1rem;">
+            <li><strong>Tracks decisions</strong> - Learns which emails you respond to vs skip</li>
+            <li><strong>Sender patterns</strong> - Understands your response rate per sender/domain</li>
+            <li><strong>Intent patterns</strong> - Learns which types of emails (questions, FYIs, etc.) need responses</li>
+            <li><strong>Smarter drafting</strong> - Eventually stops drafting for emails you never respond to</li>
+        </ul>
+    </div>
+</div>
+
+<div class="card" style="margin-bottom: 1.5rem;">
+    <div class="card-header">
+        <h2>How to Help It Learn</h2>
+    </div>
+    <div style="padding: 1rem;">
+        <table>
+            <tr>
+                <th style="width: 30%;">Action</th>
+                <th>What It Learns</th>
+            </tr>
+            <tr>
+                <td><strong>Send emails</strong></td>
+                <td>Your writing style (greeting, closing, tone, length, common phrases)</td>
+            </tr>
+            <tr>
+                <td><strong>Skip inbox items</strong></td>
+                <td>Which emails don't need responses (use the Skip button on email drafts)</td>
+            </tr>
+            <tr>
+                <td><strong>Edit drafts before sending</strong></td>
+                <td>How to improve future drafts (significant edits update your style profile)</td>
+            </tr>
+            <tr>
+                <td><strong>Reject drafts</strong></td>
+                <td>That a draft was unhelpful (tracked as discarded)</td>
+            </tr>
+            <tr>
+                <td><strong>Approve drafts as-is</strong></td>
+                <td>That the style was correct (reinforces current patterns)</td>
+            </tr>
+        </table>
+
+        <div style="background: var(--bg-secondary); padding: 1rem; border-radius: 8px; margin-top: 1rem;">
+            <strong>Tip:</strong> The more emails you send through the system, the better it learns your style.
+            Check the <a href="/learning">Learning</a> page to see what patterns have been detected.
+        </div>
+    </div>
+</div>
+
+<div class="card" style="margin-bottom: 1.5rem;">
+    <div class="card-header">
+        <h2>Inbox Guide</h2>
+    </div>
+    <div style="padding: 1rem;">
+        <p style="margin-bottom: 1rem;">The Inbox shows items needing your attention:</p>
+
+        <table>
+            <tr>
+                <th>Item Type</th>
+                <th>What to Do</th>
+            </tr>
+            <tr>
+                <td><span class="badge badge-pending">email_draft</span></td>
+                <td>Review and approve/edit/reject the draft. Edits help the system learn.</td>
+            </tr>
+            <tr>
+                <td><span class="badge badge-pending">email_review</span></td>
+                <td>Email flagged for your attention. Skip if no response needed.</td>
+            </tr>
+            <tr>
+                <td><span class="badge badge-pending">task_proposal</span></td>
+                <td>Agent suggested a task. Accept or reject to train the system.</td>
+            </tr>
+            <tr>
+                <td><span class="badge badge-pending">context_pack</span></td>
+                <td>Meeting prep materials. Review before your meeting.</td>
+            </tr>
+        </table>
+    </div>
+</div>
+
+<div class="card" style="margin-bottom: 1.5rem;">
+    <div class="card-header">
+        <h2>Maintenance</h2>
+    </div>
+    <div style="padding: 1rem;">
+        <p style="margin-bottom: 1rem;">Clear old items that are cluttering your view:</p>
+
+        <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
+            <form method="POST" action="/api/maintenance/clear-old-inbox" style="display: inline;">
+                <button type="submit" class="btn btn-secondary" onclick="return confirm('Clear inbox items older than 7 days?')">
+                    Clear Old Inbox Items (7+ days)
+                </button>
+            </form>
+
+            <form method="POST" action="/api/maintenance/clear-old-drafts" style="display: inline;">
+                <button type="submit" class="btn btn-secondary" onclick="return confirm('Clear draft notifications older than 7 days?')">
+                    Clear Old Draft Notifications
+                </button>
+            </form>
+
+            <form method="POST" action="/api/maintenance/clear-dismissed" style="display: inline;">
+                <button type="submit" class="btn btn-secondary" onclick="return confirm('Clear all dismissed items?')">
+                    Clear Dismissed Items
+                </button>
+            </form>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2>Learning Stats</h2>
+    </div>
+    <div style="padding: 1rem;">
+        {% if stats %}
+        <div class="stats" style="margin-bottom: 1rem;">
+            <div class="stat">
+                <div class="stat-value">{{ stats.style_profiles or 0 }}</div>
+                <div class="stat-label">Style Profiles</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value">{{ stats.response_decisions or 0 }}</div>
+                <div class="stat-label">Response Decisions</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value">{{ stats.drafts_tracked or 0 }}</div>
+                <div class="stat-label">Drafts Tracked</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value">{{ "%.0f"|format((stats.avg_edit_ratio or 1) * 100) }}%</div>
+                <div class="stat-label">Avg Draft Similarity</div>
+            </div>
+        </div>
+        {% else %}
+        <p class="empty">No learning data yet. Start using the system to build up patterns!</p>
+        {% endif %}
+
+        <a href="/learning" class="btn btn-primary">View Full Learning Dashboard</a>
+    </div>
+</div>
+
+<div class="shortcuts">
+    CLI: <code>cognitex sync</code> | <code>cognitex inbox</code> | <code>cognitex chat</code>
+</div>
+{% endblock %}

@@ -1,0 +1,311 @@
+{# Single inbox item template - for HTMX updates #}
+<div class="inbox-item {% if item.priority == 'urgent' %}priority-urgent{% elif item.priority == 'high' %}priority-high{% endif %}"
+     id="inbox-item-{{ item.id }}">
+    <div class="inbox-item-header">
+        <div>
+            <span class="badge badge-{{ item.item_type }}">{{ item.item_type | replace('_', ' ') }}</span>
+            {% if item.priority in ['urgent', 'high'] %}
+            <span class="badge badge-{{ 'paused' if item.priority == 'urgent' else 'pending' }}">{{ item.priority }}</span>
+            {% endif %}
+        </div>
+        <div class="inbox-item-meta">
+            <span>{{ item.created_at.strftime('%b %d, %H:%M') }}</span>
+            {% if item.expires_at %}
+            <span title="Expires at {{ item.expires_at.strftime('%H:%M') }}" style="color: var(--warning);">
+                expires {{ item.expires_at.strftime('%H:%M') }}
+            </span>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="inbox-item-title">{{ item.title }}</div>
+
+    {% if item.summary %}
+    <div class="inbox-item-summary">{{ item.summary }}</div>
+    {% endif %}
+
+    <!-- Type-specific payload display -->
+    {% if item.item_type == 'task_proposal' %}
+    <div class="inbox-item-payload">
+        {% if item.payload.project_name %}
+        <strong>Project:</strong> {{ item.payload.project_name }}<br>
+        {% endif %}
+        {% if item.payload.priority %}
+        <strong>Priority:</strong> {{ item.payload.priority }}<br>
+        {% endif %}
+        {% if item.payload.reason %}
+        <strong>Why:</strong> {{ item.payload.reason[:200] }}{% if item.payload.reason | length > 200 %}...{% endif %}
+        {% endif %}
+    </div>
+
+    {% elif item.item_type == 'context_pack' %}
+    <div class="inbox-item-payload context-pack-payload">
+        <div class="context-pack-header">
+            {% if item.payload.event_title %}
+            <strong>{{ item.payload.event_title }}</strong>
+            {% endif %}
+            {% if item.payload.event_time %}
+            <span class="event-time">{{ item.payload.event_time }}</span>
+            {% endif %}
+            {% if item.payload.readiness %}
+            <span class="readiness-badge" style="background: {% if item.payload.readiness >= 0.7 %}#166534{% elif item.payload.readiness >= 0.4 %}#ca8a04{% else %}#dc2626{% endif %}; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem;">
+                {{ (item.payload.readiness * 100) | int }}% ready
+            </span>
+            {% endif %}
+        </div>
+
+        {% if item.payload.what_you_need_to_know and item.payload.what_you_need_to_know | length > 0 %}
+        <div class="what-to-know" style="background: #1e3a5f; padding: 1rem; border-radius: 8px; margin: 1rem 0; border-left: 4px solid #3b82f6;">
+            <strong style="color: #93c5fd;">What you need to know:</strong>
+            <ul style="margin: 0.5rem 0 0 1rem; padding: 0; color: #e0e7ff;">
+            {% for item_text in item.payload.what_you_need_to_know %}
+                <li style="margin: 0.3rem 0; color: #e0e7ff;">{{ item_text }}</li>
+            {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        {% if item.payload.attendee_profiles and item.payload.attendee_profiles | length > 0 %}
+        <details class="context-section" style="margin: 0.5rem 0;">
+            <summary style="cursor: pointer; font-weight: 600; color: var(--accent);">
+                Attendees ({{ item.payload.attendee_profiles | length }})
+            </summary>
+            <div style="padding: 0.5rem 0;">
+            {% for profile in item.payload.attendee_profiles %}
+                <div style="padding: 0.5rem; background: var(--bg-secondary); border-radius: 4px; margin: 0.3rem 0;">
+                    <strong>{{ profile.name or profile.email }}</strong>
+                    {% if profile.organization %}
+                    <span style="color: #888;"> - {{ profile.organization }}</span>
+                    {% endif %}
+                    {% if profile.role %}
+                    <span style="color: #888;">({{ profile.role }})</span>
+                    {% endif %}
+                    {% if profile.relationship_summary %}
+                    <div style="font-size: 0.85rem; color: #aaa; margin-top: 0.25rem;">
+                        {{ profile.relationship_summary }}
+                    </div>
+                    {% endif %}
+                </div>
+            {% endfor %}
+            </div>
+        </details>
+        {% endif %}
+
+        {% if item.payload.ambient_context and item.payload.ambient_context | length > 0 %}
+        <details class="context-section" style="margin: 0.5rem 0;">
+            <summary style="cursor: pointer; font-weight: 600; color: var(--accent);">
+                Relationship History
+            </summary>
+            <div style="padding: 0.5rem 0;">
+            {% for ctx in item.payload.ambient_context %}
+                <div style="padding: 0.5rem; background: var(--bg-secondary); border-radius: 4px; margin: 0.3rem 0;">
+                    <strong>{{ ctx.person_name or ctx.person_email }}</strong>
+                    {% if ctx.summary %}
+                    <div style="font-size: 0.9rem; margin-top: 0.25rem;">{{ ctx.summary }}</div>
+                    {% endif %}
+                    {% if ctx.awaiting_their_response %}
+                    <span class="badge badge-warning" style="font-size: 0.75rem;">Awaiting your response</span>
+                    {% endif %}
+                </div>
+            {% endfor %}
+            </div>
+        </details>
+        {% endif %}
+
+        {% if item.payload.objective %}
+        <div style="margin-top: 0.5rem;">
+            <strong>Objective:</strong> {{ item.payload.objective }}
+        </div>
+        {% endif %}
+
+        {% if item.payload.decision_list and item.payload.decision_list | length > 0 %}
+        <details class="context-section" style="margin: 0.5rem 0;">
+            <summary style="cursor: pointer;">Decisions to Make ({{ item.payload.decision_list | length }})</summary>
+            <ul style="margin: 0.5rem 0 0 1rem;">
+            {% for decision in item.payload.decision_list %}
+                <li>{{ decision }}</li>
+            {% endfor %}
+            </ul>
+        </details>
+        {% endif %}
+
+        {% if item.payload.dont_forget and item.payload.dont_forget | length > 0 %}
+        <div style="margin-top: 0.5rem; padding: 0.5rem; background: #451a03; border-radius: 4px; border-left: 3px solid #f59e0b;">
+            <strong style="color: #fcd34d;">Don't forget:</strong>
+            <ul style="margin: 0.25rem 0 0 1rem;">
+            {% for reminder in item.payload.dont_forget %}
+                <li>{{ reminder }}</li>
+            {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+    </div>
+
+    {% elif item.item_type == 'email_draft' %}
+    <div class="inbox-item-payload email-draft-payload">
+        {% if item.payload.to %}
+        <div><strong>To:</strong> {{ item.payload.to }}</div>
+        {% endif %}
+        {% if item.payload.subject %}
+        <div><strong>Subject:</strong> {{ item.payload.subject }}</div>
+        {% endif %}
+
+        <!-- Full email body in expandable section -->
+        <details open style="margin-top: 0.5rem;">
+            <summary style="cursor: pointer; font-weight: 600;">Email Body</summary>
+            <div class="email-body-preview" style="background: var(--bg); padding: 1rem; border-radius: 4px; margin-top: 0.5rem; white-space: pre-wrap; font-family: inherit; font-size: 0.9rem; max-height: 300px; overflow-y: auto;">{{ item.payload.body or item.payload.body_preview or 'No body content' }}</div>
+        </details>
+
+        <!-- Edit form (hidden by default) -->
+        <div id="edit-form-{{ item.id }}" style="display: none; margin-top: 1rem;">
+            <form hx-post="/api/inbox/{{ item.id }}/edit-and-send"
+                  hx-target="#inbox-item-{{ item.id }}"
+                  hx-swap="outerHTML">
+                <div style="margin-bottom: 0.5rem;">
+                    <label style="font-size: 0.85rem; color: #888;">To:</label>
+                    <input type="text" name="to" value="{{ item.payload.to }}"
+                           style="width: 100%; padding: 0.5rem; border: 1px solid #444; border-radius: 4px; background: var(--bg); color: var(--text);">
+                </div>
+                <div style="margin-bottom: 0.5rem;">
+                    <label style="font-size: 0.85rem; color: #888;">Subject:</label>
+                    <input type="text" name="subject" value="{{ item.payload.subject }}"
+                           style="width: 100%; padding: 0.5rem; border: 1px solid #444; border-radius: 4px; background: var(--bg); color: var(--text);">
+                </div>
+                <div style="margin-bottom: 0.5rem;">
+                    <label style="font-size: 0.85rem; color: #888;">Body:</label>
+                    <textarea name="body" rows="10"
+                              style="width: 100%; padding: 0.5rem; border: 1px solid #444; border-radius: 4px; background: var(--bg); color: var(--text); font-family: inherit;">{{ item.payload.body or item.payload.body_preview or '' }}</textarea>
+                </div>
+                <input type="hidden" name="original_body" value="{{ item.payload.body or item.payload.body_preview or '' }}">
+                <div style="display: flex; gap: 0.5rem;">
+                    <button type="submit" class="btn btn-success btn-sm">Send Edited Email</button>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="toggleEditForm('{{ item.id }}')">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    {% elif item.item_type == 'flagged_item' %}
+    <div class="inbox-item-payload">
+        {% if item.payload.entity_type %}
+        <strong>Type:</strong> {{ item.payload.entity_type }}<br>
+        {% endif %}
+        {% if item.payload.issue %}
+        <strong>Issue:</strong> {{ item.payload.issue }}
+        {% endif %}
+    </div>
+    {% endif %}
+
+    <div class="inbox-item-actions">
+        <!-- Edit button for email drafts -->
+        {% if item.item_type == 'email_draft' %}
+        <button class="btn btn-primary btn-sm"
+                onclick="toggleEditForm('{{ item.id }}')"
+                title="Edit before sending">
+            Edit
+        </button>
+        {% endif %}
+
+        <!-- Standard approve button -->
+        <button class="btn btn-success btn-sm"
+                hx-post="/api/inbox/{{ item.id }}/approve"
+                hx-target="#inbox-item-{{ item.id }}"
+                hx-swap="outerHTML"
+                title="{% if item.item_type == 'email_draft' %}Send as-is{% else %}Approve{% endif %}">
+            {% if item.item_type == 'email_draft' %}Send{% else %}Approve{% endif %}
+        </button>
+
+        <!-- Reject dropdown -->
+        <div class="dropdown" style="display: inline-block; position: relative;">
+            <button class="btn btn-danger btn-sm"
+                    onclick="showRejectDropdown('{{ item.id }}')"
+                    title="Reject">
+                Reject
+            </button>
+            <div class="dropdown-menu"
+                 id="inbox-reject-menu-{{ item.id }}"
+                 style="display: none; position: absolute; left: 0; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.3); z-index: 100; min-width: 250px;">
+                <form id="inbox-reject-form-{{ item.id }}"
+                      hx-post="/api/inbox/{{ item.id }}/reject"
+                      hx-target="#inbox-item-{{ item.id }}"
+                      hx-swap="outerHTML">
+                    <div class="reason-select" id="inbox-reason-select-{{ item.id }}">
+                        <div style="padding: 0.5rem; font-size: 0.75rem; color: #666; border-bottom: 1px solid #eee;">
+                            Why reject? (helps learning)
+                        </div>
+                        <button type="button" onclick="selectInboxRejectReason('{{ item.id }}', 'not_relevant', 'Not relevant')" class="dropdown-item">Not relevant</button>
+                        <button type="button" onclick="selectInboxRejectReason('{{ item.id }}', 'bad_timing', 'Bad timing')" class="dropdown-item">Bad timing</button>
+                        <button type="button" onclick="selectInboxRejectReason('{{ item.id }}', 'wrong_priority', 'Wrong priority')" class="dropdown-item">Wrong priority</button>
+                        <button type="button" onclick="selectInboxRejectReason('{{ item.id }}', 'duplicate', 'Duplicate')" class="dropdown-item">Duplicate</button>
+                        <button type="button" onclick="selectInboxRejectReason('{{ item.id }}', 'not_my_task', 'Not my responsibility')" class="dropdown-item">Not my responsibility</button>
+                        <button type="button" onclick="selectInboxRejectReason('{{ item.id }}', 'already_done', 'Already done')" class="dropdown-item">Already done</button>
+                        <button type="button" onclick="selectInboxRejectReason('{{ item.id }}', 'other', 'Other')" class="dropdown-item">Other</button>
+                    </div>
+                    <div class="feedback-prompt" id="inbox-feedback-prompt-{{ item.id }}" style="display: none; padding: 0.75rem;">
+                        <input type="hidden" name="reason" id="inbox-reason-{{ item.id }}" value="">
+                        <p style="margin: 0 0 0.5rem 0; font-size: 0.85rem; color: #333;">
+                            <strong id="inbox-reason-label-{{ item.id }}"></strong>
+                        </p>
+                        <p style="margin: 0 0 0.5rem 0; font-size: 0.8rem; color: #666;">
+                            Add details? <span style="color: #999;">(optional)</span>
+                        </p>
+                        <textarea name="reason_text" placeholder="Any additional context..." style="width: 100%; min-height: 50px; font-size: 0.85rem; padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px;"></textarea>
+                        <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+                            <button type="submit" class="btn btn-danger btn-sm">Reject</button>
+                            <button type="submit" class="btn btn-secondary btn-sm" onclick="document.querySelector('#inbox-reject-form-{{ item.id }} textarea').value = ''">Skip details</button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Dismiss button -->
+        <button class="btn btn-secondary btn-sm"
+                hx-post="/api/inbox/{{ item.id }}/dismiss"
+                hx-target="#inbox-item-{{ item.id }}"
+                hx-swap="outerHTML"
+                title="Dismiss (no longer relevant)">
+            Dismiss
+        </button>
+
+        <!-- Helpful buttons and rebuild for context packs -->
+        {% if item.item_type == 'context_pack' %}
+        <div class="context-pack-controls" style="margin-top: 0.5rem;">
+            <div class="helpful-buttons" style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                <button class="btn btn-sm"
+                        style="background: #3b82f6; color: white; border: none;"
+                        hx-post="/api/inbox/{{ item.id }}/rebuild"
+                        hx-target="#inbox-item-{{ item.id }}"
+                        hx-swap="outerHTML"
+                        hx-indicator="#rebuild-spinner-{{ item.id }}"
+                        title="Rebuild with fresh data">
+                    Rebuild
+                </button>
+                <span id="rebuild-spinner-{{ item.id }}" class="htmx-indicator" style="font-size: 0.8rem;">Loading...</span>
+                <span style="font-size: 0.75rem; color: #888; margin-left: 0.5rem;">Helpful?</span>
+                <button class="helpful-btn helpful"
+                        hx-post="/api/inbox/{{ item.id }}/helpful?helpful=true"
+                        hx-swap="none"
+                        title="This was helpful">Yes</button>
+                <button class="helpful-btn not-helpful"
+                        hx-post="/api/inbox/{{ item.id }}/helpful?helpful=false"
+                        hx-swap="none"
+                        title="This was not helpful">No</button>
+            </div>
+
+            <!-- Notes/feedback section -->
+            <details style="margin-top: 0.5rem;">
+                <summary style="cursor: pointer; font-size: 0.85rem; color: #888;">Add notes (helps learning)</summary>
+                <form hx-post="/api/inbox/{{ item.id }}/notes"
+                      hx-swap="none"
+                      style="margin-top: 0.5rem;">
+                    <textarea name="notes"
+                              placeholder="What was missing? What would have been more helpful? Any corrections?"
+                              style="width: 100%; min-height: 60px; font-size: 0.85rem; padding: 0.5rem; border: 1px solid #444; border-radius: 4px; background: var(--bg-secondary); color: var(--text);"></textarea>
+                    <button type="submit" class="btn btn-sm" style="margin-top: 0.25rem;">Save Notes</button>
+                </form>
+            </details>
+        </div>
+        {% endif %}
+    </div>
+</div>
