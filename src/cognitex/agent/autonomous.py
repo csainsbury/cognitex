@@ -42,6 +42,7 @@ class AutonomousAgent:
         self.enabled = self.settings.autonomous_agent_enabled
         self._running = False
         self._task: asyncio.Task | None = None
+        self._cycle_count: int = 0
 
     async def start(self) -> None:
         """Start the autonomous agent loop."""
@@ -179,6 +180,42 @@ class AutonomousAgent:
             duration_seconds=cycle_duration,
             actions_taken=len(actions_taken)
         )
+
+        # EVOLVE phase: run skill evolution periodically
+        self._cycle_count += 1
+        if (
+            self.settings.skill_evolution_enabled
+            and self._cycle_count % self.settings.skill_evolution_cycle_interval == 0
+        ):
+            await self._run_evolve_phase()
+
+    async def _run_evolve_phase(self) -> None:
+        """Run the skill evolution cycle (detect patterns, propose skills)."""
+        try:
+            from cognitex.agent.skill_evolution import get_skill_evolution
+
+            evolution = get_skill_evolution()
+            results = await evolution.run_evolution_cycle()
+
+            if results:
+                await log_action(
+                    "evolution_cycle",
+                    "agent",
+                    summary=f"Evolution cycle: {len(results)} proposal(s)",
+                    details={
+                        "proposals": [
+                            {
+                                "id": getattr(r, "id", None),
+                                "skill_name": getattr(r, "skill_name", None),
+                                "type": type(r).__name__,
+                            }
+                            for r in results
+                        ],
+                    },
+                )
+            logger.info("Evolution phase completed", proposals=len(results))
+        except Exception as e:
+            logger.warning("Evolution phase failed (non-fatal)", error=str(e)[:200])
 
     async def _check_clinical_recovery(self) -> bool:
         """Check if user is currently in post-clinical recovery mode.

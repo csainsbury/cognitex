@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+
+{% block title %}Skill Evolution - Cognitex{% endblock %}
+
+{% block content %}
+<h1>Skill Evolution</h1>
+
+<p style="color: var(--text-muted); margin-bottom: 1.5rem;">
+    The evolution system detects recurring patterns in agent behaviour and proposes new skills or refinements.
+    All proposals require your approval before deployment.
+</p>
+
+<div style="margin-bottom: 1.5rem;">
+    <button class="btn btn-primary"
+            hx-post="/api/evolution/trigger"
+            hx-target="#trigger-result"
+            hx-swap="innerHTML"
+            hx-indicator="#trigger-spinner">
+        Run Analysis Now
+    </button>
+    <span id="trigger-spinner" class="htmx-indicator" style="margin-left: 0.5rem; color: var(--text-muted);">Analysing...</span>
+    <div id="trigger-result" style="margin-top: 0.5rem;"></div>
+</div>
+
+<!-- Pending Proposals -->
+<div class="card" style="margin-bottom: 1.5rem;">
+    <div class="card-header">
+        <h2>Pending Proposals</h2>
+        <span class="badge badge-active">{{ pending|length }}</span>
+    </div>
+
+    {% if pending %}
+    {% for p in pending %}
+    <div style="border-bottom: 1px solid var(--border); padding: 1rem;">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+            <div>
+                <strong>{{ p.skill_name }}</strong>
+                <span class="badge badge-archived" style="margin-left: 0.5rem;">{{ p.proposal_type or 'new_skill' }}</span>
+                <span class="text-dim" style="margin-left: 0.5rem;">{{ p.pattern_type }}</span>
+            </div>
+            <div class="text-dim" style="font-size: 0.8rem;">
+                {% if p.pattern_confidence %}{{ "%.0f"|format(p.pattern_confidence * 100) }}% confidence{% endif %}
+            </div>
+        </div>
+
+        {% if p.pattern_description %}
+        <div class="text-dim" style="margin-top: 0.5rem; font-size: 0.9rem;">{{ p.pattern_description }}</div>
+        {% endif %}
+
+        {% if p.diff_summary %}
+        <div class="text-dim" style="margin-top: 0.25rem; font-size: 0.85rem;">Changes: {{ p.diff_summary }}</div>
+        {% endif %}
+
+        <!-- Collapsible content preview -->
+        <details style="margin-top: 0.75rem;">
+            <summary style="cursor: pointer; color: var(--primary); font-size: 0.9rem;">Show skill content</summary>
+            <pre style="background: var(--bg-alt); padding: 0.75rem; border-radius: 4px; margin-top: 0.5rem; font-size: 0.85rem; white-space: pre-wrap; max-height: 300px; overflow-y: auto;">{{ p.skill_content }}</pre>
+        </details>
+
+        <!-- Review form -->
+        <div style="margin-top: 0.75rem; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+            <form style="display: inline;" hx-post="/api/evolution/review/{{ p.id }}" hx-target="closest div[style*='border-bottom']" hx-swap="outerHTML">
+                <input type="hidden" name="decision" value="approve">
+                <input type="text" name="feedback" placeholder="Optional feedback..." style="width: 200px; font-size: 0.85rem;">
+                <button type="submit" class="btn btn-primary btn-sm">Approve & Deploy</button>
+            </form>
+            <form style="display: inline;" hx-post="/api/evolution/review/{{ p.id }}" hx-target="closest div[style*='border-bottom']" hx-swap="outerHTML">
+                <input type="hidden" name="decision" value="reject">
+                <input type="text" name="feedback" placeholder="Reason...">
+                <button type="submit" class="btn btn-danger btn-sm">Reject</button>
+            </form>
+        </div>
+    </div>
+    {% endfor %}
+    {% else %}
+    <div class="empty" style="padding: 1rem;">
+        No pending proposals. Run an analysis or wait for the next autonomous cycle.
+    </div>
+    {% endif %}
+</div>
+
+<!-- Proposal History -->
+<div class="card">
+    <div class="card-header">
+        <h2>Proposal History</h2>
+    </div>
+
+    {% if history %}
+    <table>
+        <thead>
+            <tr>
+                <th>Skill</th>
+                <th>Type</th>
+                <th>Pattern</th>
+                <th>Status</th>
+                <th>Confidence</th>
+                <th>Date</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for h in history %}
+            <tr>
+                <td><strong>{{ h.skill_name }}</strong></td>
+                <td class="text-dim">{{ h.proposal_type or 'new_skill' }}</td>
+                <td class="text-dim" style="max-width: 250px; overflow: hidden; text-overflow: ellipsis;">
+                    {{ h.pattern_type }}{% if h.pattern_description %}: {{ h.pattern_description[:60] }}{% endif %}
+                </td>
+                <td>
+                    {% if h.status == 'deployed' %}
+                    <span style="color: var(--success);">deployed</span>
+                    {% elif h.status == 'approved' %}
+                    <span style="color: var(--primary);">approved</span>
+                    {% elif h.status == 'rejected' %}
+                    <span style="color: var(--danger);">rejected</span>
+                    {% else %}
+                    <span class="text-dim">{{ h.status }}</span>
+                    {% endif %}
+                </td>
+                <td class="text-dim">
+                    {% if h.pattern_confidence %}{{ "%.0f"|format(h.pattern_confidence * 100) }}%{% endif %}
+                </td>
+                <td class="text-dim" style="font-size: 0.85rem;">
+                    {{ h.created_at.strftime('%Y-%m-%d %H:%M') if h.created_at else '' }}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty" style="padding: 1rem;">
+        No past proposals yet.
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

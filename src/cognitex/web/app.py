@@ -9272,6 +9272,182 @@ async def community_skill_sync():
 
 
 # =============================================================================
+# Skill Authoring Routes - AI-assisted skill creation
+# =============================================================================
+
+
+@app.post("/api/skills/author/create", response_class=JSONResponse)
+async def skill_author_create(
+    request: Request,
+    description: str = Form(...),
+    name: str = Form(None),
+):
+    """Generate a skill draft from a description."""
+    from cognitex.agent.skill_authoring import get_skill_authoring
+
+    authoring = get_skill_authoring()
+    draft = await authoring.create_from_description(
+        description=description,
+        name=name or None,
+    )
+    return {
+        "name": draft.name,
+        "description": draft.description,
+        "content": draft.content,
+        "version": draft.version,
+        "status": draft.status,
+    }
+
+
+@app.post("/api/skills/author/refine", response_class=JSONResponse)
+async def skill_author_refine(
+    request: Request,
+    name: str = Form(...),
+    content: str = Form(...),
+    feedback: str = Form(...),
+    version: int = Form(1),
+):
+    """Refine a skill draft with feedback."""
+    from cognitex.agent.skill_authoring import SkillDraft, get_skill_authoring
+
+    authoring = get_skill_authoring()
+    draft = SkillDraft(
+        name=name,
+        description="",
+        content=content,
+        version=version,
+    )
+    refined = await authoring.refine_draft(draft, feedback)
+    return {
+        "name": refined.name,
+        "description": refined.description,
+        "content": refined.content,
+        "version": refined.version,
+        "status": refined.status,
+    }
+
+
+@app.post("/api/skills/author/test", response_class=JSONResponse)
+async def skill_author_test(
+    request: Request,
+    name: str = Form(...),
+    content: str = Form(...),
+    test_input: str = Form(...),
+):
+    """Test a skill draft against input."""
+    from cognitex.agent.skill_authoring import SkillDraft, get_skill_authoring
+
+    authoring = get_skill_authoring()
+    draft = SkillDraft(name=name, description="", content=content)
+    results = await authoring.test_skill(draft, [test_input])
+    return [
+        {
+            "input": r.input_text,
+            "output": r.output_text,
+            "success": r.success,
+            "error": r.error,
+        }
+        for r in results
+    ]
+
+
+@app.post("/api/skills/author/deploy", response_class=HTMLResponse)
+async def skill_author_deploy(
+    request: Request,
+    name: str = Form(...),
+    content: str = Form(...),
+):
+    """Deploy a skill draft."""
+    from cognitex.agent.skill_authoring import SkillDraft, get_skill_authoring
+
+    authoring = get_skill_authoring()
+    draft = SkillDraft(name=name, description="", content=content)
+    success = await authoring.deploy_skill(draft)
+    if success:
+        return HTMLResponse(
+            f'<span style="color: var(--success);">Deployed \'{html.escape(name)}\'</span>'
+        )
+    return HTMLResponse('<span style="color: var(--danger);">Deployment failed</span>')
+
+
+# =============================================================================
+# Skill Evolution Routes - Autonomous pattern detection & proposals
+# =============================================================================
+
+
+@app.get("/evolution", response_class=HTMLResponse)
+async def evolution_page(request: Request):
+    """Evolution dashboard page."""
+    from cognitex.agent.skill_evolution import get_skill_evolution
+
+    evolution = get_skill_evolution()
+    pending = await evolution._get_pending_proposals()
+    history = await evolution._get_all_proposals(limit=50)
+
+    return templates.TemplateResponse(
+        "evolution.html",
+        {
+            "request": request,
+            "pending": pending,
+            "history": [h for h in history if h["status"] != "proposed"],
+        },
+    )
+
+
+@app.post("/api/evolution/review/{proposal_id}", response_class=HTMLResponse)
+async def evolution_review(
+    proposal_id: str,
+    decision: str = Form(...),
+    feedback: str = Form(None),
+):
+    """Review a pending proposal (approve/reject)."""
+    from cognitex.agent.skill_evolution import get_skill_evolution
+
+    evolution = get_skill_evolution()
+
+    if decision == "approve":
+        await evolution.review_proposal(proposal_id, "approved", feedback)
+        success = await evolution.deploy_proposal(proposal_id)
+        if success:
+            return HTMLResponse(
+                '<div style="color: var(--success); padding: 0.5rem;">Approved and deployed.</div>'
+            )
+        return HTMLResponse(
+            '<div style="color: var(--warning); padding: 0.5rem;">Approved but deployment failed.</div>'
+        )
+    else:
+        await evolution.review_proposal(proposal_id, "rejected", feedback)
+        return HTMLResponse(
+            '<div style="color: var(--text-muted); padding: 0.5rem;">Rejected.</div>'
+        )
+
+
+@app.post("/api/evolution/trigger", response_class=HTMLResponse)
+async def evolution_trigger():
+    """Manually trigger an evolution cycle."""
+    from cognitex.agent.skill_evolution import get_skill_evolution
+
+    evolution = get_skill_evolution()
+    try:
+        results = await evolution.run_evolution_cycle()
+        count = len(results)
+        if count:
+            return HTMLResponse(
+                f'<div style="color: var(--success); padding: 0.5rem;">'
+                f'Analysis complete: {count} proposal(s) generated. Refresh to see them.</div>'
+            )
+        return HTMLResponse(
+            '<div style="color: var(--text-muted); padding: 0.5rem;">'
+            'Analysis complete: no new patterns detected.</div>'
+        )
+    except Exception as e:
+        return HTMLResponse(
+            f'<div style="color: var(--danger); padding: 0.5rem;">'
+            f'Error: {html.escape(str(e)[:200])}</div>'
+        )
+
+
+# =============================================================================
 # Memory Routes - Daily logs and curated knowledge
 # =============================================================================
 

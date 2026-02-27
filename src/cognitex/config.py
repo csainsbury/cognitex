@@ -188,6 +188,18 @@ class Settings(BaseSettings):
         description="How often the autonomous agent runs (minutes)",
     )
 
+    # Skill Evolution
+    skill_evolution_enabled: bool = Field(
+        default=True,
+        description="Enable autonomous skill evolution (pattern detection + proposals)",
+    )
+    skill_evolution_cycle_interval: int = Field(
+        default=10,
+        ge=5,
+        le=100,
+        description="Run skill evolution every N autonomous agent cycles",
+    )
+
     # Document exclusions for orphan detection
     # Documents matching these patterns won't be flagged as orphaned
     orphan_exclude_name_patterns: str = Field(

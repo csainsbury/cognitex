@@ -7212,6 +7212,110 @@ def skills_sync() -> None:
     asyncio.run(run_sync())
 
 
+@skills_app.command("create")
+def skills_create(
+    from_desc: str = typer.Option(None, "--from", help="Generate skill from this description"),
+    name: str = typer.Option(None, "--name", help="Skill name (auto-derived if omitted)"),
+) -> None:
+    """Create a new skill with AI assistance.
+
+    Interactive mode (no flags): describe what you want, review, refine, and deploy.
+    One-shot mode: cognitex skills create --from "description" [--name "my-skill"]
+    """
+
+    async def run_create():
+        from cognitex.agent.skill_authoring import get_skill_authoring
+
+        authoring = get_skill_authoring()
+
+        # Get description
+        description = from_desc
+        if not description:
+            description = Prompt.ask(
+                "[bold cyan]Describe the skill you want to create[/bold cyan]"
+            )
+            if not description.strip():
+                console.print("[red]No description provided.[/red]")
+                return
+
+        # Optional examples in interactive mode
+        examples = None
+        if not from_desc:
+            if Confirm.ask("Add example inputs/outputs?", default=False):
+                examples = []
+                while True:
+                    ex = Prompt.ask("  Example (or empty to finish)")
+                    if not ex.strip():
+                        break
+                    examples.append(ex)
+
+        # Generate
+        with console.status("[bold green]Generating skill with AI..."):
+            draft = await authoring.create_from_description(
+                description=description,
+                name=name,
+                examples=examples,
+            )
+
+        console.print(f"\n[bold green]Generated skill: {draft.name}[/bold green]")
+        console.print(f"[dim]{draft.description}[/dim]\n")
+        console.print(draft.content)
+        console.print()
+
+        # One-shot mode: just print and exit
+        if from_desc:
+            if Confirm.ask("Deploy this skill?", default=True):
+                success = await authoring.deploy_skill(draft)
+                if success:
+                    console.print(f"[green]Deployed '{draft.name}' to user skills.[/green]")
+                else:
+                    console.print("[red]Deployment failed.[/red]")
+            return
+
+        # Interactive loop
+        while True:
+            action = Prompt.ask(
+                "[bold]Action[/bold]",
+                choices=["deploy", "refine", "test", "cancel"],
+                default="deploy",
+            )
+
+            if action == "deploy":
+                success = await authoring.deploy_skill(draft)
+                if success:
+                    console.print(f"[green]Deployed '{draft.name}' to user skills.[/green]")
+                else:
+                    console.print("[red]Deployment failed.[/red]")
+                break
+
+            elif action == "refine":
+                feedback = Prompt.ask("  What should change?")
+                with console.status("[bold green]Refining..."):
+                    draft = await authoring.refine_draft(draft, feedback)
+                console.print(f"\n[bold]Refined (v{draft.version}):[/bold]")
+                console.print(draft.content)
+                console.print()
+
+            elif action == "test":
+                test_input = Prompt.ask("  Paste test input")
+                with console.status("[bold green]Testing..."):
+                    results = await authoring.test_skill(draft, [test_input])
+                for r in results:
+                    status = "[green]PASS[/green]" if r.success else "[red]FAIL[/red]"
+                    console.print(f"\n{status}")
+                    if r.output_text:
+                        console.print(r.output_text[:500])
+                    if r.error:
+                        console.print(f"[red]{r.error}[/red]")
+                console.print()
+
+            elif action == "cancel":
+                console.print("[yellow]Cancelled.[/yellow]")
+                break
+
+    asyncio.run(run_create())
+
+
 # =============================================================================
 # Memory Commands - Daily logs and curated knowledge
 # =============================================================================

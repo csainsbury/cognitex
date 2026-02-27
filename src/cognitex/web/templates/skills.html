@@ -16,7 +16,10 @@
         <div class="card">
             <div class="card-header">
                 <h2>Available Skills</h2>
-                <button class="btn btn-primary btn-sm" onclick="showNewSkillForm()">+ New Skill</button>
+                <div style="display: flex; gap: 0.5rem;">
+                    <button class="btn btn-primary btn-sm" onclick="showNewSkillForm()">+ New Skill</button>
+                    <button class="btn btn-secondary btn-sm" onclick="showAiAuthor()">Create with AI</button>
+                </div>
             </div>
 
             {% if skills %}
@@ -145,6 +148,45 @@ Output: ...
                 <button type="submit" class="btn btn-primary">Create Skill</button>
             </form>
         </div>
+
+        <!-- AI Authoring Panel (hidden by default) -->
+        <div id="ai-author-panel" class="card" style="display: none;">
+            <div class="card-header">
+                <h2>Create with AI</h2>
+                <button class="btn btn-secondary btn-sm" onclick="hideAiAuthor()">Cancel</button>
+            </div>
+            <div id="ai-author-input">
+                <div style="margin-bottom: 1rem;">
+                    <label style="font-weight: 500; display: block; margin-bottom: 0.25rem;">Describe the skill:</label>
+                    <textarea id="ai-description" rows="4" placeholder="e.g. Extract meeting action items and assign them to people based on who was mentioned..."></textarea>
+                </div>
+                <div style="margin-bottom: 1rem;">
+                    <label style="font-weight: 500; display: block; margin-bottom: 0.25rem;">Name (optional):</label>
+                    <input type="text" id="ai-skill-name" placeholder="auto-derived if empty" pattern="[a-z0-9\-]+">
+                </div>
+                <button class="btn btn-primary" onclick="aiGenerate()">Generate</button>
+                <span id="ai-generate-status" class="text-dim" style="margin-left: 0.5rem;"></span>
+            </div>
+            <div id="ai-author-result" style="display: none; margin-top: 1rem;">
+                <label style="font-weight: 500; display: block; margin-bottom: 0.25rem;">Generated Skill:</label>
+                <textarea id="ai-content" rows="18" style="font-family: var(--font-mono); font-size: 0.9rem;"></textarea>
+                <div style="margin-top: 1rem; display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
+                    <button class="btn btn-primary" onclick="aiDeploy()">Deploy</button>
+                    <button class="btn btn-secondary" onclick="aiRefinePrompt()">Refine</button>
+                    <button class="btn btn-secondary" onclick="aiTestPrompt()">Test</button>
+                    <span id="ai-action-status"></span>
+                </div>
+                <div id="ai-refine-form" style="display: none; margin-top: 1rem;">
+                    <textarea id="ai-feedback" rows="3" placeholder="What should change?"></textarea>
+                    <button class="btn btn-secondary btn-sm" onclick="aiRefine()" style="margin-top: 0.5rem;">Apply Feedback</button>
+                </div>
+                <div id="ai-test-form" style="display: none; margin-top: 1rem;">
+                    <textarea id="ai-test-input" rows="3" placeholder="Paste test input..."></textarea>
+                    <button class="btn btn-secondary btn-sm" onclick="aiTest()" style="margin-top: 0.5rem;">Run Test</button>
+                    <div id="ai-test-result" style="margin-top: 0.5rem;"></div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Skill Editor -->
@@ -225,10 +267,128 @@ function selectSkill(name) {
 
 function showNewSkillForm() {
     document.getElementById('new-skill-form').style.display = 'block';
+    document.getElementById('ai-author-panel').style.display = 'none';
 }
 
 function hideNewSkillForm() {
     document.getElementById('new-skill-form').style.display = 'none';
+}
+
+function showAiAuthor() {
+    document.getElementById('ai-author-panel').style.display = 'block';
+    document.getElementById('new-skill-form').style.display = 'none';
+}
+
+function hideAiAuthor() {
+    document.getElementById('ai-author-panel').style.display = 'none';
+    document.getElementById('ai-author-result').style.display = 'none';
+}
+
+let aiDraftVersion = 1;
+let aiDraftName = '';
+
+async function aiGenerate() {
+    const desc = document.getElementById('ai-description').value.trim();
+    if (!desc) return;
+    const name = document.getElementById('ai-skill-name').value.trim();
+    const status = document.getElementById('ai-generate-status');
+    status.textContent = 'Generating...';
+
+    const form = new FormData();
+    form.append('description', desc);
+    if (name) form.append('name', name);
+
+    try {
+        const res = await fetch('/api/skills/author/create', { method: 'POST', body: form });
+        const data = await res.json();
+        aiDraftName = data.name;
+        aiDraftVersion = data.version;
+        document.getElementById('ai-content').value = data.content;
+        document.getElementById('ai-author-result').style.display = 'block';
+        status.textContent = '';
+    } catch (e) {
+        status.textContent = 'Error: ' + e.message;
+    }
+}
+
+async function aiDeploy() {
+    const content = document.getElementById('ai-content').value;
+    const status = document.getElementById('ai-action-status');
+    const form = new FormData();
+    form.append('name', aiDraftName);
+    form.append('content', content);
+
+    try {
+        const res = await fetch('/api/skills/author/deploy', { method: 'POST', body: form });
+        status.innerHTML = await res.text();
+        setTimeout(() => location.reload(), 1000);
+    } catch (e) {
+        status.innerHTML = '<span style="color:var(--danger);">' + escapeHtml(e.message) + '</span>';
+    }
+}
+
+function aiRefinePrompt() {
+    const el = document.getElementById('ai-refine-form');
+    el.style.display = el.style.display === 'none' ? 'block' : 'none';
+    document.getElementById('ai-test-form').style.display = 'none';
+}
+
+function aiTestPrompt() {
+    const el = document.getElementById('ai-test-form');
+    el.style.display = el.style.display === 'none' ? 'block' : 'none';
+    document.getElementById('ai-refine-form').style.display = 'none';
+}
+
+async function aiRefine() {
+    const feedback = document.getElementById('ai-feedback').value.trim();
+    if (!feedback) return;
+    const content = document.getElementById('ai-content').value;
+    const status = document.getElementById('ai-action-status');
+    status.textContent = 'Refining...';
+
+    const form = new FormData();
+    form.append('name', aiDraftName);
+    form.append('content', content);
+    form.append('feedback', feedback);
+    form.append('version', aiDraftVersion);
+
+    try {
+        const res = await fetch('/api/skills/author/refine', { method: 'POST', body: form });
+        const data = await res.json();
+        aiDraftVersion = data.version;
+        document.getElementById('ai-content').value = data.content;
+        document.getElementById('ai-feedback').value = '';
+        document.getElementById('ai-refine-form').style.display = 'none';
+        status.textContent = 'Refined (v' + data.version + ')';
+    } catch (e) {
+        status.innerHTML = '<span style="color:var(--danger);">' + escapeHtml(e.message) + '</span>';
+    }
+}
+
+async function aiTest() {
+    const input = document.getElementById('ai-test-input').value.trim();
+    if (!input) return;
+    const content = document.getElementById('ai-content').value;
+    const resultEl = document.getElementById('ai-test-result');
+    resultEl.textContent = 'Testing...';
+
+    const form = new FormData();
+    form.append('name', aiDraftName);
+    form.append('content', content);
+    form.append('test_input', input);
+
+    try {
+        const res = await fetch('/api/skills/author/test', { method: 'POST', body: form });
+        const data = await res.json();
+        let html = '';
+        data.forEach(r => {
+            const badge = r.success ? '<span style="color:var(--success);">PASS</span>' : '<span style="color:var(--danger);">FAIL</span>';
+            html += badge + '<pre style="background:var(--bg-alt);padding:0.5rem;border-radius:4px;margin:0.5rem 0;white-space:pre-wrap;">' + escapeHtml(r.output || r.error || '(empty)') + '</pre>';
+        });
+        resultEl.innerHTML = html;
+    } catch (e) {
+        resultEl.innerHTML = '<span style="color:var(--danger);">' + escapeHtml(e.message) + '</span>';
+    }
 }
 
 function updateSkillFormAction(name) {
