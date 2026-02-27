@@ -356,6 +356,42 @@ async def _handle_reject(args: str) -> str:
     return f"Item not found: {item_id}"
 
 
+async def _handle_email(args: str) -> str:
+    """Show email provider status or trigger sync."""
+    from cognitex.services.email_provider import get_email_provider
+
+    provider = get_email_provider()
+    sub = args.strip().lower()
+
+    if sub == "sync":
+        if provider.provider_name == "agentmail":
+            from cognitex.services.agentmail import get_agentmail_service
+
+            svc = get_agentmail_service()
+            if not svc:
+                return "AgentMail enabled but service unavailable (check API key)."
+            messages = await svc.get_messages(limit=50)
+            return f"Fetched {len(messages)} recent messages from AgentMail."
+        return "Gmail sync: use `cognitex sync` CLI command."
+
+    try:
+        profile = await provider.get_profile()
+    except Exception as e:
+        return f"Provider: {provider.provider_name} (error: {e})"
+
+    if provider.provider_name == "agentmail":
+        return (
+            f"Provider: AgentMail\n"
+            f"Inbox: {profile.get('inbox_id', 'unknown')}\n"
+            f"Display name: {profile.get('display_name', 'N/A')}"
+        )
+    return (
+        f"Provider: Gmail\n"
+        f"Email: {profile.get('email', 'unknown')}\n"
+        f"Total messages: {profile.get('messages_total', 'unknown')}"
+    )
+
+
 async def _handle_help(_args: str) -> str:
     """List all commands."""
     registry = get_slash_registry()
@@ -451,6 +487,13 @@ def _register_builtin_commands(registry: SlashCommandRegistry) -> None:
         handler=_handle_reject,
         usage="<item-id> [reason]",
         category="inbox",
+    ))
+    registry.register(SlashCommand(
+        name="email",
+        description="Show email provider status or sync",
+        handler=_handle_email,
+        usage="[sync]",
+        category="config",
     ))
     registry.register(SlashCommand(
         name="help",

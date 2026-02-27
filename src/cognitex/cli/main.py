@@ -342,7 +342,54 @@ def sync(
     all_mail: bool = typer.Option(False, "--all", "-a", help="Include all mail (not just inbox)"),
     clear: bool = typer.Option(False, "--clear", help="Clear existing emails before sync"),
 ) -> None:
-    """Sync emails from Gmail into the graph database."""
+    """Sync emails from Gmail or AgentMail into the graph database."""
+    from cognitex.config import get_settings
+
+    settings = get_settings()
+
+    if settings.agentmail_enabled:
+        console.print("[bold]Starting AgentMail sync...[/bold]")
+
+        async def run_agentmail_sync():
+            from cognitex.db.neo4j import init_neo4j, close_neo4j
+            from cognitex.db.graph_schema import init_graph_schema
+            from cognitex.services.agentmail import get_agentmail_service
+            from cognitex.services.ingestion import ingest_email_to_graph
+
+            await init_neo4j()
+            await init_graph_schema()
+
+            try:
+                svc = get_agentmail_service()
+                if not svc:
+                    console.print("[red]AgentMail enabled but service unavailable.[/red]")
+                    raise typer.Exit(1)
+
+                messages = await svc.get_messages(limit=min(months * 100, 500))
+                console.print(f"  Fetched {len(messages)} messages from AgentMail")
+
+                success = 0
+                failed = 0
+                for email_data in messages:
+                    try:
+                        body = await svc.get_message_body(email_data["gmail_id"])
+                        await ingest_email_to_graph(email_data, classify=True, body=body)
+                        success += 1
+                    except Exception as e:
+                        failed += 1
+                        logger.debug("Failed to ingest AgentMail message", error=str(e))
+
+                console.print(f"\n[bold green]Sync complete![/bold green]")
+                console.print(f"  Total emails: {len(messages)}")
+                console.print(f"  Successfully ingested: {success}")
+                if failed > 0:
+                    console.print(f"  [yellow]Failed: {failed}[/yellow]")
+            finally:
+                await close_neo4j()
+
+        asyncio.run(run_agentmail_sync())
+        return
+
     from cognitex.services.google_auth import check_credentials_status
 
     status = check_credentials_status()
@@ -351,7 +398,7 @@ def sync(
         raise typer.Exit(1)
 
     inbox_only = not all_mail
-    console.print(f"[bold]Starting {'incremental' if incremental else 'historical'} sync...[/bold]")
+    console.print(f"[bold]Starting {'incremental' if incremental else 'historical'} Gmail sync...[/bold]")
     console.print(f"  Filter: {'all mail' if all_mail else 'inbox only'}")
 
     async def run_sync():

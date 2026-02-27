@@ -1,5 +1,6 @@
-"""Webhook endpoints for Google Push Notifications."""
+"""Webhook endpoints for Google Push Notifications and AgentMail."""
 
+import hmac
 import json
 from typing import Optional
 
@@ -194,6 +195,111 @@ async def drive_webhook(
 
 
 # =============================================================================
+# AgentMail Webhook
+# =============================================================================
+
+
+async def _process_agentmail_event(event_type: str, data: dict) -> None:
+    """Process an AgentMail webhook event in the background."""
+    try:
+        if event_type != "message.received":
+            logger.debug("Ignoring AgentMail event", event_type=event_type)
+            return
+
+        message_id = data.get("message_id") or data.get("messageId")
+        if not message_id:
+            logger.warning("AgentMail event missing message_id", data=data)
+            return
+
+        from cognitex.services.agentmail import get_agentmail_service
+
+        svc = get_agentmail_service()
+        if not svc:
+            logger.error("AgentMail service unavailable for webhook processing")
+            return
+
+        email_data = await svc.get_message(message_id)
+        body = await svc.get_message_body(message_id)
+
+        # Clinical firewall — runs BEFORE any LLM call
+        from cognitex.config import get_settings
+
+        settings = get_settings()
+        if settings.clinical_firewall_enabled:
+            from cognitex.services.clinical_firewall import get_firewall
+
+            firewall = get_firewall()
+            scan_text = f"{email_data.get('subject', '')} {body}"
+            result = firewall.scan(scan_text)
+            if result.is_clinical and settings.clinical_firewall_mode == "block":
+                logger.info(
+                    "AgentMail message blocked by clinical firewall",
+                    message_id=message_id,
+                    reason=result.reason,
+                )
+                return
+
+        from cognitex.services.ingestion import ingest_email_to_graph
+
+        await ingest_email_to_graph(email_data, classify=True, body=body)
+        logger.info("AgentMail message ingested", message_id=message_id)
+
+        # Publish to Redis for real-time dashboard updates
+        await publish_event(
+            "cognitex:events:email",
+            {
+                "type": "agentmail_received",
+                "message_id": message_id,
+                "subject": email_data.get("subject", ""),
+                "sender": email_data.get("sender_email", ""),
+            },
+        )
+
+    except Exception as e:
+        logger.error("AgentMail webhook processing error", error=str(e), event_type=event_type)
+
+
+@router.post("/agentmail")
+async def agentmail_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    x_webhook_secret: str | None = Header(None, alias="X-Webhook-Secret"),
+) -> Response:
+    """
+    Receive AgentMail webhook events.
+
+    Events: message.received, message.sent, message.delivered, message.bounced
+    """
+    try:
+        # Verify webhook secret
+        from cognitex.config import get_settings
+
+        settings = get_settings()
+        expected_secret = settings.agentmail_webhook_secret.get_secret_value()
+        if expected_secret and (
+            not x_webhook_secret
+            or not hmac.compare_digest(x_webhook_secret, expected_secret)
+        ):
+            logger.warning("AgentMail webhook: invalid secret")
+            return Response(status_code=401)
+
+        body = await request.json()
+        event_type = body.get("event_type") or body.get("type", "")
+        data = body.get("data", body)
+
+        logger.info("AgentMail webhook received", event_type=event_type)
+
+        background_tasks.add_task(_process_agentmail_event, event_type, data)
+
+        return Response(status_code=200)
+
+    except Exception as e:
+        logger.error("AgentMail webhook error", error=str(e))
+        # Return 200 to prevent retry storms
+        return Response(status_code=200)
+
+
+# =============================================================================
 # Health check for webhook endpoint
 # =============================================================================
 
@@ -206,5 +312,6 @@ async def webhooks_health() -> dict:
             "/webhooks/google/gmail",
             "/webhooks/google/calendar",
             "/webhooks/google/drive",
+            "/webhooks/agentmail",
         ]
     }

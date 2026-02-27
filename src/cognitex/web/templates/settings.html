@@ -424,6 +424,57 @@
     </div>
 
     <div class="card">
+        <h2>Email Provider</h2>
+        <p style="color: #666; margin-bottom: 1rem;">
+            Choose between direct Gmail API or AgentMail for agent email operations.
+        </p>
+
+        <table>
+            <tr>
+                <td style="width: 150px; font-weight: 500;">Provider</td>
+                <td>
+                    {% if agentmail_enabled %}
+                    <span class="badge badge-active">AgentMail</span>
+                    {% else %}
+                    <span class="badge badge-active">Gmail (direct)</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% if agentmail_enabled %}
+            <tr>
+                <td style="font-weight: 500;">Inbox ID</td>
+                <td style="font-size: 0.85rem; font-family: monospace;">{{ agentmail_inbox_id or 'Not configured' }}</td>
+            </tr>
+            <tr>
+                <td style="font-weight: 500;">API Key</td>
+                <td style="font-size: 0.85rem;">
+                    {% if agentmail_has_key %}
+                    <span style="color: #16a34a;">Configured</span>
+                    {% else %}
+                    <span style="color: #dc2626;">Missing</span>
+                    {% endif %}
+                </td>
+            </tr>
+            <tr>
+                <td style="font-weight: 500;">Webhook</td>
+                <td style="font-size: 0.85rem;">
+                    {% if agentmail_has_webhook_secret %}
+                    <span style="color: #16a34a;">Secret configured</span>
+                    {% else %}
+                    <span style="color: #94a3b8;">No webhook secret</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endif %}
+        </table>
+
+        <p style="font-size: 0.85rem; color: #666; margin-top: 1rem;">
+            Configure via <code>.env</code>: <code>AGENTMAIL_ENABLED=true</code>,
+            <code>AGENTMAIL_API_KEY</code>, <code>AGENTMAIL_INBOX_ID</code>
+        </p>
+    </div>
+
+    <div class="card">
         <h2>Discord</h2>
         <p style="color: #666; margin-bottom: 1rem;">
             Notifications and alerts are sent to Discord.

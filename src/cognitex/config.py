@@ -249,6 +249,20 @@ class Settings(BaseSettings):
         description="Number of recent conversation turns to keep verbatim",
     )
 
+    # AgentMail (alternative email provider)
+    agentmail_enabled: bool = Field(
+        default=False, description="Use AgentMail instead of direct Gmail API"
+    )
+    agentmail_api_key: SecretStr = Field(
+        default=SecretStr(""), description="AgentMail API key"
+    )
+    agentmail_inbox_id: str = Field(
+        default="", description="AgentMail inbox ID"
+    )
+    agentmail_webhook_secret: SecretStr = Field(
+        default=SecretStr(""), description="Webhook verification secret"
+    )
+
     # Clinical Data Firewall
     clinical_firewall_enabled: bool = Field(
         default=True,

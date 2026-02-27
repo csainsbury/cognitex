@@ -60,6 +60,9 @@ dependencies = [
 
     # Web search
     "ddgs>=9.0.0",
+
+    # AgentMail
+    "agentmail>=0.2.20",
 ]
 
 [project.optional-dependencies]

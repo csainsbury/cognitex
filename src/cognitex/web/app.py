@@ -5583,36 +5583,31 @@ async def edit_and_send_email(
     except Exception as e:
         logger.warning("Failed to trigger learning on email edit", error=str(e))
 
-    # Actually send the email via Gmail API
+    # Actually send the email via EmailProvider (routes to AgentMail or Gmail)
     try:
-        from cognitex.services.gmail import GmailService
-        import asyncio
+        from cognitex.services.email_provider import get_email_provider
 
-        gmail = GmailService()
-
-        # Check if this is a reply (has thread_id)
+        provider = get_email_provider()
         thread_id = item.payload.get("thread_id")
 
         if thread_id:
-            # Send as reply to existing thread
-            result = await asyncio.to_thread(
-                gmail.send_reply,
+            result = await provider.reply_to_message(
                 thread_id=thread_id,
                 to=to,
                 subject=subject,
                 body=body,
+                in_reply_to=item.payload.get("reply_to_id"),
             )
         else:
-            # Send as new message
-            result = await asyncio.to_thread(
-                gmail.send_message,
-                to=to,
-                subject=subject,
-                body=body,
-            )
+            result = await provider.send_message(to=to, subject=subject, body=body)
 
         message_id = result.get("id", "unknown")
-        logger.info("Email sent via Gmail", to=to, message_id=message_id)
+        logger.info(
+            "Email sent",
+            provider=provider.provider_name,
+            to=to,
+            message_id=message_id,
+        )
 
     except Exception as e:
         logger.error("Failed to send email", error=str(e), to=to)
@@ -5622,7 +5617,7 @@ async def edit_and_send_email(
                     Failed to send email: {html.escape(str(e))}
                 </div>
                 <div style="font-size: 0.85rem; color: #b91c1c;">
-                    The email was not sent. Please try again or check your Gmail connection.
+                    The email was not sent. Please try again or check your connection.
                 </div>
             </div>
         """, status_code=500)
@@ -8195,6 +8190,16 @@ async def settings_page(request: Request, tab: str = "general"):
         "available_modes": list(OperatingMode),
         "captured_items": captured_dicts,
         "switch_stats": switch_stats,
+    })
+
+    # --- Integrations Tab: AgentMail ---
+    template_data.update({
+        "agentmail_enabled": app_settings.agentmail_enabled,
+        "agentmail_inbox_id": app_settings.agentmail_inbox_id,
+        "agentmail_has_key": bool(app_settings.agentmail_api_key.get_secret_value()),
+        "agentmail_has_webhook_secret": bool(
+            app_settings.agentmail_webhook_secret.get_secret_value()
+        ),
     })
 
     return templates.TemplateResponse("settings.html", template_data)
