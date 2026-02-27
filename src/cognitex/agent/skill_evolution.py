@@ -416,6 +416,7 @@ class SkillEvolution:
             prompt=prompt,
             max_tokens=4096,
             temperature=0.4,
+            task="skill_evolution",
         )
         content = response.strip()
         if content.startswith("```"):
@@ -501,6 +502,7 @@ class SkillEvolution:
             prompt=prompt,
             max_tokens=4096,
             temperature=0.3,
+            task="skill_evolution",
         )
         proposed_content = response.strip()
         if proposed_content.startswith("```"):
@@ -578,6 +580,7 @@ class SkillEvolution:
             prompt=prompt,
             max_tokens=2048,
             temperature=0.2,
+            task="skill_evolution",
         )
 
         # Extract file path and diff from response

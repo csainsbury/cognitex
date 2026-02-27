@@ -59,6 +59,9 @@ class CognitexBot(commands.Bot):
         self.tree.add_command(learning_command)
         self.tree.add_command(patterns_command)
         self.tree.add_command(risk_command)
+        # WP7: Model/provider switching
+        self.tree.add_command(model_command)
+        self.tree.add_command(provider_command)
 
         # Sync commands with Discord
         try:
@@ -1499,6 +1502,47 @@ async def risk_command(interaction: discord.Interaction) -> None:
 
     except Exception as e:
         logger.error("Risk command failed", error=str(e))
+        await interaction.followup.send(f"Error: {str(e)[:100]}")
+
+
+# =============================================================================
+# WP7: Slash command integration (model/provider switching)
+# =============================================================================
+
+
+@app_commands.command(name="model", description="Show or switch AI model")
+@app_commands.describe(alias="Model alias (e.g. sonnet, opus, deepseek) or leave blank to show current")
+async def model_command(interaction: discord.Interaction, alias: Optional[str] = None) -> None:
+    """Show or switch AI model via slash command registry."""
+    await interaction.response.defer()
+    try:
+        from cognitex.agent.slash_commands import get_slash_registry
+
+        registry = get_slash_registry()
+        if not registry._initialized:
+            await registry.initialize()
+        result = await registry.dispatch(f"/model {alias}" if alias else "/model")
+        await interaction.followup.send(f"```\n{result.response}\n```")
+    except Exception as e:
+        logger.error("Model command failed", error=str(e))
+        await interaction.followup.send(f"Error: {str(e)[:100]}")
+
+
+@app_commands.command(name="provider", description="Switch LLM provider")
+@app_commands.describe(name="Provider name (together, anthropic, openai, google)")
+async def provider_command(interaction: discord.Interaction, name: str) -> None:
+    """Switch LLM provider via slash command registry."""
+    await interaction.response.defer()
+    try:
+        from cognitex.agent.slash_commands import get_slash_registry
+
+        registry = get_slash_registry()
+        if not registry._initialized:
+            await registry.initialize()
+        result = await registry.dispatch(f"/provider {name}")
+        await interaction.followup.send(f"```\n{result.response}\n```")
+    except Exception as e:
+        logger.error("Provider command failed", error=str(e))
         await interaction.followup.send(f"Error: {str(e)[:100]}")
 
 

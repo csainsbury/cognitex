@@ -722,7 +722,7 @@ class AutonomousAgent:
         try:
             llm = get_llm_service()
             logger.info("Calling LLM for autonomous reasoning...")
-            response = await llm.complete(prompt, max_tokens=2000)
+            response = await llm.complete(prompt, max_tokens=2000, task="autonomous")
             logger.info("LLM response received", response_length=len(response) if response else 0)
 
             if not response:

@@ -631,9 +631,9 @@ Focus on facts, recent developments, and key relationships."""
 
                     topic_brief["summary"] = await llm.complete(
                         summary_prompt,
-                        model=llm.fast_model,
                         max_tokens=200,
                         temperature=0.3,
+                        task="context_pack",
                     )
 
                     # Extract key facts
@@ -944,7 +944,7 @@ Recent history:
 Return ONLY a JSON array of strings, each being one key thing to know. Example:
 ["John is the new CEO - adjust your pitch accordingly", "You owe Sarah a response about the budget"]"""
 
-                response = await llm.complete(prompt, max_tokens=300, temperature=0.3)
+                response = await llm.complete(prompt, max_tokens=300, temperature=0.3, task="context_pack")
 
                 # Parse response
                 import json

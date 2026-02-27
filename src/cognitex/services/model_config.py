@@ -92,6 +92,35 @@ GOOGLE_CHAT_MODELS = [
 RECOMMENDED_CHAT_MODELS = [m["id"] for m in TOGETHER_CHAT_MODELS]
 RECOMMENDED_EMBEDDING_MODELS = [m["id"] for m in TOGETHER_EMBEDDING_MODELS]
 
+# Short aliases for quick model switching via slash commands
+MODEL_ALIASES: dict[str, tuple[str, str]] = {
+    # (provider, model_id)
+    "sonnet": ("anthropic", "claude-sonnet-4-20250514"),
+    "opus": ("anthropic", "claude-opus-4-20250514"),
+    "haiku": ("anthropic", "claude-3-5-haiku-20241022"),
+    "sonnet-3.5": ("anthropic", "claude-3-5-sonnet-20241022"),
+    "gpt4o": ("openai", "gpt-4o"),
+    "gpt4o-mini": ("openai", "gpt-4o-mini"),
+    "o1": ("openai", "o1"),
+    "o3-mini": ("openai", "o3-mini"),
+    "gemini-pro": ("google", "gemini-3-pro-preview"),
+    "gemini-flash": ("google", "gemini-3-flash-preview"),
+    "deepseek": ("together", "deepseek-ai/DeepSeek-V3"),
+    "deepseek-r1": ("together", "deepseek-ai/DeepSeek-R1"),
+    "llama-70b": ("together", "meta-llama/Llama-3.3-70B-Instruct-Turbo"),
+    "llama-405b": ("together", "meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo"),
+    "qwen": ("together", "Qwen/Qwen3-235B-A22B-fp8"),
+}
+
+# Per-task model override slots
+TASK_MODEL_SLOTS = (
+    "autonomous",
+    "triage",
+    "draft",
+    "context_pack",
+    "skill_evolution",
+)
+
 
 @dataclass
 class ModelConfig:
@@ -102,6 +131,12 @@ class ModelConfig:
     executor_model: str
     embedding_model: str
     embedding_provider: str = "together"  # Embedding provider (may differ from chat)
+    # Per-task model overrides (empty string = use planner_model)
+    autonomous_model: str = ""
+    triage_model: str = ""
+    draft_model: str = ""
+    context_pack_model: str = ""
+    skill_evolution_model: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -114,7 +149,18 @@ class ModelConfig:
             executor_model=data.get("executor_model", "deepseek-ai/DeepSeek-V3"),
             embedding_model=data.get("embedding_model", "BAAI/bge-base-en-v1.5"),
             embedding_provider=data.get("embedding_provider", "together"),
+            autonomous_model=data.get("autonomous_model", ""),
+            triage_model=data.get("triage_model", ""),
+            draft_model=data.get("draft_model", ""),
+            context_pack_model=data.get("context_pack_model", ""),
+            skill_evolution_model=data.get("skill_evolution_model", ""),
         )
+
+    def get_model_for_task(self, task: str) -> str:
+        """Return the override model for a task slot, or planner_model if unset."""
+        field_name = f"{task}_model"
+        override = getattr(self, field_name, "")
+        return override if override else self.planner_model
 
     @classmethod
     def from_settings(cls) -> "ModelConfig":
@@ -249,6 +295,15 @@ class ModelConfigService:
         except Exception as e:
             logger.error("Failed to save model config to Redis", error=str(e))
             raise
+
+    async def update_task_model(self, task: str, model_id: str) -> ModelConfig:
+        """Update a per-task model override and return new config."""
+        if task not in TASK_MODEL_SLOTS:
+            raise ValueError(f"Unknown task slot: {task}")
+        config = await self.get_config()
+        setattr(config, f"{task}_model", model_id)
+        await self.set_config(config)
+        return config
 
     async def update_model(
         self,

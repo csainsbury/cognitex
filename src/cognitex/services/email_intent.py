@@ -354,9 +354,9 @@ class EmailIntentClassifier:
         try:
             response = await self.llm.complete(
                 prompt,
-                model=self.llm.fast_model,
                 max_tokens=1000,
                 temperature=0.1,
+                task="triage",
             )
 
             # Parse JSON response

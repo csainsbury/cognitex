@@ -156,6 +156,7 @@ class LLMService:
         max_tokens: int = 8192,  # Gemini 3 supports much larger outputs
         temperature: float = 0.3,
         response_format: dict | None = None,
+        task: str | None = None,
     ) -> str:
         """
         Generate a completion from the LLM with automatic fallback.
@@ -166,10 +167,14 @@ class LLMService:
             max_tokens: Maximum tokens in response
             temperature: Sampling temperature
             response_format: Optional JSON schema for structured output
+            task: Optional task slot name (e.g. "autonomous", "triage", "draft")
+                  for per-task model routing. Ignored when explicit model is given.
 
         Returns:
             Generated text response
         """
+        if model is None and task:
+            model = await self._resolve_task_model(task)
         model = model or self.primary_model
 
         try:
@@ -196,6 +201,25 @@ class LLMService:
                     response_format=response_format,
                 )
             raise
+
+    async def _resolve_task_model(self, task: str) -> str | None:
+        """Resolve per-task model override from Redis-backed ModelConfig.
+
+        Returns the override model ID if set, or None to fall back to primary_model.
+        """
+        try:
+            from cognitex.services.model_config import TASK_MODEL_SLOTS, get_model_config_service
+
+            if task not in TASK_MODEL_SLOTS:
+                return None
+            config = await get_model_config_service().get_config()
+            override = getattr(config, f"{task}_model", "")
+            if override:
+                logger.debug("Using per-task model override", task=task, model=override)
+                return override
+        except Exception as e:
+            logger.warning("Failed to resolve task model, using default", task=task, error=str(e))
+        return None
 
     @with_retry(max_attempts=3, base_delay=1.0)
     async def _complete_internal(
@@ -1054,3 +1078,9 @@ def get_llm_service() -> LLMService:
     if _llm_service is None:
         _llm_service = LLMService()
     return _llm_service
+
+
+def reset_llm_service() -> None:
+    """Clear the LLM service singleton so it re-reads config on next call."""
+    global _llm_service
+    _llm_service = None

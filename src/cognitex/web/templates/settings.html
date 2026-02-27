@@ -102,6 +102,43 @@
 
         <div>
             <div class="card">
+                <h2>Model Routing</h2>
+                <p style="color: #666; font-size: 0.85rem; margin-bottom: 0.75rem;">
+                    Override the model used for specific tasks. Leave as "Default" to use the planner model.
+                </p>
+                <form hx-post="/api/settings/models/routing" hx-swap="innerHTML" hx-target="#routing-result">
+                    <table style="font-size: 0.85rem;">
+                        {% set task_slots = [
+                            ("autonomous", "Autonomous Agent"),
+                            ("triage", "Email Triage"),
+                            ("draft", "Draft Composition"),
+                            ("context_pack", "Context Packs"),
+                            ("skill_evolution", "Skill Evolution"),
+                        ] %}
+                        {% for slot, label in task_slots %}
+                        <tr>
+                            <td style="width: 140px; font-weight: 500;">{{ label }}</td>
+                            <td>
+                                <select name="{{ slot }}_model" style="width: 100%; font-size: 0.85rem;">
+                                    <option value="" {% if not config[slot + '_model'] %}selected{% endif %}>Default (planner)</option>
+                                    {% for alias, info in model_aliases.items() %}
+                                    <option value="{{ info[1] }}" {% if config[slot + '_model'] == info[1] %}selected{% endif %}>
+                                        {{ alias }} ({{ info[0] }})
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </table>
+                    <div style="margin-top: 0.75rem; display: flex; gap: 0.5rem; align-items: center;">
+                        <button type="submit" class="btn btn-primary" style="font-size: 0.85rem;">Save Routing</button>
+                        <span id="routing-result"></span>
+                    </div>
+                </form>
+            </div>
+
+            <div class="card">
                 <h2>Quick Presets</h2>
                 <div style="display: flex; flex-direction: column; gap: 0.5rem;">
                     <strong style="font-size: 0.85rem; color: #666;">Together.ai</strong>

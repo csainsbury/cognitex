@@ -264,6 +264,101 @@ CREATE INDEX IF NOT EXISTS idx_inbox_feedback_type ON inbox_feedback(item_type);
 CREATE INDEX IF NOT EXISTS idx_inbox_feedback_action ON inbox_feedback(action);
 CREATE INDEX IF NOT EXISTS idx_inbox_feedback_created ON inbox_feedback(created_at);
 
+-- =============================================================================
+-- Email Style Learning Tables
+-- =============================================================================
+
+-- Email writing style profiles per recipient
+-- Tracks how the user writes to specific people or in general
+CREATE TABLE IF NOT EXISTS email_style_profiles (
+    id SERIAL PRIMARY KEY,
+    recipient_email TEXT,  -- NULL for general profile
+    metrics JSONB NOT NULL DEFAULT '{}',  -- StyleMetrics as JSON
+    sample_count INT DEFAULT 1,
+    last_updated TIMESTAMP DEFAULT NOW(),
+    UNIQUE(recipient_email)
+);
+
+CREATE INDEX IF NOT EXISTS idx_style_profiles_recipient ON email_style_profiles(recipient_email);
+
+-- Email response decision tracking
+-- Records user decisions about which emails to respond to
+CREATE TABLE IF NOT EXISTS email_response_decisions (
+    id SERIAL PRIMARY KEY,
+    email_id TEXT NOT NULL,  -- Gmail message ID
+    sender_email TEXT NOT NULL,
+    sender_domain TEXT,
+    subject TEXT,
+
+    -- Classification at time of decision
+    intent TEXT,  -- from EmailIntent enum
+    intent_confidence FLOAT,
+    predicted_needs_response BOOLEAN,
+
+    -- User's actual decision
+    user_decision TEXT NOT NULL,  -- 'responded', 'skipped', 'delegated', 'flagged_later'
+    decision_reason TEXT,  -- optional user feedback
+
+    -- Context at decision time
+    operating_mode TEXT,  -- focused, available, etc.
+    hour_of_day INT,
+    day_of_week INT,
+
+    -- Outcome (filled in later when we detect a response was sent)
+    did_respond BOOLEAN,
+    response_time_minutes INT,
+
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_response_decisions_email ON email_response_decisions(email_id);
+CREATE INDEX IF NOT EXISTS idx_response_decisions_sender ON email_response_decisions(sender_email);
+CREATE INDEX IF NOT EXISTS idx_response_decisions_intent ON email_response_decisions(intent);
+CREATE INDEX IF NOT EXISTS idx_response_decisions_decision ON email_response_decisions(user_decision);
+CREATE INDEX IF NOT EXISTS idx_response_decisions_created ON email_response_decisions(created_at);
+
+-- Email draft lifecycle tracking
+-- Tracks drafts from creation to send/discard for learning from edits
+CREATE TABLE IF NOT EXISTS email_draft_lifecycle (
+    id SERIAL PRIMARY KEY,
+    draft_id TEXT NOT NULL UNIQUE,      -- Internal draft ID
+    gmail_draft_id TEXT,                -- Gmail draft ID once uploaded
+    recipient_email TEXT,
+    subject TEXT,
+
+    -- Original content (when draft was created)
+    original_body TEXT NOT NULL,
+    original_length INT,
+
+    -- Final content (when sent or last edited)
+    final_body TEXT,
+    final_length INT,
+
+    -- Edit metrics
+    edit_ratio FLOAT,                   -- Levenshtein ratio (0.0-1.0, 1.0 = no changes)
+    edit_type TEXT,                     -- 'none', 'minor', 'moderate', 'major', 'rewrite'
+
+    -- Lifecycle tracking
+    status TEXT DEFAULT 'created',      -- 'created', 'edited', 'sent', 'discarded'
+    created_at TIMESTAMP DEFAULT NOW(),
+    edited_at TIMESTAMP,
+    sent_at TIMESTAMP,
+    discarded_at TIMESTAMP,
+
+    -- Context
+    reply_to_email_id TEXT,             -- Gmail ID if this was a reply
+    created_by TEXT DEFAULT 'agent',    -- 'agent', 'user'
+
+    -- Learning flag
+    learned_from BOOLEAN DEFAULT FALSE
+);
+
+CREATE INDEX IF NOT EXISTS idx_draft_lifecycle_draft ON email_draft_lifecycle(draft_id);
+CREATE INDEX IF NOT EXISTS idx_draft_lifecycle_recipient ON email_draft_lifecycle(recipient_email);
+CREATE INDEX IF NOT EXISTS idx_draft_lifecycle_status ON email_draft_lifecycle(status);
+CREATE INDEX IF NOT EXISTS idx_draft_lifecycle_edit_type ON email_draft_lifecycle(edit_type);
+CREATE INDEX IF NOT EXISTS idx_draft_lifecycle_created ON email_draft_lifecycle(created_at);
+
 -- Add lifecycle columns to preference_rules if they don't exist
 -- These are added via ALTER TABLE to preserve existing data
 """

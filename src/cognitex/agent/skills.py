@@ -93,6 +93,7 @@ class Skill:
     eligible: bool = True
     ineligibility_reason: str = ""
     source: Literal["bundled", "user", "community"] = "bundled"
+    user_invocable: bool = False
 
 
 class SkillsLoader:
@@ -188,6 +189,7 @@ class SkillsLoader:
             requires_bins=requires.get("bins", []) if isinstance(requires, dict) else [],
             requires_env=requires.get("env", []) if isinstance(requires, dict) else [],
             requires_config=requires.get("config", []) if isinstance(requires, dict) else [],
+            user_invocable=bool(frontmatter.get("user-invocable", False)),
         )
 
         # Also parse the body with legacy parser for rules/what_is/examples
@@ -430,6 +432,7 @@ class SkillsLoader:
                         "eligible": skill.eligible,
                         "ineligibility_reason": skill.ineligibility_reason,
                         "source": skill.source,
+                        "user_invocable": skill.user_invocable,
                     }
                 )
 

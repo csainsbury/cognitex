@@ -110,6 +110,7 @@ class SkillAuthoring:
             prompt=prompt,
             max_tokens=4096,
             temperature=0.4,
+            task="skill_evolution",
         )
         content = _strip_code_fences(response)
 
@@ -151,6 +152,7 @@ class SkillAuthoring:
             prompt=prompt,
             max_tokens=4096,
             temperature=0.3,
+            task="skill_evolution",
         )
         content = _strip_code_fences(response)
 
@@ -211,9 +213,9 @@ class SkillAuthoring:
 
                 output = await self._llm.complete(
                     prompt=prompt,
-                    model=self._llm.fast_model,
                     max_tokens=2048,
                     temperature=0.2,
+                    task="skill_evolution",
                 )
 
                 results.append(

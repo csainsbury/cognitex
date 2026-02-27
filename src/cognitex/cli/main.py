@@ -1437,6 +1437,19 @@ def agent_chat(
                     if user_input.lower() in ("quit", "exit", "q"):
                         break
 
+                    if user_input.startswith("/"):
+                        from cognitex.agent.slash_commands import get_slash_registry
+
+                        registry = get_slash_registry()
+                        if not registry._initialized:
+                            await registry.initialize()
+                        result = await registry.dispatch(user_input)
+                        if result.handled:
+                            console.print(
+                                f"\n[bold cyan]Cognitex:[/bold cyan] {result.response}\n"
+                            )
+                            continue
+
                     if user_input.lower() == "approvals":
                         approvals = await agent.get_pending_approvals()
                         if not approvals:

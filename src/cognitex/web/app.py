@@ -7382,6 +7382,21 @@ async def api_chat(request: Request):
     if not message:
         return JSONResponse({"error": "Message cannot be empty"}, status_code=400)
 
+    # Intercept slash commands before agent
+    if message.startswith("/"):
+        from cognitex.agent.slash_commands import get_slash_registry
+
+        registry = get_slash_registry()
+        if not registry._initialized:
+            await registry.initialize()
+        result = await registry.dispatch(message)
+        if result.handled:
+            return JSONResponse({
+                "response": result.response,
+                "approvals": [],
+                "is_command": True,
+            })
+
     try:
         agent = Agent()
         await agent.initialize()
@@ -8018,7 +8033,7 @@ async def api_analyze_node(
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request, tab: str = "general"):
     """Unified settings page with tabs for General, Agent, State, Integrations."""
-    from cognitex.services.model_config import get_model_config_service
+    from cognitex.services.model_config import get_model_config_service, MODEL_ALIASES
     from cognitex.db.neo4j import get_driver, get_neo4j_session
     from cognitex.db.postgres import get_session
     from sqlalchemy import text
@@ -8076,6 +8091,7 @@ async def settings_page(request: Request, tab: str = "general"):
         "sync_api_key": sync_api_key,
         "sync_session_count": sync_session_count,
         "sync_machine_count": sync_machine_count,
+        "model_aliases": MODEL_ALIASES,
     })
 
     # --- Agent Tab Data ---
@@ -8451,6 +8467,27 @@ async def api_settings_models_preset(request: Request, preset: str):
             "providers": providers,
         },
     )
+
+
+@app.post("/api/settings/models/routing", response_class=HTMLResponse)
+async def update_model_routing(request: Request):
+    """Update per-task model routing overrides."""
+    from cognitex.services.model_config import (
+        TASK_MODEL_SLOTS,
+        get_model_config_service,
+    )
+
+    form = await request.form()
+    service = get_model_config_service()
+    config = await service.get_config()
+
+    for slot in TASK_MODEL_SLOTS:
+        value = form.get(f"{slot}_model", "").strip()
+        setattr(config, f"{slot}_model", value)
+
+    await service.set_config(config)
+
+    return HTMLResponse('<span style="color: #16a34a;">Routing saved</span>')
 
 
 # =============================================================================
