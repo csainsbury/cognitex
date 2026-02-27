@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+
+{% block title %}Commitments - Cognitex{% endblock %}
+
+{% block content %}
+<h1>Commitments</h1>
+
+<div class="stats">
+    <div class="stat">
+        <div class="stat-value">{{ stats.active }}</div>
+        <div class="stat-label">Active</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value" {% if stats.overdue > 0 %}style="color: var(--danger);"{% endif %}>{{ stats.overdue }}</div>
+        <div class="stat-label">Overdue</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value" {% if stats.approaching > 0 %}style="color: var(--warning);"{% endif %}>{{ stats.approaching }}</div>
+        <div class="stat-label">Approaching (48h)</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value">{{ stats.completed }}</div>
+        <div class="stat-label">Completed</div>
+    </div>
+</div>
+
+{% if stats.overdue > 0 %}
+<div style="margin-bottom: 1.5rem; padding: 1rem; background: #fef3c7; border: 1px solid #fde68a; border-radius: 8px; display: flex; justify-content: space-between; align-items: center;">
+    <div>
+        <strong style="color: #92400e;">{{ stats.overdue }} overdue commitment{{ 's' if stats.overdue != 1 }}</strong>
+        <div style="font-size: 0.85rem; color: #666;">Review and update deadlines or mark as completed</div>
+    </div>
+</div>
+{% endif %}
+
+<div class="two-col" style="grid-template-columns: 2fr 1fr;">
+    <div>
+        <div class="card">
+            <div class="card-header">
+                <h2>All Commitments</h2>
+            </div>
+
+            {% if commitments %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Description</th>
+                        <th>Status</th>
+                        <th>Deadline</th>
+                        <th>Owner</th>
+                        <th>Load</th>
+                        <th>Source</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for c in commitments %}
+                    <tr class="commitment-row" style="cursor: pointer;" onclick="toggleDetail(this)">
+                        <td style="max-width: 250px;">
+                            {{ c.task_description[:80] if c.task_description else c.get('action', 'Unknown')[:80] }}
+                            {% if c.task_description and c.task_description|length > 80 %}...{% endif %}
+                        </td>
+                        <td>
+                            {% set status = c.status or 'unknown' %}
+                            <span class="badge {% if status == 'overdue' %}badge-paused{% elif status in ['accepted', 'in_progress'] %}badge-active{% elif status == 'completed' %}badge-done{% elif status == 'approaching' %}badge-planning{% else %}badge-pending{% endif %}">
+                                {{ status | replace('_', ' ') | title }}
+                            </span>
+                        </td>
+                        <td style="white-space: nowrap; font-size: 0.85rem;">
+                            {% if c.deadline %}
+                                {{ c.deadline[:10] if c.deadline is string else c.deadline.isoformat()[:10] }}
+                            {% else %}
+                                <span style="color: #999;">No deadline</span>
+                            {% endif %}
+                        </td>
+                        <td style="font-size: 0.85rem;">{{ c.owner or '—' }}</td>
+                        <td>
+                            {% set load = c.cognitive_load or 'medium' %}
+                            <span class="badge {% if load == 'high' %}badge-paused{% elif load == 'low' %}badge-done{% else %}badge-pending{% endif %}">
+                                {{ load }}
+                            </span>
+                        </td>
+                        <td style="font-size: 0.85rem; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                            {% if c.source_email_subject %}
+                                {{ c.source_email_subject[:40] }}{% if c.source_email_subject|length > 40 %}...{% endif %}
+                            {% else %}
+                                —
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr class="commitment-detail" style="display: none;">
+                        <td colspan="6" style="background: #f8fafc; padding: 1rem;">
+                            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; font-size: 0.85rem;">
+                                <div>
+                                    <strong>Project:</strong> {{ c.project_title or 'Not linked' }}
+                                </div>
+                                <div>
+                                    <strong>Waiting On:</strong> {{ c.waiting_on_email or 'Nobody' }}
+                                </div>
+                                <div>
+                                    <strong>Source Email:</strong> {{ c.source_email_subject or 'N/A' }}
+                                </div>
+                            </div>
+                            {% if c.task_description and c.task_description|length > 80 %}
+                            <div style="margin-top: 0.75rem; font-size: 0.85rem; color: #444;">
+                                <strong>Full Description:</strong> {{ c.task_description }}
+                            </div>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p class="empty">No commitments tracked yet. Use "Extract New" to scan recent emails for commitments.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <div>
+        <div class="card">
+            <h2>Extract New</h2>
+            <p style="color: #666; font-size: 0.85rem; margin-bottom: 1rem;">
+                Scan recent sent emails for implied commitments.
+            </p>
+            <div id="extract-result"></div>
+            <button class="btn btn-primary"
+                    hx-post="/api/tasks/extract-commitments"
+                    hx-target="#extract-result"
+                    hx-swap="innerHTML">
+                Scan Recent Emails
+            </button>
+        </div>
+
+        <div class="card">
+            <h2>By Cognitive Load</h2>
+            <div style="font-size: 0.9rem;">
+                <div style="display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #eee;">
+                    <span><span class="badge badge-paused">high</span></span>
+                    <span style="font-weight: 600;">{{ load_counts.high }}</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #eee;">
+                    <span><span class="badge badge-pending">medium</span></span>
+                    <span style="font-weight: 600;">{{ load_counts.medium }}</span>
+                </div>
+                <div style="display: flex; justify-content: space-between; padding: 0.4rem 0;">
+                    <span><span class="badge badge-done">low</span></span>
+                    <span style="font-weight: 600;">{{ load_counts.low }}</span>
+                </div>
+            </div>
+        </div>
+
+        {% if waiting_on %}
+        <div class="card">
+            <h2>Waiting On</h2>
+            <ul style="list-style: none; padding: 0; font-size: 0.85rem;">
+                {% for person in waiting_on %}
+                <li style="display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #eee;">
+                    <span>{{ person.email }}</span>
+                    <span class="badge">{{ person.count }}</span>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<script>
+function toggleDetail(row) {
+    const detail = row.nextElementSibling;
+    if (detail && detail.classList.contains('commitment-detail')) {
+        detail.style.display = detail.style.display === 'none' ? 'table-row' : 'none';
+    }
+}
+</script>
+{% endblock %}

@@ -1885,6 +1885,104 @@ async def goal_detail(request: Request, goal_id: str):
 
 
 # -------------------------------------------------------------------
+# Commitments
+# -------------------------------------------------------------------
+
+
+@app.get("/commitments", response_class=HTMLResponse)
+async def commitments_page(request: Request):
+    """Commitments page showing all tracked commitments with status grouping."""
+    import structlog
+    from cognitex.db.neo4j import get_neo4j_session
+    from cognitex.db.graph_schema import get_commitments
+    from cognitex.agent.graph_observer import GraphObserver
+
+    logger = structlog.get_logger()
+
+    all_commitments: list[dict] = []
+    approaching: list[dict] = []
+    overdue: list[dict] = []
+
+    try:
+        async for session in get_neo4j_session():
+            # Get all commitments
+            all_commitments = await get_commitments(session)
+
+            # Get approaching and overdue via GraphObserver
+            observer = GraphObserver(session)
+            approaching = await observer.get_approaching_commitments(hours=48)
+            overdue = await observer.get_overdue_commitments()
+            break
+    except Exception as e:
+        logger.warning("Failed to load commitments", error=str(e))
+
+    # Build sets of overdue/approaching IDs for status annotation
+    overdue_ids = {c.get("id") for c in overdue}
+    approaching_ids = {c.get("id") for c in approaching}
+
+    # Annotate commitments with display status and sort
+    for c in all_commitments:
+        cid = c.get("id")
+        if cid in overdue_ids:
+            c["status"] = "overdue"
+        elif cid in approaching_ids and c.get("status") not in ("completed",):
+            c["status"] = "approaching"
+
+    # Sort: overdue first, then approaching, then active, then completed
+    status_order = {
+        "overdue": 0, "approaching": 1, "in_progress": 2,
+        "accepted": 3, "blocked": 4, "waiting_on": 5, "completed": 6,
+    }
+    all_commitments.sort(
+        key=lambda c: status_order.get(c.get("status", ""), 4)
+    )
+
+    # Count active (non-completed, non-overdue)
+    active_count = sum(
+        1 for c in all_commitments
+        if c.get("status") not in ("completed", "overdue", "approaching")
+    )
+    completed_count = sum(1 for c in all_commitments if c.get("status") == "completed")
+
+    # Cognitive load counts (active commitments only)
+    load_counts = {"high": 0, "medium": 0, "low": 0}
+    for c in all_commitments:
+        if c.get("status") not in ("completed",):
+            load = c.get("cognitive_load", "medium") or "medium"
+            if load in load_counts:
+                load_counts[load] += 1
+
+    # Waiting on: aggregate people with pending commitments
+    waiting_on_map: dict[str, int] = {}
+    for c in all_commitments:
+        if c.get("status") not in ("completed",) and c.get("waiting_on_email"):
+            email = c["waiting_on_email"]
+            waiting_on_map[email] = waiting_on_map.get(email, 0) + 1
+    waiting_on = [
+        {"email": email, "count": count}
+        for email, count in sorted(waiting_on_map.items(), key=lambda x: -x[1])
+    ]
+
+    stats = {
+        "active": active_count,
+        "overdue": len(overdue),
+        "approaching": len(approaching),
+        "completed": completed_count,
+    }
+
+    return templates.TemplateResponse(
+        "commitments.html",
+        {
+            "request": request,
+            "commitments": all_commitments,
+            "stats": stats,
+            "load_counts": load_counts,
+            "waiting_on": waiting_on,
+        },
+    )
+
+
+# -------------------------------------------------------------------
 # Today / Day Plan
 # -------------------------------------------------------------------
 
@@ -7432,6 +7530,18 @@ async def api_chat_clear():
         await redis.close()
 
 
+@app.get("/api/chat/commands")
+async def api_chat_commands():
+    """List available slash commands for the chat command helper."""
+    from cognitex.agent.slash_commands import get_slash_registry
+
+    registry = get_slash_registry()
+    if not registry._initialized:
+        await registry.initialize()
+    commands = registry.list_commands()
+    return JSONResponse(commands)
+
+
 # -------------------------------------------------------------------
 # Graph Visualization
 # -------------------------------------------------------------------
@@ -8200,6 +8310,25 @@ async def settings_page(request: Request, tab: str = "general"):
         "agentmail_has_webhook_secret": bool(
             app_settings.agentmail_webhook_secret.get_secret_value()
         ),
+    })
+
+    # --- Integrations Tab: Clinical Firewall ---
+    firewall_pattern_count = 0
+    firewall_category_count = 0
+    try:
+        from cognitex.services.clinical_firewall import get_firewall
+        fw = get_firewall()
+        firewall_category_count = len(fw._compiled)
+        firewall_pattern_count = sum(len(v) for v in fw._compiled.values())
+    except Exception:
+        pass
+
+    template_data.update({
+        "firewall_enabled": app_settings.clinical_firewall_enabled,
+        "firewall_mode": app_settings.clinical_firewall_mode,
+        "firewall_pattern_count": firewall_pattern_count,
+        "firewall_category_count": firewall_category_count,
+        "firewall_patterns_path": app_settings.clinical_firewall_patterns_path,
     })
 
     return templates.TemplateResponse("settings.html", template_data)

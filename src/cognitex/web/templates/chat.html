@@ -136,6 +136,61 @@
     .clear-chat:hover {
         color: #b91c1c;
     }
+    .command-helper {
+        margin-top: 0.25rem;
+    }
+    .command-toggle {
+        font-size: 0.8rem;
+        color: #64748b;
+        text-decoration: none;
+        cursor: pointer;
+    }
+    .command-toggle:hover {
+        color: var(--primary);
+    }
+    .command-panel {
+        margin-top: 0.5rem;
+        background: #fff;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 0.75rem;
+        max-height: 250px;
+        overflow-y: auto;
+    }
+    .command-category {
+        font-size: 0.75rem;
+        font-weight: 600;
+        color: #64748b;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-top: 0.5rem;
+        margin-bottom: 0.25rem;
+    }
+    .command-category:first-child {
+        margin-top: 0;
+    }
+    .command-item {
+        display: inline-block;
+        padding: 0.2rem 0.5rem;
+        margin: 0.15rem;
+        background: #f1f5f9;
+        border: 1px solid #e2e8f0;
+        border-radius: 4px;
+        font-size: 0.8rem;
+        font-family: var(--font-mono);
+        cursor: pointer;
+        transition: background 0.15s;
+    }
+    .command-item:hover {
+        background: #e0e7ff;
+        border-color: #c7d2fe;
+    }
+    .command-item .cmd-desc {
+        font-family: var(--font-sans);
+        color: #64748b;
+        font-size: 0.75rem;
+        margin-left: 0.25rem;
+    }
 </style>
 
 <div class="chat-header">
@@ -172,6 +227,11 @@
             rows="1"
         ></textarea>
         <button class="chat-send" id="chat-send" onclick="sendMessage()">Send</button>
+    </div>
+
+    <div class="command-helper">
+        <a href="#" class="command-toggle" id="command-toggle" onclick="toggleCommands(event)">/ Commands</a>
+        <div class="command-panel" id="command-panel" style="display: none;"></div>
     </div>
 </div>
 
@@ -288,5 +348,53 @@ function clearChat() {
 
 // Focus input on page load
 inputEl.focus();
+
+// Command helper
+let commandsLoaded = false;
+
+async function toggleCommands(e) {
+    e.preventDefault();
+    const panel = document.getElementById('command-panel');
+    const isHidden = panel.style.display === 'none';
+    panel.style.display = isHidden ? 'block' : 'none';
+
+    if (isHidden && !commandsLoaded) {
+        panel.innerHTML = '<span style="color: #999; font-size: 0.8rem;">Loading commands...</span>';
+        try {
+            const resp = await fetch('/api/chat/commands');
+            const commands = await resp.json();
+            renderCommands(commands, panel);
+            commandsLoaded = true;
+        } catch (err) {
+            panel.innerHTML = '<span style="color: #dc2626; font-size: 0.8rem;">Failed to load commands</span>';
+        }
+    }
+}
+
+function renderCommands(commands, panel) {
+    const categories = {};
+    for (const cmd of commands) {
+        const cat = cmd.category || 'General';
+        if (!categories[cat]) categories[cat] = [];
+        categories[cat].push(cmd);
+    }
+
+    let html = '';
+    for (const [cat, cmds] of Object.entries(categories)) {
+        html += `<div class="command-category">${cat}</div><div>`;
+        for (const cmd of cmds) {
+            const escaped = cmd.description.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            html += `<span class="command-item" onclick="insertCommand('${cmd.name}')" title="${escaped}">/${cmd.name} <span class="cmd-desc">${escaped.substring(0, 30)}${escaped.length > 30 ? '...' : ''}</span></span>`;
+        }
+        html += '</div>';
+    }
+    panel.innerHTML = html;
+}
+
+function insertCommand(name) {
+    inputEl.value = '/' + name + ' ';
+    inputEl.focus();
+    document.getElementById('command-panel').style.display = 'none';
+}
 </script>
 {% endblock %}

@@ -475,6 +475,55 @@
     </div>
 
     <div class="card">
+        <h2>Clinical Data Firewall</h2>
+        <p style="color: #666; margin-bottom: 1rem;">
+            Pre-LLM firewall that scans text for clinical/NHS content before processing.
+        </p>
+
+        <table>
+            <tr>
+                <td style="width: 150px; font-weight: 500;">Status</td>
+                <td>
+                    {% if firewall_enabled %}
+                    <span class="badge badge-active">Enabled</span>
+                    {% else %}
+                    <span class="badge" style="background: #fee2e2; color: #991b1b;">Disabled</span>
+                    {% endif %}
+                </td>
+            </tr>
+            <tr>
+                <td style="font-weight: 500;">Mode</td>
+                <td>
+                    <span class="badge" style="background: #e0e7ff; color: #3730a3;">{{ firewall_mode }}</span>
+                    <span style="font-size: 0.8rem; color: #666; margin-left: 0.5rem;">
+                        {% if firewall_mode == 'block' %}
+                        Clinical content is blocked entirely from LLM processing
+                        {% elif firewall_mode == 'redact' %}
+                        PHI is removed before sending to the LLM
+                        {% elif firewall_mode == 'flag' %}
+                        Clinical content is processed but flagged with a warning
+                        {% endif %}
+                    </span>
+                </td>
+            </tr>
+            <tr>
+                <td style="font-weight: 500;">Patterns</td>
+                <td style="font-size: 0.85rem;">
+                    {{ firewall_pattern_count }} regex patterns across {{ firewall_category_count }} categories
+                </td>
+            </tr>
+            <tr>
+                <td style="font-weight: 500;">Pattern File</td>
+                <td><code style="font-size: 0.8rem;">{{ firewall_patterns_path }}</code></td>
+            </tr>
+        </table>
+
+        <p style="font-size: 0.85rem; color: #666; margin-top: 1rem;">
+            Configure via <code>.env</code>: <code>CLINICAL_FIREWALL_MODE=block|redact|flag</code>
+        </p>
+    </div>
+
+    <div class="card">
         <h2>Discord</h2>
         <p style="color: #666; margin-bottom: 1rem;">
             Notifications and alerts are sent to Discord.
