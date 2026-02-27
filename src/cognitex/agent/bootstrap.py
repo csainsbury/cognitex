@@ -166,6 +166,11 @@ _No patterns recorded yet._
 _No preferences recorded yet._
 """
 
+DEFAULT_LEDGER = """# Commitment Ledger
+# Auto-managed by the agent — tracks promises, deadlines, and follow-ups.
+commitments: []
+"""
+
 
 @dataclass
 class BootstrapSection:
@@ -222,6 +227,7 @@ class BootstrapLoader:
             "MEMORY.md": DEFAULT_MEMORY,
             "IDENTITY.md": DEFAULT_IDENTITY,
             "CONTEXT.md": DEFAULT_CONTEXT,
+            "LEDGER.yaml": DEFAULT_LEDGER,
         }
 
         for filename, content in defaults.items():
@@ -280,7 +286,7 @@ class BootstrapLoader:
 
             return BootstrapFile(
                 path=filepath,
-                name=filename.replace(".md", "").upper(),
+                name=Path(filename).stem.upper(),
                 raw_content=content,
                 sections=self._parse_sections(content),
                 last_modified=datetime.fromtimestamp(stat.st_mtime),

@@ -80,7 +80,8 @@ async def test_get_all_returns_all_files(loader):
     assert "MEMORY" in files
     assert "IDENTITY" in files
     assert "CONTEXT" in files
-    assert len(files) == 7
+    assert "LEDGER" in files
+    assert len(files) == 8
 
 
 @pytest.mark.asyncio
