@@ -39,28 +39,183 @@
     </div>
 
     {% elif item.item_type == 'context_pack' %}
-    <div class="inbox-item-payload">
-        {% if item.payload.readiness %}
-        <strong>Readiness:</strong> {{ (item.payload.readiness * 100) | int }}%<br>
+    <div class="inbox-item-payload context-pack-payload">
+        <div class="context-pack-header">
+            {% if item.payload.event_title %}
+            <strong>{{ item.payload.event_title }}</strong>
+            {% endif %}
+            {% if item.payload.event_time %}
+            <span class="event-time">{{ item.payload.event_time }}</span>
+            {% endif %}
+            {% if item.payload.readiness %}
+            <span class="readiness-badge" style="background: {% if item.payload.readiness >= 0.7 %}#166534{% elif item.payload.readiness >= 0.4 %}#ca8a04{% else %}#dc2626{% endif %}; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem;">
+                {{ (item.payload.readiness * 100) | int }}% ready
+            </span>
+            {% endif %}
+        </div>
+
+        {% if item.payload.what_you_need_to_know and item.payload.what_you_need_to_know | length > 0 %}
+        <div class="what-to-know" style="background: #1e3a5f; padding: 1rem; border-radius: 8px; margin: 1rem 0; border-left: 4px solid #3b82f6;">
+            <strong style="color: #93c5fd;">What you need to know:</strong>
+            <ul style="margin: 0.5rem 0 0 1rem; padding: 0; color: #e0e7ff;">
+            {% for item_text in item.payload.what_you_need_to_know %}
+                <li style="margin: 0.3rem 0; color: #e0e7ff;">{{ item_text }}</li>
+            {% endfor %}
+            </ul>
+        </div>
         {% endif %}
-        {% if item.payload.event_title %}
-        <strong>For:</strong> {{ item.payload.event_title }}<br>
+
+        {% if item.payload.attendee_profiles and item.payload.attendee_profiles | length > 0 %}
+        <details class="context-section" style="margin: 0.5rem 0;">
+            <summary style="cursor: pointer; font-weight: 600; color: var(--accent);">
+                Attendees ({{ item.payload.attendee_profiles | length }})
+            </summary>
+            <div style="padding: 0.5rem 0;">
+            {% for profile in item.payload.attendee_profiles %}
+                <div style="padding: 0.5rem; background: var(--bg-secondary); border-radius: 4px; margin: 0.3rem 0;">
+                    <strong>{{ profile.name or profile.email }}</strong>
+                    {% if profile.organization %}
+                    <span style="color: #888;"> - {{ profile.organization }}</span>
+                    {% endif %}
+                    {% if profile.role %}
+                    <span style="color: #888;">({{ profile.role }})</span>
+                    {% endif %}
+                    {% if profile.relationship_summary %}
+                    <div style="font-size: 0.85rem; color: #aaa; margin-top: 0.25rem;">
+                        {{ profile.relationship_summary }}
+                    </div>
+                    {% endif %}
+                </div>
+            {% endfor %}
+            </div>
+        </details>
         {% endif %}
-        {% if item.payload.event_time %}
-        <strong>When:</strong> {{ item.payload.event_time }}
+
+        {% if item.payload.ambient_context and item.payload.ambient_context | length > 0 %}
+        <details class="context-section" style="margin: 0.5rem 0;">
+            <summary style="cursor: pointer; font-weight: 600; color: var(--accent);">
+                Relationship History
+            </summary>
+            <div style="padding: 0.5rem 0;">
+            {% for ctx in item.payload.ambient_context %}
+                <div style="padding: 0.5rem; background: var(--bg-secondary); border-radius: 4px; margin: 0.3rem 0;">
+                    <strong>{{ ctx.person_name or ctx.person_email }}</strong>
+                    {% if ctx.summary %}
+                    <div style="font-size: 0.9rem; margin-top: 0.25rem;">{{ ctx.summary }}</div>
+                    {% endif %}
+                    {% if ctx.awaiting_their_response %}
+                    <span class="badge badge-warning" style="font-size: 0.75rem;">Awaiting your response</span>
+                    {% endif %}
+                </div>
+            {% endfor %}
+            </div>
+        </details>
+        {% endif %}
+
+        {% if item.payload.objective %}
+        <div style="margin-top: 0.5rem;">
+            <strong>Objective:</strong> {{ item.payload.objective }}
+        </div>
+        {% endif %}
+
+        {% if item.payload.decision_list and item.payload.decision_list | length > 0 %}
+        <details class="context-section" style="margin: 0.5rem 0;">
+            <summary style="cursor: pointer;">Decisions to Make ({{ item.payload.decision_list | length }})</summary>
+            <ul style="margin: 0.5rem 0 0 1rem;">
+            {% for decision in item.payload.decision_list %}
+                <li>{{ decision }}</li>
+            {% endfor %}
+            </ul>
+        </details>
+        {% endif %}
+
+        {% if item.payload.dont_forget and item.payload.dont_forget | length > 0 %}
+        <div style="margin-top: 0.5rem; padding: 0.5rem; background: #451a03; border-radius: 4px; border-left: 3px solid #f59e0b;">
+            <strong style="color: #fcd34d;">Don't forget:</strong>
+            <ul style="margin: 0.25rem 0 0 1rem;">
+            {% for reminder in item.payload.dont_forget %}
+                <li>{{ reminder }}</li>
+            {% endfor %}
+            </ul>
+        </div>
         {% endif %}
     </div>
 
     {% elif item.item_type == 'email_draft' %}
-    <div class="inbox-item-payload">
+    <div class="inbox-item-payload email-draft-payload">
         {% if item.payload.to %}
-        <strong>To:</strong> {{ item.payload.to }}<br>
+        <div><strong>To:</strong> {{ item.payload.to }}</div>
         {% endif %}
         {% if item.payload.subject %}
-        <strong>Subject:</strong> {{ item.payload.subject }}<br>
+        <div><strong>Subject:</strong> {{ item.payload.subject }}</div>
         {% endif %}
-        {% if item.payload.body_preview %}
-        <strong>Preview:</strong> {{ item.payload.body_preview[:150] }}...
+
+        <!-- Full email body in expandable section -->
+        <details open style="margin-top: 0.5rem;">
+            <summary style="cursor: pointer; font-weight: 600;">Email Body</summary>
+            <div class="email-body-preview" style="background: var(--bg); padding: 1rem; border-radius: 4px; margin-top: 0.5rem; white-space: pre-wrap; font-family: inherit; font-size: 0.9rem; max-height: 300px; overflow-y: auto;">{{ item.payload.body or item.payload.body_preview or 'No body content' }}</div>
+        </details>
+
+        <!-- Edit form (hidden by default) -->
+        <div id="edit-form-{{ item.id }}" style="display: none; margin-top: 1rem;">
+            <form hx-post="/api/inbox/{{ item.id }}/edit-and-send"
+                  hx-target="#inbox-item-{{ item.id }}"
+                  hx-swap="outerHTML">
+                <div style="margin-bottom: 0.5rem;">
+                    <label style="font-size: 0.85rem; color: #888;">To:</label>
+                    <input type="text" name="to" value="{{ item.payload.to }}"
+                           style="width: 100%; padding: 0.5rem; border: 1px solid #444; border-radius: 4px; background: var(--bg); color: var(--text);">
+                </div>
+                <div style="margin-bottom: 0.5rem;">
+                    <label style="font-size: 0.85rem; color: #888;">Subject:</label>
+                    <input type="text" name="subject" value="{{ item.payload.subject }}"
+                           style="width: 100%; padding: 0.5rem; border: 1px solid #444; border-radius: 4px; background: var(--bg); color: var(--text);">
+                </div>
+                <div style="margin-bottom: 0.5rem;">
+                    <label style="font-size: 0.85rem; color: #888;">Body:</label>
+                    <textarea name="body" rows="10"
+                              style="width: 100%; padding: 0.5rem; border: 1px solid #444; border-radius: 4px; background: var(--bg); color: var(--text); font-family: inherit;">{{ item.payload.body or item.payload.body_preview or '' }}</textarea>
+                </div>
+                <input type="hidden" name="original_body" value="{{ item.payload.body or item.payload.body_preview or '' }}">
+                <div style="display: flex; gap: 0.5rem;">
+                    <button type="submit" class="btn btn-success btn-sm">Send Edited Email</button>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="toggleEditForm('{{ item.id }}')">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    {% elif item.item_type == 'commitment_proposal' %}
+    <div class="inbox-item-payload">
+        {% if item.payload.action %}
+        <div><strong>Promise:</strong> {{ item.payload.action }}</div>
+        {% endif %}
+        {% if item.payload.deadline %}
+        <div><strong>Deadline:</strong> {{ item.payload.deadline }}
+            {% if item.payload.deadline_source and item.payload.deadline_source != 'none' %}
+            <span style="color: #888; font-size: 0.85rem;">({{ item.payload.deadline_source }})</span>
+            {% endif %}
+        </div>
+        {% endif %}
+        {% if item.payload.recipient %}
+        <div><strong>To:</strong> {{ item.payload.recipient }}</div>
+        {% endif %}
+        {% if item.payload.cognitive_load %}
+        <div><strong>Effort:</strong>
+            <span class="badge" style="background: {% if item.payload.cognitive_load == 'high' %}#dc2626{% elif item.payload.cognitive_load == 'medium' %}#ca8a04{% else %}#166534{% endif %}; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem;">
+                {{ item.payload.cognitive_load }}
+            </span>
+        </div>
+        {% endif %}
+        {% if item.payload.source_email_subject %}
+        <div style="margin-top: 0.5rem; font-size: 0.85rem; color: #888;">
+            Source: {{ item.payload.source_email_subject }}
+        </div>
+        {% endif %}
+        {% if item.payload.confidence %}
+        <div style="font-size: 0.8rem; color: #666;">
+            Confidence: {{ (item.payload.confidence * 100) | int }}%
+        </div>
         {% endif %}
     </div>
 
@@ -180,13 +335,22 @@
             {% endfor %}
         </div>
         {% else %}
+        <!-- Edit button for email drafts -->
+        {% if item.item_type == 'email_draft' %}
+        <button class="btn btn-primary btn-sm"
+                onclick="toggleEditForm('{{ item.id }}')"
+                title="Edit before sending">
+            Edit
+        </button>
+        {% endif %}
+
         <!-- Standard approve button -->
         <button class="btn btn-success btn-sm"
                 hx-post="/api/inbox/{{ item.id }}/approve"
                 hx-target="#inbox-item-{{ item.id }}"
                 hx-swap="outerHTML"
-                title="Approve">
-            Approve
+                title="{% if item.item_type == 'email_draft' %}Send as-is{% else %}Approve{% endif %}">
+            {% if item.item_type == 'email_draft' %}Send{% else %}Approve{% endif %}
         </button>
 
         <!-- Reject dropdown -->
@@ -198,7 +362,7 @@
             </button>
             <div class="dropdown-menu"
                  id="inbox-reject-menu-{{ item.id }}"
-                 style="display: none; position: absolute; right: 0; background: white; border: 1px solid #ddd; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); z-index: 100; min-width: 250px;">
+                 style="display: none; position: absolute; left: 0; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.3); z-index: 100; min-width: 250px;">
                 <form id="inbox-reject-form-{{ item.id }}"
                       hx-post="/api/inbox/{{ item.id }}/reject"
                       hx-target="#inbox-item-{{ item.id }}"
@@ -243,18 +407,43 @@
         </button>
         {% endif %}
 
-        <!-- Helpful buttons for context packs -->
+        <!-- Helpful buttons and rebuild for context packs -->
         {% if item.item_type == 'context_pack' %}
-        <div class="helpful-buttons">
-            <span style="font-size: 0.75rem; color: #888;">Helpful?</span>
-            <button class="helpful-btn helpful"
-                    hx-post="/api/inbox/{{ item.id }}/helpful?helpful=true"
-                    hx-swap="none"
-                    title="This was helpful">Yes</button>
-            <button class="helpful-btn not-helpful"
-                    hx-post="/api/inbox/{{ item.id }}/helpful?helpful=false"
-                    hx-swap="none"
-                    title="This was not helpful">No</button>
+        <div class="context-pack-controls" style="margin-top: 0.5rem;">
+            <div class="helpful-buttons" style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                <button class="btn btn-sm"
+                        style="background: #3b82f6; color: white; border: none;"
+                        hx-post="/api/inbox/{{ item.id }}/rebuild"
+                        hx-target="#inbox-item-{{ item.id }}"
+                        hx-swap="outerHTML"
+                        hx-indicator="#rebuild-spinner-{{ item.id }}"
+                        title="Rebuild with fresh data">
+                    Rebuild
+                </button>
+                <span id="rebuild-spinner-{{ item.id }}" class="htmx-indicator" style="font-size: 0.8rem;">Loading...</span>
+                <span style="font-size: 0.75rem; color: #888; margin-left: 0.5rem;">Helpful?</span>
+                <button class="helpful-btn helpful"
+                        hx-post="/api/inbox/{{ item.id }}/helpful?helpful=true"
+                        hx-swap="none"
+                        title="This was helpful">Yes</button>
+                <button class="helpful-btn not-helpful"
+                        hx-post="/api/inbox/{{ item.id }}/helpful?helpful=false"
+                        hx-swap="none"
+                        title="This was not helpful">No</button>
+            </div>
+
+            <!-- Notes/feedback section -->
+            <details style="margin-top: 0.5rem;">
+                <summary style="cursor: pointer; font-size: 0.85rem; color: #888;">Add notes (helps learning)</summary>
+                <form hx-post="/api/inbox/{{ item.id }}/notes"
+                      hx-swap="none"
+                      style="margin-top: 0.5rem;">
+                    <textarea name="notes"
+                              placeholder="What was missing? What would have been more helpful? Any corrections?"
+                              style="width: 100%; min-height: 60px; font-size: 0.85rem; padding: 0.5rem; border: 1px solid #444; border-radius: 4px; background: var(--bg-secondary); color: var(--text);"></textarea>
+                    <button type="submit" class="btn btn-sm" style="margin-top: 0.25rem;">Save Notes</button>
+                </form>
+            </details>
         </div>
         {% endif %}
     </div>

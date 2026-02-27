@@ -54,6 +54,9 @@ class GraphObserver:
             pending_emails,
             upcoming_calendar,
             projects_with_recent_blocks,
+            approaching_commitments,
+            overdue_commitments,
+            stale_commitments,
         ) = await asyncio.gather(
             self._get_inbox_items(),
             self.get_recent_changes(),
@@ -68,6 +71,9 @@ class GraphObserver:
             self.get_actionable_emails(),
             self.get_pending_calendar_blocks(),
             self.get_projects_with_recent_blocks(),
+            self.get_approaching_commitments(),
+            self.get_overdue_commitments(),
+            self.get_stale_commitments(),
             return_exceptions=True,
         )
 
@@ -98,6 +104,10 @@ class GraphObserver:
             "projects_with_recent_blocks": unwrap(projects_with_recent_blocks, set()),
             # Firewall inbox - captured items needing triage
             "inbox_items": unwrap(inbox_items, []),
+            # Commitment ledger (WP5)
+            "approaching_commitments": unwrap(approaching_commitments, []),
+            "overdue_commitments": unwrap(overdue_commitments, []),
+            "stale_commitments": unwrap(stale_commitments, []),
         }
 
         # Build summary
@@ -106,17 +116,29 @@ class GraphObserver:
             "total_changes_24h": len(context["recent_changes"]),
             "stale_tasks": len([i for i in context["stale_items"] if i["type"] == "Task"]),
             "stale_projects": len([i for i in context["stale_items"] if i["type"] == "Project"]),
-            "orphaned_documents": len([n for n in context["orphaned_nodes"] if n["type"] == "Document"]),
-            "goals_needing_attention": len([g for g in context["goal_health"] if g.get("needs_attention")]),
-            "projects_needing_attention": len([p for p in context["project_health"] if p.get("needs_attention")]),
+            "orphaned_documents": len(
+                [n for n in context["orphaned_nodes"] if n["type"] == "Document"]
+            ),
+            "goals_needing_attention": len(
+                [g for g in context["goal_health"] if g.get("needs_attention")]
+            ),
+            "projects_needing_attention": len(
+                [p for p in context["project_health"] if p.get("needs_attention")]
+            ),
             "pending_task_count": len(context["pending_tasks"]),
             "connection_opportunities": len(context["connection_opportunities"]),
             # Digital twin actionable items
             "emails_needing_response": len(context["pending_emails"]),
-            "meetings_needing_prep": len([c for c in context["upcoming_calendar"] if c.get("needs_context")]),
+            "meetings_needing_prep": len(
+                [c for c in context["upcoming_calendar"] if c.get("needs_context")]
+            ),
             "has_writing_samples": len(context["writing_samples"]) > 0,
             # Firewall inbox
             "inbox_count": len(inbox_items),
+            # Commitment ledger
+            "approaching_commitment_count": len(context["approaching_commitments"]),
+            "overdue_commitment_count": len(context["overdue_commitments"]),
+            "stale_commitment_count": len(context["stale_commitments"]),
         }
 
         return context
@@ -136,7 +158,9 @@ class GraphObserver:
                     "subject": item.subject,
                     "preview": item.preview[:150] if item.preview else "",
                     "suggested": item.suggested_action,
-                    "urgency": item.urgency.value if hasattr(item.urgency, 'value') else str(item.urgency),
+                    "urgency": item.urgency.value
+                    if hasattr(item.urgency, "value")
+                    else str(item.urgency),
                 }
                 for item in items
             ]
@@ -223,10 +247,7 @@ class GraphObserver:
         LIMIT 10
         """
         try:
-            return await run_query(query, {
-                "task_days": task_days,
-                "project_days": project_days
-            })
+            return await run_query(query, {"task_days": task_days, "project_days": project_days})
         except Exception as e:
             logger.warning("Failed to get stale items", error=str(e))
             return []
@@ -242,12 +263,24 @@ class GraphObserver:
         settings = get_settings()
 
         # Parse exclusion patterns from config
-        name_patterns = [p.strip() for p in settings.orphan_exclude_name_patterns.split(",") if p.strip()]
-        mime_patterns = [p.strip() for p in settings.orphan_exclude_mime_types.split(",") if p.strip()]
+        name_patterns = [
+            p.strip() for p in settings.orphan_exclude_name_patterns.split(",") if p.strip()
+        ]
+        mime_patterns = [
+            p.strip() for p in settings.orphan_exclude_mime_types.split(",") if p.strip()
+        ]
 
         # Build exclusion conditions for Cypher
-        name_exclusions = " AND ".join([f"NOT d.name STARTS WITH '{p}'" for p in name_patterns]) if name_patterns else "true"
-        mime_exclusions = " AND ".join([f"NOT d.mime_type STARTS WITH '{p}'" for p in mime_patterns]) if mime_patterns else "true"
+        name_exclusions = (
+            " AND ".join([f"NOT d.name STARTS WITH '{p}'" for p in name_patterns])
+            if name_patterns
+            else "true"
+        )
+        mime_exclusions = (
+            " AND ".join([f"NOT d.mime_type STARTS WITH '{p}'" for p in mime_patterns])
+            if mime_patterns
+            else "true"
+        )
 
         query = f"""
         // Documents not linked to any project (excluding configured patterns)
@@ -584,7 +617,7 @@ class GraphObserver:
             opportunities.extend(data)
 
         # Sort by relevance and deduplicate
-        opportunities.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
+        opportunities.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
         return opportunities[:30]
 
     async def get_graph_stats(self) -> dict:
@@ -873,6 +906,7 @@ class GraphObserver:
             if not full_body or len(full_body) < 100:
                 try:
                     from cognitex.services.gmail import GmailService, extract_email_body
+
                     gmail = GmailService()
                     full_message = gmail.get_message(gmail_id, format="full")
                     full_body = extract_email_body(full_message, max_length=10000)
@@ -926,11 +960,13 @@ class GraphObserver:
                             """
                             doc_data = await run_query_single(doc_query, {"drive_id": drive_id})
                             if doc_data:
-                                context["related_documents"].append({
-                                    **doc_data,
-                                    "relevance": chunk.get("similarity", 0.5),
-                                    "matched_content": chunk.get("content", "")[:200],
-                                })
+                                context["related_documents"].append(
+                                    {
+                                        **doc_data,
+                                        "relevance": chunk.get("similarity", 0.5),
+                                        "matched_content": chunk.get("content", "")[:200],
+                                    }
+                                )
                 except Exception as e:
                     logger.warning("Failed to search related documents", error=str(e))
 
@@ -959,14 +995,21 @@ class GraphObserver:
                 # Extract first significant word from subject for keyword matching
                 subject = email_dict.get("subject", "")
                 subject_keyword = next(
-                    (w for w in subject.split() if len(w) > 4 and w.lower() not in ["about", "follow", "update"]),
-                    subject[:20]
+                    (
+                        w
+                        for w in subject.split()
+                        if len(w) > 4 and w.lower() not in ["about", "follow", "update"]
+                    ),
+                    subject[:20],
                 )
-                context["related_tasks"] = await run_query(task_query, {
-                    "gmail_id": gmail_id,
-                    "sender_email": sender_email,
-                    "subject_keyword": subject_keyword,
-                })
+                context["related_tasks"] = await run_query(
+                    task_query,
+                    {
+                        "gmail_id": gmail_id,
+                        "sender_email": sender_email,
+                        "subject_keyword": subject_keyword,
+                    },
+                )
 
             # 6. Get sender relationship context
             if sender_email:
@@ -994,9 +1037,18 @@ class GraphObserver:
             # 7. Extract action items from the email body using simple pattern matching
             if context["full_body"]:
                 action_patterns = [
-                    "please ", "could you ", "can you ", "would you ",
-                    "need to ", "should ", "must ", "by ", "deadline",
-                    "action required", "follow up", "let me know",
+                    "please ",
+                    "could you ",
+                    "can you ",
+                    "would you ",
+                    "need to ",
+                    "should ",
+                    "must ",
+                    "by ",
+                    "deadline",
+                    "action required",
+                    "follow up",
+                    "let me know",
                 ]
                 body_lower = context["full_body"].lower()
                 sentences = context["full_body"].split(".")
@@ -1133,8 +1185,12 @@ class GraphObserver:
                 "on_time_rate": round(on_time_count / total * 100, 1) if total > 0 else 0,
                 "last_minute_rate": round(
                     patterns["timing_distribution"].get("last_minute", {}).get("count", 0)
-                    / total * 100, 1
-                ) if total > 0 else 0,
+                    / total
+                    * 100,
+                    1,
+                )
+                if total > 0
+                else 0,
             }
 
             logger.debug("Computed deadline patterns", summary=patterns["summary"])
@@ -1164,7 +1220,8 @@ class GraphObserver:
 
             async for session in get_session():
                 # Overall stats
-                result = await session.execute(text("""
+                result = await session.execute(
+                    text("""
                     SELECT
                         COUNT(*) as total,
                         COUNT(*) FILTER (WHERE deferral_count > 0) as deferred_any,
@@ -1173,7 +1230,8 @@ class GraphObserver:
                         AVG(deferral_count) FILTER (WHERE deferral_count > 0) as avg_deferrals
                     FROM tasks
                     WHERE status IN ('pending', 'in_progress', 'completed')
-                """))
+                """)
+                )
                 row = result.fetchone()
                 if row:
                     patterns["overall"] = {
@@ -1181,21 +1239,23 @@ class GraphObserver:
                         "deferred_any": row.deferred_any or 0,
                         "deferred_multiple": row.deferred_multiple or 0,
                         "chronic_deferrals": row.chronic_deferrals or 0,
-                        "deferral_rate": round(
-                            (row.deferred_any or 0) / row.total * 100, 1
-                        ) if row.total > 0 else 0,
+                        "deferral_rate": round((row.deferred_any or 0) / row.total * 100, 1)
+                        if row.total > 0
+                        else 0,
                         "avg_deferrals_when_deferred": round(row.avg_deferrals or 0, 1),
                     }
 
                 # High deferral tasks (still pending)
-                result = await session.execute(text("""
+                result = await session.execute(
+                    text("""
                     SELECT id, title, deferral_count, project_id, priority, estimated_minutes
                     FROM tasks
                     WHERE status = 'pending'
                       AND deferral_count >= 2
                     ORDER BY deferral_count DESC
                     LIMIT 10
-                """))
+                """)
+                )
                 patterns["high_deferral_tasks"] = [
                     {
                         "id": row.id,
@@ -1351,6 +1411,7 @@ class GraphObserver:
             # 2. Get user's peak hours from temporal model
             try:
                 from cognitex.agent.state_model import get_temporal_model
+
                 temporal = get_temporal_model()
                 peak_hours = temporal.get_peak_hours()
             except Exception:
@@ -1376,10 +1437,16 @@ class GraphObserver:
                     start = event.get("start", {}).get("dateTime")
                     end = event.get("end", {}).get("dateTime")
                     if start and end:
-                        busy_slots.append({
-                            "start": datetime.fromisoformat(start.replace("Z", "+00:00").replace("+00:00", "")),
-                            "end": datetime.fromisoformat(end.replace("Z", "+00:00").replace("+00:00", "")),
-                        })
+                        busy_slots.append(
+                            {
+                                "start": datetime.fromisoformat(
+                                    start.replace("Z", "+00:00").replace("+00:00", "")
+                                ),
+                                "end": datetime.fromisoformat(
+                                    end.replace("Z", "+00:00").replace("+00:00", "")
+                                ),
+                            }
+                        )
             except Exception as e:
                 logger.debug("Could not check calendar", error=str(e))
                 busy_slots = []
@@ -1398,17 +1465,19 @@ class GraphObserver:
                     days_ahead=i,  # Spread across days
                 )
 
-                suggestions.append({
-                    "task_id": task.get("task_id"),
-                    "task_title": task.get("task_title"),
-                    "project_id": task.get("project_id"),
-                    "project_title": task.get("project_title"),
-                    "goal_title": task.get("goal_title"),
-                    "suggested_time": suggested_time,
-                    "duration_hours": duration_hours,
-                    "urgency_score": task.get("urgency_score"),
-                    "reason": self._generate_block_reason(task),
-                })
+                suggestions.append(
+                    {
+                        "task_id": task.get("task_id"),
+                        "task_title": task.get("task_title"),
+                        "project_id": task.get("project_id"),
+                        "project_title": task.get("project_title"),
+                        "goal_title": task.get("goal_title"),
+                        "suggested_time": suggested_time,
+                        "duration_hours": duration_hours,
+                        "urgency_score": task.get("urgency_score"),
+                        "reason": self._generate_block_reason(task),
+                    }
+                )
 
             return suggestions
 
@@ -1436,7 +1505,7 @@ class GraphObserver:
             # Check if this slot is free
             is_free = True
             for slot in busy_slots:
-                if (candidate_start < slot["end"] and candidate_end > slot["start"]):
+                if candidate_start < slot["end"] and candidate_end > slot["start"]:
                     is_free = False
                     break
 
@@ -1445,8 +1514,7 @@ class GraphObserver:
 
         # Fallback to next day morning
         fallback = datetime.combine(
-            base_date + timedelta(days=1),
-            datetime.min.time().replace(hour=9)
+            base_date + timedelta(days=1), datetime.min.time().replace(hour=9)
         )
         return fallback.isoformat()
 
@@ -1602,9 +1670,9 @@ class GraphObserver:
                 "blocking_task_count": len(insights["blocking_tasks"]),
                 "chronic_deferral_count": len(insights["chronic_deferrals"]),
                 "needs_attention": (
-                    len(insights["stalled_projects"]) > 0 or
-                    len(insights["blocking_tasks"]) > 0 or
-                    len(insights["chronic_deferrals"]) >= 3
+                    len(insights["stalled_projects"]) > 0
+                    or len(insights["blocking_tasks"]) > 0
+                    or len(insights["chronic_deferrals"]) >= 3
                 ),
             }
 
@@ -1622,14 +1690,14 @@ class GraphObserver:
         """
         Extract implied commitments from recent sent emails.
 
-        Looks for patterns like:
-        - "I'll send you X by Friday"
-        - "Let me get back to you on that"
-        - "I'll review and respond"
+        Creates Commitment nodes in Neo4j and inbox items for user approval.
 
         Returns:
-            List of potential commitments with source email and extracted commitment
+            List of created commitments with source email and extracted commitment
         """
+        import json
+        import uuid
+
         from cognitex.db.neo4j import run_query
         from cognitex.services.llm import get_llm_service
 
@@ -1648,15 +1716,23 @@ class GraphObserver:
             ORDER BY e.date DESC
             LIMIT $limit
             """
-            sent_emails = await run_query(sent_query, {
-                "days_back": days_back,
-                "limit": limit
-            })
+            sent_emails = await run_query(sent_query, {"days_back": days_back, "limit": limit})
 
             if not sent_emails:
                 return []
 
-            # Use LLM to extract commitments
+            # Load commitment-extraction skill for prompt guidance
+            skill_content = ""
+            try:
+                from cognitex.agent.skills import get_skills_loader
+
+                loader = get_skills_loader()
+                skill = await loader.get_skill("commitment-extraction")
+                if skill:
+                    skill_content = skill.raw_content
+            except Exception:
+                pass
+
             llm = get_llm_service()
             commitments = []
 
@@ -1667,48 +1743,246 @@ class GraphObserver:
 
                 # Quick heuristic check for commitment language
                 commitment_keywords = [
-                    "i'll", "i will", "let me", "i can", "i should",
-                    "by tomorrow", "by friday", "by monday", "this week",
-                    "get back to you", "send you", "follow up"
+                    "i'll",
+                    "i will",
+                    "let me",
+                    "i can",
+                    "i should",
+                    "by tomorrow",
+                    "by friday",
+                    "by monday",
+                    "this week",
+                    "get back to you",
+                    "send you",
+                    "follow up",
                 ]
                 body_lower = body.lower()
                 if not any(kw in body_lower for kw in commitment_keywords):
                     continue
 
-                # Extract commitments with LLM
-                extract_prompt = f"""Analyze this sent email and extract any commitments or promises made.
+                gmail_id = email.get("gmail_id", "")
 
-EMAIL TO: {email.get('recipient', 'Unknown')}
-SUBJECT: {email.get('subject', 'No subject')}
+                # Deduplicate: skip if commitment already exists for this email
+                existing_query = """
+                MATCH (c:Commitment {source_id: $gmail_id})
+                RETURN c.id as id LIMIT 1
+                """
+                existing = await run_query(existing_query, {"gmail_id": gmail_id})
+                if existing:
+                    continue
+
+                # Build extraction prompt with skill guidance
+                if skill_content:
+                    extract_prompt = f"""{skill_content}
+
+---
+
+Analyze this sent email and extract commitments per the rules above.
+
+EMAIL TO: {email.get("recipient", "Unknown")}
+SUBJECT: {email.get("subject", "No subject")}
+
+BODY:
+{body[:2000]}
+
+Return ONLY the JSON, nothing else.
+"""
+                else:
+                    extract_prompt = f"""Analyze this sent email and extract any commitments or promises made.
+
+EMAIL TO: {email.get("recipient", "Unknown")}
+SUBJECT: {email.get("subject", "No subject")}
 
 BODY:
 {body[:2000]}
 
 If commitments exist, return JSON:
-{{"commitments": [{{"action": "what was promised", "deadline": "when (if mentioned)", "recipient": "to whom"}}]}}
+{{"commitments": [{{"action": "what was promised", "deadline": "ISO date or null", "deadline_source": "explicit|inferred|none", "recipient": "to whom", "cognitive_load": "high|medium|low", "confidence": 0.0-1.0}}]}}
 
 If no commitments, return: {{"commitments": []}}
 
 Return ONLY the JSON, nothing else.
 """
+
                 try:
                     result = await llm.complete(extract_prompt, max_tokens=500)
-                    import json
                     parsed = json.loads(result.strip())
-                    for commitment in parsed.get("commitments", []):
-                        commitments.append({
-                            "source_email_id": email.get("gmail_id"),
-                            "email_subject": email.get("subject"),
-                            "email_date": email.get("date"),
-                            "action": commitment.get("action"),
-                            "deadline": commitment.get("deadline"),
-                            "recipient": commitment.get("recipient") or email.get("recipient"),
-                        })
+
+                    for commitment_data in parsed.get("commitments", []):
+                        commitment_id = f"commit_{uuid.uuid4().hex[:12]}"
+                        action = commitment_data.get("action", "")
+                        deadline = commitment_data.get("deadline")
+                        recipient = commitment_data.get("recipient") or email.get("recipient")
+                        cognitive_load = commitment_data.get("cognitive_load", "medium")
+
+                        # Create Commitment node
+                        try:
+                            from cognitex.db.graph_schema import (
+                                create_commitment,
+                                link_commitment_to_email,
+                                link_commitment_to_person,
+                            )
+                            from cognitex.db.neo4j import get_neo4j_session
+
+                            async for session in get_neo4j_session():
+                                await create_commitment(
+                                    session,
+                                    commitment_id=commitment_id,
+                                    task_description=action,
+                                    owner=recipient or "",
+                                    status="pending",
+                                    deadline=deadline,
+                                    cognitive_load=cognitive_load,
+                                    source="email",
+                                    source_id=gmail_id,
+                                )
+                                await link_commitment_to_email(session, commitment_id, gmail_id)
+                                if recipient:
+                                    await link_commitment_to_person(
+                                        session, commitment_id, recipient
+                                    )
+                                break
+                        except Exception as e:
+                            logger.warning(
+                                "Failed to create commitment node",
+                                error=str(e),
+                                commitment_id=commitment_id,
+                            )
+
+                        # Create inbox item for user approval
+                        try:
+                            from cognitex.services.inbox import get_inbox_service
+
+                            inbox = get_inbox_service()
+                            await inbox.create_item(
+                                item_type="commitment_proposal",
+                                title=f"Commitment: {action[:80]}",
+                                summary=(f"From email: {email.get('subject', 'No subject')}"),
+                                payload={
+                                    "commitment_id": commitment_id,
+                                    "action": action,
+                                    "deadline": deadline,
+                                    "deadline_source": commitment_data.get(
+                                        "deadline_source", "none"
+                                    ),
+                                    "recipient": recipient,
+                                    "cognitive_load": cognitive_load,
+                                    "confidence": commitment_data.get("confidence", 0.5),
+                                    "source_email_subject": email.get("subject"),
+                                    "source_email_id": gmail_id,
+                                },
+                                source_id=commitment_id,
+                                source_type="commitment",
+                                priority="normal",
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "Failed to create inbox item for commitment",
+                                error=str(e),
+                            )
+
+                        commitments.append(
+                            {
+                                "commitment_id": commitment_id,
+                                "source_email_id": gmail_id,
+                                "email_subject": email.get("subject"),
+                                "email_date": email.get("date"),
+                                "action": action,
+                                "deadline": deadline,
+                                "recipient": recipient,
+                                "cognitive_load": cognitive_load,
+                            }
+                        )
                 except Exception:
                     continue
 
-            return commitments[:10]  # Limit results
+            return commitments[:10]
 
         except Exception as e:
             logger.warning("Failed to extract commitments", error=str(e))
+            return []
+
+    async def get_approaching_commitments(self, hours: int = 48) -> list[dict]:
+        """Get active commitments with deadlines within the next N hours."""
+        from cognitex.db.neo4j import run_query
+
+        query = """
+        MATCH (c:Commitment)
+        WHERE c.status IN ['accepted', 'in_progress']
+          AND c.deadline IS NOT NULL
+          AND c.deadline > datetime()
+          AND c.deadline <= datetime() + duration({hours: $hours})
+        OPTIONAL MATCH (c)-[:COMMITTED_TO]->(p:Project)
+        OPTIONAL MATCH (c)-[:WAITING_ON]->(w:Person)
+        RETURN
+            c.id as id,
+            c.task_description as description,
+            c.deadline as deadline,
+            c.status as status,
+            c.owner as owner,
+            c.cognitive_load as cognitive_load,
+            p.title as project,
+            w.email as waiting_on
+        ORDER BY c.deadline ASC
+        """
+        try:
+            return await run_query(query, {"hours": hours})
+        except Exception as e:
+            logger.warning("Failed to get approaching commitments", error=str(e))
+            return []
+
+    async def get_overdue_commitments(self) -> list[dict]:
+        """Get active commitments with deadlines in the past."""
+        from cognitex.db.neo4j import run_query
+
+        query = """
+        MATCH (c:Commitment)
+        WHERE c.status IN ['accepted', 'in_progress']
+          AND c.deadline IS NOT NULL
+          AND c.deadline < datetime()
+        OPTIONAL MATCH (c)-[:COMMITTED_TO]->(p:Project)
+        OPTIONAL MATCH (c)-[:WAITING_ON]->(w:Person)
+        RETURN
+            c.id as id,
+            c.task_description as description,
+            c.deadline as deadline,
+            c.status as status,
+            c.owner as owner,
+            c.cognitive_load as cognitive_load,
+            p.title as project,
+            w.email as waiting_on
+        ORDER BY c.deadline ASC
+        """
+        try:
+            return await run_query(query, {})
+        except Exception as e:
+            logger.warning("Failed to get overdue commitments", error=str(e))
+            return []
+
+    async def get_stale_commitments(self, days: int = 7) -> list[dict]:
+        """Get blocked or waiting_on commitments not updated in N days."""
+        from cognitex.db.neo4j import run_query
+
+        query = """
+        MATCH (c:Commitment)
+        WHERE c.status IN ['blocked', 'waiting_on']
+          AND c.updated_at < datetime() - duration({days: $days})
+        OPTIONAL MATCH (c)-[:COMMITTED_TO]->(p:Project)
+        OPTIONAL MATCH (c)-[:WAITING_ON]->(w:Person)
+        RETURN
+            c.id as id,
+            c.task_description as description,
+            c.deadline as deadline,
+            c.status as status,
+            c.owner as owner,
+            c.cognitive_load as cognitive_load,
+            c.updated_at as last_updated,
+            p.title as project,
+            w.email as waiting_on
+        ORDER BY c.updated_at ASC
+        """
+        try:
+            return await run_query(query, {"days": days})
+        except Exception as e:
+            logger.warning("Failed to get stale commitments", error=str(e))
             return []

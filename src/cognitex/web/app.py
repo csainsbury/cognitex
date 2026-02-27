@@ -216,6 +216,17 @@ async def lifespan(app: FastAPI):
     # Initialize Phase 4 learning schema
     await init_phase4_schema()
 
+    # Sync LEDGER.yaml -> graph on boot (WP5)
+    try:
+        from cognitex.services.ledger_sync import get_ledger_sync_service
+        ledger = get_ledger_sync_service()
+        await ledger.initialize()
+        changes = await ledger.sync_file_to_graph()
+        if changes:
+            logger.info("Synced LEDGER.yaml to graph on boot", changes=changes)
+    except Exception as e:
+        logger.warning("Failed to sync LEDGER.yaml on boot", error=str(e))
+
     # Initialize notification service (debouncing + deduplication)
     await init_notification_service()
     logger.info("Notification service started (debouncing + deduplication)")
@@ -5256,6 +5267,18 @@ async def approve_inbox_item(item_id: str):
         from cognitex.agent.action_log import approve_proposal
         if item.source_id:
             await approve_proposal(item.source_id)
+    elif item.item_type == "commitment_proposal":
+        # Accept commitment: pending -> accepted
+        try:
+            from cognitex.db.graph_schema import update_commitment
+            from cognitex.db.neo4j import get_neo4j_session
+            commitment_id = item.payload.get("commitment_id") or item.source_id
+            if commitment_id:
+                async for session in get_neo4j_session():
+                    await update_commitment(session, commitment_id, status="accepted")
+                    break
+        except Exception as e:
+            logger.warning("Failed to accept commitment", error=str(e))
 
     # Mark item as approved
     await inbox.approve_item(item_id)
@@ -5726,6 +5749,18 @@ async def reject_inbox_item(
     if item.item_type == "task_proposal" and item.source_id:
         from cognitex.agent.action_log import reject_proposal
         await reject_proposal(item.source_id, f"{reason}: {reason_text}" if reason_text else reason)
+    elif item.item_type == "commitment_proposal":
+        # Abandon commitment
+        try:
+            from cognitex.db.graph_schema import update_commitment
+            from cognitex.db.neo4j import get_neo4j_session
+            commitment_id = item.payload.get("commitment_id") or item.source_id
+            if commitment_id:
+                async for session in get_neo4j_session():
+                    await update_commitment(session, commitment_id, status="abandoned")
+                    break
+        except Exception as e:
+            logger.warning("Failed to abandon commitment", error=str(e))
 
     # Mark item as rejected
     await inbox.reject_item(item_id, reason, reason_text)

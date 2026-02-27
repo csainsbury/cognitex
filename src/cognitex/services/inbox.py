@@ -181,6 +181,62 @@ class InboxService:
 
         return item
 
+    async def update_item(
+        self,
+        item_id: str,
+        payload: dict[str, Any] | None = None,
+        summary: str | None = None,
+        priority: str | None = None,
+        title: str | None = None,
+    ) -> bool:
+        """Update an existing inbox item.
+
+        Args:
+            item_id: ID of the item to update
+            payload: New payload data (replaces existing)
+            summary: New summary text
+            priority: New priority level
+            title: New title
+
+        Returns:
+            True if updated successfully
+        """
+        from cognitex.db.postgres import get_session
+
+        updates = []
+        params = {"id": item_id}
+
+        if payload is not None:
+            updates.append("payload = :payload")
+            params["payload"] = json.dumps(payload)
+        if summary is not None:
+            updates.append("summary = :summary")
+            params["summary"] = summary
+        if priority is not None:
+            updates.append("priority = :priority")
+            params["priority"] = priority
+        if title is not None:
+            updates.append("title = :title")
+            params["title"] = title
+
+        if not updates:
+            return True  # Nothing to update
+
+        query = f"UPDATE inbox_items SET {', '.join(updates)} WHERE id = :id"
+
+        async for session in get_session():
+            try:
+                await session.execute(text(query), params)
+                await session.commit()
+                logger.info("Updated inbox item", item_id=item_id)
+                return True
+            except Exception as e:
+                logger.error("Failed to update inbox item", item_id=item_id, error=str(e))
+                return False
+            break
+
+        return False
+
     async def get_item(self, item_id: str) -> InboxItem | None:
         """Get a single inbox item by ID."""
         from cognitex.db.postgres import get_session
@@ -365,6 +421,60 @@ class InboxService:
         Used for items that are no longer relevant (e.g., meeting passed).
         """
         return await self._update_item_status(item_id, "dismissed", "dismissed by user")
+
+    async def clear_old_items(self, days: int = 7) -> int:
+        """Clear inbox items older than specified days.
+
+        Returns the number of items cleared.
+        """
+        from cognitex.db.postgres import get_session
+
+        cleared = 0
+        async for session in get_session():
+            try:
+                result = await session.execute(
+                    text("""
+                        DELETE FROM inbox_items
+                        WHERE created_at < NOW() - INTERVAL ':days days'
+                        RETURNING id
+                    """).bindparams(days=days)
+                )
+                rows = result.fetchall()
+                cleared = len(rows)
+                await session.commit()
+                logger.info("Cleared old inbox items", count=cleared, days=days)
+            except Exception as e:
+                logger.error("Failed to clear old items", error=str(e))
+            break
+
+        return cleared
+
+    async def clear_dismissed(self) -> int:
+        """Clear all dismissed inbox items.
+
+        Returns the number of items cleared.
+        """
+        from cognitex.db.postgres import get_session
+
+        cleared = 0
+        async for session in get_session():
+            try:
+                result = await session.execute(
+                    text("""
+                        DELETE FROM inbox_items
+                        WHERE status = 'dismissed'
+                        RETURNING id
+                    """)
+                )
+                rows = result.fetchall()
+                cleared = len(rows)
+                await session.commit()
+                logger.info("Cleared dismissed inbox items", count=cleared)
+            except Exception as e:
+                logger.error("Failed to clear dismissed items", error=str(e))
+            break
+
+        return cleared
 
     async def _update_item_status(
         self,

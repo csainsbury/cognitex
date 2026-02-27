@@ -61,7 +61,7 @@ class AutonomousAgent:
         await log_action(
             "autonomous_agent_started",
             "system",
-            summary=f"Autonomous agent started with {self.interval_minutes}min interval"
+            summary=f"Autonomous agent started with {self.interval_minutes}min interval",
         )
 
     async def stop(self) -> None:
@@ -92,12 +92,7 @@ class AutonomousAgent:
                 break
             except Exception as e:
                 logger.error("Autonomous agent cycle failed", error=str(e))
-                await log_action(
-                    "autonomous_cycle",
-                    "agent",
-                    status="failed",
-                    error=str(e)
-                )
+                await log_action("autonomous_cycle", "agent", status="failed", error=str(e))
 
             # Wait for next cycle
             await asyncio.sleep(self.interval_minutes * 60)
@@ -148,16 +143,13 @@ class AutonomousAgent:
                 try:
                     result = await self._execute_decision(session, decision, flagged_this_cycle)
                     if result and not result.get("skipped"):
-                        actions_taken.append({
-                            "decision": decision,
-                            "result": result
-                        })
+                        actions_taken.append({"decision": decision, "result": result})
                         action_count += 1
                 except Exception as e:
                     logger.warning(
                         "Decision execution failed",
                         decision_type=decision.get("action"),
-                        error=str(e)
+                        error=str(e),
                     )
 
             break
@@ -172,14 +164,23 @@ class AutonomousAgent:
                 "duration_seconds": cycle_duration,
                 "context_summary": context["summary"],
                 "actions_taken": actions_taken,
-            }
+            },
         )
 
         logger.info(
             "Autonomous agent cycle completed",
             duration_seconds=cycle_duration,
-            actions_taken=len(actions_taken)
+            actions_taken=len(actions_taken),
         )
+
+        # Sync commitment ledger to LEDGER.yaml
+        try:
+            from cognitex.services.ledger_sync import get_ledger_sync_service
+
+            ledger = get_ledger_sync_service()
+            await ledger.sync_graph_to_file()
+        except Exception as e:
+            logger.warning("Failed to sync commitment ledger", error=str(e))
 
         # EVOLVE phase: run skill evolution periodically
         self._cycle_count += 1
@@ -225,11 +226,15 @@ class AutonomousAgent:
         """
         try:
             from cognitex.db.redis import get_redis
+
             redis = get_redis()
             recovery_until = await redis.get("cognitex:clinical_recovery_until")
             if recovery_until:
                 from datetime import datetime
-                recovery_str = recovery_until.decode() if isinstance(recovery_until, bytes) else recovery_until
+
+                recovery_str = (
+                    recovery_until.decode() if isinstance(recovery_until, bytes) else recovery_until
+                )
                 recovery_time = datetime.fromisoformat(recovery_str)
                 return datetime.now() < recovery_time
             return False
@@ -244,7 +249,11 @@ class AutonomousAgent:
             Formatted string describing current user state and energy level
         """
         try:
-            from cognitex.agent.state_model import get_state_estimator, get_temporal_model, ModeRules
+            from cognitex.agent.state_model import (
+                get_state_estimator,
+                get_temporal_model,
+                ModeRules,
+            )
 
             state_estimator = get_state_estimator()
             temporal_model = get_temporal_model()
@@ -345,36 +354,37 @@ class AutonomousAgent:
             inbox_text = "  (Inbox empty)"
 
         # Format writing samples for style learning
-        writing_samples = context.get('writing_samples', [])[:3]
+        writing_samples = context.get("writing_samples", [])[:3]
         if writing_samples:
-            samples_text = "\n\n".join([
-                f"--- Sample {i+1} ---\n{sample[:500]}{'...' if len(sample) > 500 else ''}"
-                for i, sample in enumerate(writing_samples)
-            ])
+            samples_text = "\n\n".join(
+                [
+                    f"--- Sample {i + 1} ---\n{sample[:500]}{'...' if len(sample) > 500 else ''}"
+                    for i, sample in enumerate(writing_samples)
+                ]
+            )
         else:
             samples_text = "(No writing samples available yet)"
 
         # Format pending emails needing response (Hard limit 5, truncate to protect token budget)
-        pending_emails = context.get('pending_emails', [])[:5]
+        pending_emails = context.get("pending_emails", [])[:5]
         if pending_emails:
             email_lines = []
             for e in pending_emails:
-                sender = e.get('sender_name') or e.get('sender_email') or 'Unknown'
+                sender = e.get("sender_name") or e.get("sender_email") or "Unknown"
                 # Truncate snippet and subject to protect token budget
-                snippet = str(e.get('snippet', '') or '')[:300]
-                subject = str(e.get('subject', 'No subject') or 'No subject')[:100]
+                snippet = str(e.get("snippet", "") or "")[:300]
+                subject = str(e.get("subject", "No subject") or "No subject")[:100]
                 if firewall:
                     scan = firewall.scan(f"{subject} {snippet}")
                     if scan.is_clinical and fw_mode == "block":
                         email_lines.append(
-                            f"  - [CLINICAL] From: {sender}"
-                            f" — blocked by clinical firewall"
+                            f"  - [CLINICAL] From: {sender} — blocked by clinical firewall"
                         )
                         continue
                     elif scan.is_clinical:
                         snippet = firewall.filter_text(snippet)
                         subject = firewall.filter_text(subject)
-                urgency = str(e.get('urgency', 'normal')).upper()
+                urgency = str(e.get("urgency", "normal")).upper()
                 email_lines.append(
                     f"  - [{urgency}] From: {sender}\n"
                     f"    Subject: {subject}\n"
@@ -386,12 +396,12 @@ class AutonomousAgent:
             pending_emails_text = "  None pending"
 
         # Format upcoming calendar events
-        upcoming = context.get('upcoming_calendar', [])[:5]
+        upcoming = context.get("upcoming_calendar", [])[:5]
         if upcoming:
             cal_lines = []
             for c in upcoming:
-                needs_prep = "NEEDS CONTEXT" if c.get('needs_context') else "prepared"
-                attendees = ", ".join(c.get('attendees', [])[:3]) or "No attendees"
+                needs_prep = "NEEDS CONTEXT" if c.get("needs_context") else "prepared"
+                attendees = ", ".join(c.get("attendees", [])[:3]) or "No attendees"
                 cal_lines.append(
                     f"  - [{needs_prep}] {c.get('title', 'No title')}\n"
                     f"    ID: {c.get('id')}\n"
@@ -403,67 +413,91 @@ class AutonomousAgent:
             upcoming_calendar_text = "  No upcoming meetings"
 
         # Format connection opportunities with explicit action suggestions
-        opportunities = context.get('connection_opportunities', [])[:10]
+        opportunities = context.get("connection_opportunities", [])[:10]
         opp_lines = []
         for o in opportunities:
-            opp_type = o.get('opportunity_type', '')
-            source_type = o.get('source_type', '')
-            source_id = o.get('source_id', '')
-            source_name = o.get('source_name', '')
-            target_id = o.get('target_id', '')
-            target_name = o.get('target_name', '')
-            reason = o.get('match_reason', 'match')
+            opp_type = o.get("opportunity_type", "")
+            source_type = o.get("source_type", "")
+            source_id = o.get("source_id", "")
+            source_name = o.get("source_name", "")
+            target_id = o.get("target_id", "")
+            target_name = o.get("target_name", "")
+            reason = o.get("match_reason", "match")
 
             # Map to explicit action with params
-            if 'document_project' in opp_type:
+            if "document_project" in opp_type:
                 action = f'LINK_DOCUMENT with document_id="{source_id}", document_name="{source_name}", project_id="{target_id}", project_name="{target_name}"'
-            elif 'repository_project' in opp_type:
+            elif "repository_project" in opp_type:
                 action = f'LINK_REPOSITORY with repository_id="{source_id}", repository_name="{source_name}", project_id="{target_id}", project_name="{target_name}"'
-            elif 'task_project' in opp_type:
+            elif "task_project" in opp_type:
                 action = f'LINK_TASK with task_id="{source_id}", task_name="{source_name}", project_id="{target_id}", project_name="{target_name}"'
-            elif 'project_goal' in opp_type:
+            elif "project_goal" in opp_type:
                 action = f'LINK_PROJECT_TO_GOAL with project_id="{source_id}", project_name="{source_name}", goal_id="{target_id}", goal_name="{target_name}"'
             else:
-                action = f'{source_type} "{source_name}" -> {o.get("target_type", "")} "{target_name}"'
+                action = (
+                    f'{source_type} "{source_name}" -> {o.get("target_type", "")} "{target_name}"'
+                )
 
             opp_lines.append(f"  - {action} ({reason})")
 
         opp_text = "\n".join(opp_lines) if opp_lines else "  None found"
 
         # Format goals needing attention
-        goals_text = "\n".join([
-            f"  - '{g.get('title')}' (id: {g.get('id')}) - {g.get('status_reason')}"
-            for g in context.get('goal_health', []) if g.get('needs_attention')
-        ][:5]) or "  None"
+        goals_text = (
+            "\n".join(
+                [
+                    f"  - '{g.get('title')}' (id: {g.get('id')}) - {g.get('status_reason')}"
+                    for g in context.get("goal_health", [])
+                    if g.get("needs_attention")
+                ][:5]
+            )
+            or "  None"
+        )
 
         # Format projects needing attention
-        projects_text = "\n".join([
-            f"  - '{p.get('title')}' (id: {p.get('id')}) - {p.get('status_reason')}, {p.get('total_tasks')} tasks, {p.get('overdue_count', 0)} overdue"
-            for p in context.get('project_health', []) if p.get('needs_attention')
-        ][:5]) or "  None"
+        projects_text = (
+            "\n".join(
+                [
+                    f"  - '{p.get('title')}' (id: {p.get('id')}) - {p.get('status_reason')}, {p.get('total_tasks')} tasks, {p.get('overdue_count', 0)} overdue"
+                    for p in context.get("project_health", [])
+                    if p.get("needs_attention")
+                ][:5]
+            )
+            or "  None"
+        )
 
         # Format orphaned items
-        orphaned_text = "\n".join([
-            f"  - {o.get('type')} '{o.get('label')}' (id: {o.get('id')}) - {o.get('issue')}"
-            for o in context.get('orphaned_nodes', [])
-        ][:8]) or "  None"
+        orphaned_text = (
+            "\n".join(
+                [
+                    f"  - {o.get('type')} '{o.get('label')}' (id: {o.get('id')}) - {o.get('issue')}"
+                    for o in context.get("orphaned_nodes", [])
+                ][:8]
+            )
+            or "  None"
+        )
 
         # Build skip list (items already actioned - don't re-suggest)
         skip_lines = []
-        projects_with_blocks = context.get('projects_with_recent_blocks', set())
+        projects_with_blocks = context.get("projects_with_recent_blocks", set())
         if projects_with_blocks:
-            skip_lines.append(f"- Projects with recent focus blocks (skip SCHEDULE_BLOCK): {', '.join(list(projects_with_blocks)[:5])}")
+            skip_lines.append(
+                f"- Projects with recent focus blocks (skip SCHEDULE_BLOCK): {', '.join(list(projects_with_blocks)[:5])}"
+            )
         skip_list_text = "\n".join(skip_lines) if skip_lines else "  (none)"
 
         # Get recent notification history so agent can avoid repetitive notifications
         from cognitex.agent.action_log import get_recent_notifications, get_recent_rejections
+
         recent_notifications = await get_recent_notifications(hours=48)
 
         # Format notification history for context
         if recent_notifications:
             notif_lines = []
             for n in recent_notifications[:20]:  # Last 20 notifications
-                notif_lines.append(f"  - [{n['timestamp']}] {n['action_type']}: {n['summary'][:100] if n.get('summary') else 'No summary'}")
+                notif_lines.append(
+                    f"  - [{n['timestamp']}] {n['action_type']}: {n['summary'][:100] if n.get('summary') else 'No summary'}"
+                )
             notification_history_text = "\n".join(notif_lines)
         else:
             notification_history_text = "  (No recent notifications)"
@@ -477,6 +511,7 @@ class AutonomousAgent:
         # 1. High-level insights from learning system
         try:
             from cognitex.agent.learning import get_learning_system
+
             ls = get_learning_system()
             if ls:
                 learning_summary = await ls.get_learning_summary()
@@ -490,7 +525,9 @@ class AutonomousAgent:
                 avg_error = calibration.get("average_estimation_error")
                 if avg_error is not None and abs(avg_error) > 0.2:
                     direction = "underestimate" if avg_error > 0 else "overestimate"
-                    learned_lines.append(f"- Time estimates tend to {direction} by {abs(avg_error):.0%}")
+                    learned_lines.append(
+                        f"- Time estimates tend to {direction} by {abs(avg_error):.0%}"
+                    )
         except Exception as e:
             logger.debug("Failed to get learning insights", error=str(e))
 
@@ -498,6 +535,7 @@ class AutonomousAgent:
         # These rules have been validated through actual feedback
         try:
             from cognitex.agent.decision_memory import get_decision_memory
+
             dm = get_decision_memory()
             if dm and dm.rules:
                 # Get quality-weighted rules for prompt injection
@@ -505,21 +543,24 @@ class AutonomousAgent:
                 if weighted_rules:
                     learned_lines.append("\n### Validated Preferences (follow these)")
                     for rule in weighted_rules:
-                        lifecycle_badge = "[PROVEN]" if rule["lifecycle"] == "validated" else "[LIKELY]"
-                        success = f"{rule['success_rate']:.0f}%" if rule.get("success_rate") else "N/A"
+                        lifecycle_badge = (
+                            "[PROVEN]" if rule["lifecycle"] == "validated" else "[LIKELY]"
+                        )
+                        success = (
+                            f"{rule['success_rate']:.0f}%" if rule.get("success_rate") else "N/A"
+                        )
                         learned_lines.append(
                             f"- {lifecycle_badge} {rule['guidance']} (success: {success}, uses: {rule['applications']})"
                         )
                 else:
                     # Fall back to basic matching rules if no weighted rules
                     rules = await dm.rules.get_matching_rules(
-                        context={"trigger_type": "autonomous_cycle"},
-                        rule_type="action_preference"
+                        context={"trigger_type": "autonomous_cycle"}, rule_type="action_preference"
                     )
                     if rules:
                         learned_lines.append("\n### Learned Preferences")
                         for rule in rules[:5]:
-                            conf = rule.get('confidence', 0)
+                            conf = rule.get("confidence", 0)
                             learned_lines.append(f"- {rule['rule_name']} (confidence: {conf:.0%})")
         except Exception as e:
             logger.debug("Failed to get preference rules", error=str(e))
@@ -530,8 +571,8 @@ class AutonomousAgent:
             if rejections:
                 learned_lines.append("\n### Recently Rejected (DO NOT REPEAT)")
                 for r in rejections:
-                    title = r.get('title', 'Unknown')
-                    reason = r.get('rejection_reason') or r.get('reason') or 'No reason given'
+                    title = r.get("title", "Unknown")
+                    reason = r.get("rejection_reason") or r.get("reason") or "No reason given"
                     learned_lines.append(f"- Rejected: '{title}' - Reason: {reason}")
         except Exception as e:
             logger.debug("Failed to get recent rejections", error=str(e))
@@ -539,10 +580,13 @@ class AutonomousAgent:
         # 4. Proposal patterns - what gets approved vs rejected
         try:
             from cognitex.agent.action_log import get_proposal_patterns
+
             patterns = await get_proposal_patterns(min_samples=3)
             low_approval = []
             for priority, data in patterns.get("by_priority", {}).items():
-                rate = data.get("approved", 0) / max(data.get("approved", 0) + data.get("rejected", 0), 1)
+                rate = data.get("approved", 0) / max(
+                    data.get("approved", 0) + data.get("rejected", 0), 1
+                )
                 if rate < 0.3 and data.get("rejected", 0) >= 2:
                     low_approval.append(f"{priority} priority tasks ({rate:.0%} approval)")
             if low_approval:
@@ -591,7 +635,11 @@ class AutonomousAgent:
         except Exception as e:
             logger.debug("Failed to get feedback learning context", error=str(e))
 
-        learned_guidelines = "\n".join(learned_lines) if learned_lines else "(No specific guidelines yet - keep learning from feedback)"
+        learned_guidelines = (
+            "\n".join(learned_lines)
+            if learned_lines
+            else "(No specific guidelines yet - keep learning from feedback)"
+        )
 
         # =====================================================================
         # EXPERTISE CONTEXT - Agent's mental models for specific domains
@@ -599,6 +647,7 @@ class AutonomousAgent:
         expertise_text = ""
         try:
             from cognitex.agent.expertise import get_expertise_manager
+
             em = get_expertise_manager()
 
             # Build context from current work for relevant expertise search
@@ -648,13 +697,13 @@ class AutonomousAgent:
             # Bootstrap context (personality, safety, memory)
             bootstrap_section=bootstrap_section,
             # Summary stats
-            inbox_count=summary.get('inbox_count', 0),
-            emails_needing_response=summary.get('emails_needing_response', 0),
-            meetings_needing_prep=summary.get('meetings_needing_prep', 0),
-            connection_opportunities=summary['connection_opportunities'],
-            pending_task_count=summary['pending_task_count'],
-            goals_needing_attention=summary['goals_needing_attention'],
-            projects_needing_attention=summary['projects_needing_attention'],
+            inbox_count=summary.get("inbox_count", 0),
+            emails_needing_response=summary.get("emails_needing_response", 0),
+            meetings_needing_prep=summary.get("meetings_needing_prep", 0),
+            connection_opportunities=summary["connection_opportunities"],
+            pending_task_count=summary["pending_task_count"],
+            goals_needing_attention=summary["goals_needing_attention"],
+            projects_needing_attention=summary["projects_needing_attention"],
             # Formatted content sections
             inbox_text=inbox_text,
             writing_samples_text=samples_text,
@@ -724,33 +773,43 @@ class AutonomousAgent:
                     else:
                         # Flat params - extract all non-action/reason keys as params
                         params = {k: v for k, v in d.items() if k not in ("action", "reason")}
-                        normalized.append({
-                            "action": action,
-                            "params": params,
-                            "reason": d.get("reason", "")
-                        })
+                        normalized.append(
+                            {"action": action, "params": params, "reason": d.get("reason", "")}
+                        )
                 else:
                     # Find action type key (LINK_*, CREATE_*, FLAG_*, DRAFT_*, COMPILE_*, SCHEDULE_*)
                     action_type = None
                     params = {}
                     reason = d.get("reason", "")
                     for key in d:
-                        if key.startswith(("LINK_", "CREATE_", "FLAG_", "UPDATE_", "DRAFT_", "COMPILE_", "SCHEDULE_")):
+                        if key.startswith(
+                            (
+                                "LINK_",
+                                "CREATE_",
+                                "FLAG_",
+                                "UPDATE_",
+                                "DRAFT_",
+                                "COMPILE_",
+                                "SCHEDULE_",
+                            )
+                        ):
                             action_type = key
                             params = d[key] if isinstance(d[key], dict) else {}
                             break
                     if action_type:
-                        normalized.append({
-                            "action": action_type,
-                            "params": params,
-                            "reason": reason
-                        })
+                        normalized.append(
+                            {"action": action_type, "params": params, "reason": reason}
+                        )
 
             logger.info("LLM reasoning complete", decisions_count=len(normalized))
             return normalized
 
         except json.JSONDecodeError as e:
-            logger.warning("Failed to parse LLM response as JSON", error=str(e), response=response[:500] if response else None)
+            logger.warning(
+                "Failed to parse LLM response as JSON",
+                error=str(e),
+                response=response[:500] if response else None,
+            )
             return []
         except Exception as e:
             logger.error("LLM reasoning failed", error=str(e), exc_info=True)
@@ -799,10 +858,13 @@ class AutonomousAgent:
         # Check if similar proposal was recently rejected
         if action in ("CREATE_TASK", "DRAFT_EMAIL"):
             from cognitex.agent.action_log import should_suppress_proposal
+
             content = params.get("title", "") + " " + params.get("description", "")
             suppress, suppress_reason = await should_suppress_proposal(action.lower(), content)
             if suppress:
-                logger.info("Suppressing proposal based on rejection patterns", reason=suppress_reason)
+                logger.info(
+                    "Suppressing proposal based on rejection patterns", reason=suppress_reason
+                )
                 return False, suppress_reason
 
         return True, None
@@ -819,8 +881,7 @@ class AutonomousAgent:
                 id_field = "id"
 
             result = await session.run(
-                f"MATCH (n:{label}) WHERE n.{id_field} = $id RETURN n LIMIT 1",
-                {"id": entity_id}
+                f"MATCH (n:{label}) WHERE n.{id_field} = $id RETURN n LIMIT 1", {"id": entity_id}
             )
             record = await result.single()
             return record is not None
@@ -847,7 +908,9 @@ class AutonomousAgent:
             from cognitex.services.calendar import CalendarService
 
             # Parse start time
-            start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00").replace("+00:00", ""))
+            start_dt = datetime.fromisoformat(
+                start_time.replace("Z", "+00:00").replace("+00:00", "")
+            )
             end_dt = start_dt + timedelta(minutes=duration_minutes)
 
             # Check existing events (wrap blocking API call in thread)
@@ -865,12 +928,19 @@ class AutonomousAgent:
                 if not event_start or not event_end:
                     continue
 
-                event_start_dt = datetime.fromisoformat(event_start.replace("Z", "+00:00").replace("+00:00", ""))
-                event_end_dt = datetime.fromisoformat(event_end.replace("Z", "+00:00").replace("+00:00", ""))
+                event_start_dt = datetime.fromisoformat(
+                    event_start.replace("Z", "+00:00").replace("+00:00", "")
+                )
+                event_end_dt = datetime.fromisoformat(
+                    event_end.replace("Z", "+00:00").replace("+00:00", "")
+                )
 
                 # Check for overlap
                 if start_dt < event_end_dt and end_dt > event_start_dt:
-                    return True, f"Conflicts with '{event.get('summary', 'event')}' at {event_start}"
+                    return (
+                        True,
+                        f"Conflicts with '{event.get('summary', 'event')}' at {event_start}",
+                    )
 
             return False, None
 
@@ -964,7 +1034,7 @@ class AutonomousAgent:
                     "resolution": resolution,
                     "reason": reason,
                     "follow_up_action": follow_up_action,
-                }
+                },
             )
 
             logger.info(
@@ -997,18 +1067,16 @@ class AutonomousAgent:
         RETURN d.name as doc_name, p.title as project_title
         """
         try:
-            result = await session.run(query, {
-                "doc_id": doc_id,
-                "project_id": project_id,
-                "reason": reason
-            })
+            result = await session.run(
+                query, {"doc_id": doc_id, "project_id": project_id, "reason": reason}
+            )
             data = await result.single()
             if data:
                 await log_action(
                     "link_document",
                     "agent",
                     summary=f"Linked '{data['doc_name']}' to '{data['project_title']}'",
-                    details={"document_id": doc_id, "project_id": project_id, "reason": reason}
+                    details={"document_id": doc_id, "project_id": project_id, "reason": reason},
                 )
                 return {"linked": True, "doc": data["doc_name"], "project": data["project_title"]}
         except Exception as e:
@@ -1053,7 +1121,10 @@ class AutonomousAgent:
                     existing_project=data["existing_project"],
                     proposed_project=project_name,
                 )
-                return {"skipped": True, "reason": f"Already linked to '{data['existing_project']}'"}
+                return {
+                    "skipped": True,
+                    "reason": f"Already linked to '{data['existing_project']}'",
+                }
 
             # For unlinked tasks, flag for human review instead of auto-linking
             await log_action(
@@ -1067,11 +1138,12 @@ class AutonomousAgent:
                     "project_id": project_id,
                     "project_name": project_name,
                     "reason": reason,
-                }
+                },
             )
 
             # Send notification for review (low urgency allows batching)
             from cognitex.services.notifications import publish_notification
+
             await publish_notification(
                 message=(
                     f"**Task Link Suggestion**\n\n"
@@ -1109,11 +1181,9 @@ class AutonomousAgent:
         RETURN r.full_name as repo_name, p.title as project_title
         """
         try:
-            result = await session.run(query, {
-                "repo_id": repo_id,
-                "project_id": project_id,
-                "reason": reason
-            })
+            result = await session.run(
+                query, {"repo_id": repo_id, "project_id": project_id, "reason": reason}
+            )
             data = await result.single()
             if data:
                 await log_action(
@@ -1122,13 +1192,17 @@ class AutonomousAgent:
                     summary=f"Linked repo '{data['repo_name']}' to '{data['project_title']}'",
                     details={
                         "repository_id": repo_id,
-                        "repository_name": repo_name or data['repo_name'],
+                        "repository_name": repo_name or data["repo_name"],
                         "project_id": project_id,
-                        "project_name": project_name or data['project_title'],
-                        "reason": reason
-                    }
+                        "project_name": project_name or data["project_title"],
+                        "reason": reason,
+                    },
                 )
-                return {"linked": True, "repository": data["repo_name"], "project": data["project_title"]}
+                return {
+                    "linked": True,
+                    "repository": data["repo_name"],
+                    "project": data["project_title"],
+                }
         except Exception as e:
             logger.warning("Failed to link repository", error=str(e))
         return None
@@ -1162,7 +1236,10 @@ class AutonomousAgent:
                     project_id=project_id,
                     existing_goal=existing["existing_goal_title"],
                 )
-                return {"skipped": True, "reason": f"Already linked to '{existing['existing_goal_title']}'"}
+                return {
+                    "skipped": True,
+                    "reason": f"Already linked to '{existing['existing_goal_title']}'",
+                }
 
             # No existing goal - create the link
             query = """
@@ -1175,11 +1252,9 @@ class AutonomousAgent:
             }]->(g)
             RETURN p.title as project_title, g.title as goal_title
             """
-            result = await session.run(query, {
-                "project_id": project_id,
-                "goal_id": goal_id,
-                "reason": reason
-            })
+            result = await session.run(
+                query, {"project_id": project_id, "goal_id": goal_id, "reason": reason}
+            )
             data = await result.single()
             if data:
                 await log_action(
@@ -1188,13 +1263,17 @@ class AutonomousAgent:
                     summary=f"Linked project '{data['project_title']}' to goal '{data['goal_title']}'",
                     details={
                         "project_id": project_id,
-                        "project_name": project_name or data['project_title'],
+                        "project_name": project_name or data["project_title"],
                         "goal_id": goal_id,
-                        "goal_name": goal_name or data['goal_title'],
-                        "reason": reason
-                    }
+                        "goal_name": goal_name or data["goal_title"],
+                        "reason": reason,
+                    },
                 )
-                return {"linked": True, "project": data["project_title"], "goal": data["goal_title"]}
+                return {
+                    "linked": True,
+                    "project": data["project_title"],
+                    "goal": data["goal_title"],
+                }
         except Exception as e:
             logger.warning("Failed to link project to goal", error=str(e))
         return None
@@ -1219,18 +1298,16 @@ class AutonomousAgent:
         RETURN p.title as title, p.status as status
         """
         try:
-            result = await session.run(query, {
-                "project_id": project_id,
-                "new_status": new_status,
-                "reason": reason
-            })
+            result = await session.run(
+                query, {"project_id": project_id, "new_status": new_status, "reason": reason}
+            )
             data = await result.single()
             if data:
                 await log_action(
                     "update_project_status",
                     "agent",
                     summary=f"Updated '{data['title']}' status to '{new_status}'",
-                    details={"project_id": project_id, "new_status": new_status, "reason": reason}
+                    details={"project_id": project_id, "new_status": new_status, "reason": reason},
                 )
                 return {"updated": True, "project": data["title"], "status": new_status}
         except Exception as e:
@@ -1317,11 +1394,13 @@ class AutonomousAgent:
 
                     # Cosine similarity calculation
                     import numpy as np
+
                     proposed_vec = np.array(proposed_embedding)
                     existing_vec = np.array(existing_embedding)
-                    similarity = float(np.dot(proposed_vec, existing_vec) / (
-                        np.linalg.norm(proposed_vec) * np.linalg.norm(existing_vec)
-                    ))
+                    similarity = float(
+                        np.dot(proposed_vec, existing_vec)
+                        / (np.linalg.norm(proposed_vec) * np.linalg.norm(existing_vec))
+                    )
 
                     if similarity > 0.85:
                         logger.info(
@@ -1350,7 +1429,10 @@ class AutonomousAgent:
                         project_id=project_id,
                         pending_count=pending_count,
                     )
-                    return {"skipped": True, "reason": f"{pending_count} pending proposals exist for project"}
+                    return {
+                        "skipped": True,
+                        "reason": f"{pending_count} pending proposals exist for project",
+                    }
             except Exception as e:
                 logger.warning("Throttling check failed", error=str(e))
 
@@ -1381,7 +1463,7 @@ class AutonomousAgent:
                             "priority": priority,
                             "skip_reason": skip_reason,
                             "historical_rate": recommendation.get("historical_rate"),
-                        }
+                        },
                     )
                     return {"skipped": True, "reason": skip_reason}
 
@@ -1416,8 +1498,8 @@ class AutonomousAgent:
                     "proposal_id": proposal_id,
                     "title": title,
                     "project_id": project_id,
-                    "reason": reason
-                }
+                    "reason": reason,
+                },
             )
             return {"proposed": True, "proposal_id": proposal_id, "title": title}
 
@@ -1437,12 +1519,10 @@ class AutonomousAgent:
         RETURN t.id as id, t.title as title
         """
         try:
-            result = await session.run(query, {
-                "task_id": task_id,
-                "title": title,
-                "description": description,
-                "reason": reason
-            })
+            result = await session.run(
+                query,
+                {"task_id": task_id, "title": title, "description": description, "reason": reason},
+            )
             data = await result.single()
 
             # Link to project if specified
@@ -1453,10 +1533,9 @@ class AutonomousAgent:
                 MERGE (t)-[:BELONGS_TO]->(p)
                 RETURN p.title as project_title
                 """
-                link_result = await session.run(link_query, {
-                    "task_id": task_id,
-                    "project_id": project_id
-                })
+                link_result = await session.run(
+                    link_query, {"task_id": task_id, "project_id": project_id}
+                )
                 await link_result.consume()
 
             if data:
@@ -1468,8 +1547,8 @@ class AutonomousAgent:
                         "task_id": task_id,
                         "title": title,
                         "project_id": project_id,
-                        "reason": reason
-                    }
+                        "reason": reason,
+                    },
                 )
                 return {"created": True, "task_id": task_id, "title": title}
         except Exception as e:
@@ -1490,6 +1569,7 @@ class AutonomousAgent:
         # Get temporal model for better suggestions
         try:
             from cognitex.agent.state_model import get_temporal_model
+
             temporal = get_temporal_model()
             peak_hour = temporal.get_peak_hour()
             suggested_time = temporal.suggest_reschedule_time(for_high_energy=True)
@@ -1521,7 +1601,7 @@ class AutonomousAgent:
                     "current_issue": current_issue,
                     "suggested_time": suggested_time,
                     "reason": reason,
-                }
+                },
             )
 
             logger.info(
@@ -1541,9 +1621,7 @@ class AutonomousAgent:
             logger.warning("Failed to send reschedule suggestion", error=str(e))
             return None
 
-    async def _send_proposal_notification(
-        self, title: str, reason: str, proposal_id: str
-    ) -> None:
+    async def _send_proposal_notification(self, title: str, reason: str, proposal_id: str) -> None:
         """Send a Discord notification for a task proposal."""
         from cognitex.agent.tools import SendNotificationTool
 
@@ -1583,14 +1661,24 @@ class AutonomousAgent:
                 return {"flagged": False, "reason": "duplicate_in_cycle"}
 
             # Also check for word overlap with items flagged this cycle
-            current_words = set(w.lower() for w in entity_name.replace("/", " ").replace(",", " ").split() if len(w) > 3)
+            current_words = set(
+                w.lower()
+                for w in entity_name.replace("/", " ").replace(",", " ").split()
+                if len(w) > 3
+            )
             for flagged_key in flagged_this_cycle:
                 flagged_name = flagged_key.split(":", 1)[1] if ":" in flagged_key else flagged_key
-                flagged_words = set(w.lower() for w in flagged_name.replace("/", " ").replace(",", " ").split() if len(w) > 3)
+                flagged_words = set(
+                    w.lower()
+                    for w in flagged_name.replace("/", " ").replace(",", " ").split()
+                    if len(w) > 3
+                )
                 if current_words and flagged_words:
                     overlap = len(current_words & flagged_words)
                     if overlap >= min(len(current_words), len(flagged_words)) * 0.5:
-                        logger.debug("Skipping duplicate (cycle word overlap)", entity_name=entity_name)
+                        logger.debug(
+                            "Skipping duplicate (cycle word overlap)", entity_name=entity_name
+                        )
                         return {"flagged": False, "reason": "duplicate_in_cycle"}
 
         # Check for recent duplicate notifications (same entity flagged in last 24 hours)
@@ -1609,8 +1697,16 @@ class AutonomousAgent:
                 # Skip if same type and names share significant overlap
                 if prev_type == entity_type and prev_name and entity_name:
                     # Check if any key words from current name appear in previous
-                    current_words = set(w.lower() for w in entity_name.replace("/", " ").replace(",", " ").split() if len(w) > 3)
-                    prev_words = set(w.lower() for w in prev_name.replace("/", " ").replace(",", " ").split() if len(w) > 3)
+                    current_words = set(
+                        w.lower()
+                        for w in entity_name.replace("/", " ").replace(",", " ").split()
+                        if len(w) > 3
+                    )
+                    prev_words = set(
+                        w.lower()
+                        for w in prev_name.replace("/", " ").replace(",", " ").split()
+                        if len(w) > 3
+                    )
                     # If more than half the words overlap, consider it a duplicate
                     if current_words and prev_words:
                         overlap = len(current_words & prev_words)
@@ -1636,21 +1732,22 @@ class AutonomousAgent:
                 "entity_id": entity_id,
                 "entity_name": entity_name,
                 "issue": issue,
-                "reason": reason
-            }
+                "reason": reason,
+            },
         )
 
         # Mark the entity as flagged to prevent re-flagging
         if entity_type == "email" and entity_id:
             try:
                 from cognitex.db.neo4j import get_neo4j_session
+
                 async for session in get_neo4j_session(access_mode="WRITE"):
                     await session.run(
                         """
                         MATCH (e:Email {gmail_id: $gmail_id})
                         SET e.flagged_at = datetime()
                         """,
-                        {"gmail_id": entity_id}
+                        {"gmail_id": entity_id},
                     )
                     break
                 logger.debug("Marked email as flagged", gmail_id=entity_id)
@@ -1660,6 +1757,7 @@ class AutonomousAgent:
         # Create inbox item for unified view
         try:
             from cognitex.services.inbox import get_inbox_service
+
             inbox = get_inbox_service()
             await inbox.create_item(
                 item_type="flagged_item",
@@ -1794,13 +1892,16 @@ class AutonomousAgent:
         RETURN cp.id as id
         """
         try:
-            result = await session.run(query, {
-                "pack_id": pack_id,
-                "meeting_title": meeting_title,
-                "context_summary": context_summary,
-                "key_points": key_points,
-                "reason": reason
-            })
+            result = await session.run(
+                query,
+                {
+                    "pack_id": pack_id,
+                    "meeting_title": meeting_title,
+                    "context_summary": context_summary,
+                    "key_points": key_points,
+                    "reason": reason,
+                },
+            )
             data = await result.single()
 
             if not data:
@@ -1813,10 +1914,7 @@ class AutonomousAgent:
                 MATCH (ce:CalendarEvent {id: $calendar_id})
                 MERGE (cp)-[:PREPARED_FOR]->(ce)
                 """
-                await session.run(link_query, {
-                    "pack_id": pack_id,
-                    "calendar_id": calendar_id
-                })
+                await session.run(link_query, {"pack_id": pack_id, "calendar_id": calendar_id})
 
             # Link to relevant documents
             if relevant_documents:
@@ -1826,10 +1924,7 @@ class AutonomousAgent:
                 MATCH (d:Document {drive_id: doc_id})
                 MERGE (cp)-[:REFERENCES]->(d)
                 """
-                await session.run(doc_query, {
-                    "pack_id": pack_id,
-                    "doc_ids": relevant_documents
-                })
+                await session.run(doc_query, {"pack_id": pack_id, "doc_ids": relevant_documents})
 
             # Link to relevant tasks
             if relevant_tasks:
@@ -1839,10 +1934,7 @@ class AutonomousAgent:
                 MATCH (t:Task {id: task_id})
                 MERGE (cp)-[:REFERENCES]->(t)
                 """
-                await session.run(task_query, {
-                    "pack_id": pack_id,
-                    "task_ids": relevant_tasks
-                })
+                await session.run(task_query, {"pack_id": pack_id, "task_ids": relevant_tasks})
 
             await log_action(
                 "compile_context_pack",
@@ -1855,8 +1947,8 @@ class AutonomousAgent:
                     "documents_count": len(relevant_documents),
                     "tasks_count": len(relevant_tasks),
                     "key_points": key_points,
-                    "reason": reason
-                }
+                    "reason": reason,
+                },
             )
 
             # Notify about the context pack
@@ -1867,7 +1959,7 @@ class AutonomousAgent:
                 "pack_id": pack_id,
                 "meeting_title": meeting_title,
                 "documents": len(relevant_documents),
-                "tasks": len(relevant_tasks)
+                "tasks": len(relevant_tasks),
             }
         except Exception as e:
             logger.warning("Failed to compile context pack", error=str(e))
@@ -1879,7 +1971,9 @@ class AutonomousAgent:
         """Send a Discord notification about a compiled context pack."""
         from cognitex.agent.tools import SendNotificationTool
 
-        points_text = "\n".join([f"• {p}" for p in key_points[:5]]) if key_points else "No key points"
+        points_text = (
+            "\n".join([f"• {p}" for p in key_points[:5]]) if key_points else "No key points"
+        )
 
         message = (
             f"**Context Pack Ready**\n\n"
@@ -1922,13 +2016,16 @@ class AutonomousAgent:
         RETURN sb.id as id
         """
         try:
-            result = await session.run(query, {
-                "block_id": block_id,
-                "title": title,
-                "duration_hours": duration_hours,
-                "suggested_day": suggested_day,
-                "reason": reason
-            })
+            result = await session.run(
+                query,
+                {
+                    "block_id": block_id,
+                    "title": title,
+                    "duration_hours": duration_hours,
+                    "suggested_day": suggested_day,
+                    "reason": reason,
+                },
+            )
             data = await result.single()
 
             if not data:
@@ -1942,10 +2039,9 @@ class AutonomousAgent:
                 MERGE (sb)-[:FOR_PROJECT]->(p)
                 RETURN p.title as project_title
                 """
-                link_result = await session.run(link_query, {
-                    "block_id": block_id,
-                    "project_id": project_id
-                })
+                link_result = await session.run(
+                    link_query, {"block_id": block_id, "project_id": project_id}
+                )
                 link_data = await link_result.single()
                 project_title = link_data.get("project_title") if link_data else None
             else:
@@ -1958,10 +2054,7 @@ class AutonomousAgent:
                 MATCH (t:Task {id: $task_id})
                 MERGE (sb)-[:FOR_TASK]->(t)
                 """
-                await session.run(link_query, {
-                    "block_id": block_id,
-                    "task_id": task_id
-                })
+                await session.run(link_query, {"block_id": block_id, "task_id": task_id})
 
             await log_action(
                 "schedule_block",
@@ -1974,8 +2067,8 @@ class AutonomousAgent:
                     "task_id": task_id,
                     "duration_hours": duration_hours,
                     "suggested_day": suggested_day,
-                    "reason": reason
-                }
+                    "reason": reason,
+                },
             )
 
             # Notify about the schedule suggestion
@@ -1987,7 +2080,7 @@ class AutonomousAgent:
                 "suggested": True,
                 "block_id": block_id,
                 "title": title,
-                "duration_hours": duration_hours
+                "duration_hours": duration_hours,
             }
         except Exception as e:
             logger.warning("Failed to schedule block", error=str(e))
@@ -1999,7 +2092,7 @@ class AutonomousAgent:
         duration_hours: int,
         suggested_day: str,
         project_title: str | None,
-        reason: str
+        reason: str,
     ) -> None:
         """Send a Discord notification about a suggested calendar block."""
         from cognitex.agent.tools import SendNotificationTool

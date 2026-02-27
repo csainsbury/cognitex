@@ -1,5 +1,7 @@
 """Neo4j graph schema initialization and constraints."""
 
+from typing import Any
+
 import structlog
 from neo4j import AsyncSession
 
@@ -68,6 +70,14 @@ SCHEMA_STATEMENTS = [
     "CREATE INDEX idea_status IF NOT EXISTS FOR (i:Idea) ON (i.status)",
     "CREATE INDEX idea_source IF NOT EXISTS FOR (i:Idea) ON (i.source)",
     "CREATE INDEX idea_created IF NOT EXISTS FOR (i:Idea) ON (i.created_at)",
+    # Commitment node (WP5: Commitment Ledger)
+    "CREATE CONSTRAINT commitment_id IF NOT EXISTS FOR (c:Commitment) REQUIRE c.id IS UNIQUE",
+    "CREATE INDEX commitment_status IF NOT EXISTS FOR (c:Commitment) ON (c.status)",
+    "CREATE INDEX commitment_deadline IF NOT EXISTS FOR (c:Commitment) ON (c.deadline)",
+    "CREATE INDEX commitment_owner IF NOT EXISTS FOR (c:Commitment) ON (c.owner)",
+    "CREATE INDEX commitment_source IF NOT EXISTS FOR (c:Commitment) ON (c.source)",
+    "CREATE INDEX commitment_date_logged IF NOT EXISTS FOR (c:Commitment) ON (c.date_logged)",
+    "CREATE INDEX commitment_status_deadline IF NOT EXISTS FOR (c:Commitment) ON (c.status, c.deadline)",
 ]
 
 
@@ -2881,3 +2891,204 @@ async def get_semantic_graph_stats(session: AsyncSession) -> dict:
         "concepts": record["concept_count"],
         "analyzed": analyzed_record["analyzed_count"] if analyzed_record else 0,
     }
+
+
+# ============================================================================
+# Commitment operations (WP5: Commitment Ledger)
+# ============================================================================
+
+
+async def create_commitment(
+    session: AsyncSession,
+    commitment_id: str,
+    task_description: str,
+    owner: str,
+    status: str = "pending",
+    deadline: str | None = None,
+    cognitive_load: str = "medium",
+    source: str | None = None,
+    source_id: str | None = None,
+    dependencies: list[str] | None = None,
+) -> dict:
+    """Create or update a Commitment node.
+
+    Status values: pending -> accepted -> in_progress -> blocked | waiting_on -> complete | abandoned
+    """
+    query = """
+    MERGE (c:Commitment {id: $commitment_id})
+    ON CREATE SET
+        c.task_description = $task_description,
+        c.owner = $owner,
+        c.status = $status,
+        c.deadline = CASE WHEN $deadline IS NOT NULL THEN datetime($deadline) ELSE null END,
+        c.cognitive_load = $cognitive_load,
+        c.source = $source,
+        c.source_id = $source_id,
+        c.dependencies = $dependencies,
+        c.date_logged = date(),
+        c.created_at = datetime(),
+        c.updated_at = datetime()
+    ON MATCH SET
+        c.task_description = $task_description,
+        c.owner = COALESCE($owner, c.owner),
+        c.status = COALESCE($status, c.status),
+        c.deadline = CASE WHEN $deadline IS NOT NULL THEN datetime($deadline) ELSE c.deadline END,
+        c.cognitive_load = COALESCE($cognitive_load, c.cognitive_load),
+        c.source = COALESCE($source, c.source),
+        c.source_id = COALESCE($source_id, c.source_id),
+        c.dependencies = COALESCE($dependencies, c.dependencies),
+        c.updated_at = datetime()
+    RETURN c
+    """
+    result = await session.run(
+        query,
+        commitment_id=commitment_id,
+        task_description=task_description,
+        owner=owner,
+        status=status,
+        deadline=deadline,
+        cognitive_load=cognitive_load,
+        source=source,
+        source_id=source_id,
+        dependencies=dependencies or [],
+    )
+    record = await result.single()
+    return dict(record["c"]) if record else {}
+
+
+async def update_commitment(
+    session: AsyncSession,
+    commitment_id: str,
+    status: str | None = None,
+    deadline: str | None = None,
+    cognitive_load: str | None = None,
+    task_description: str | None = None,
+) -> dict:
+    """Update specific fields of a Commitment node."""
+    set_parts = ["c.updated_at = datetime()"]
+    params: dict[str, Any] = {"commitment_id": commitment_id}
+
+    if status is not None:
+        set_parts.append("c.status = $status")
+        params["status"] = status
+    if deadline is not None:
+        set_parts.append("c.deadline = datetime($deadline)")
+        params["deadline"] = deadline
+    if cognitive_load is not None:
+        set_parts.append("c.cognitive_load = $cognitive_load")
+        params["cognitive_load"] = cognitive_load
+    if task_description is not None:
+        set_parts.append("c.task_description = $task_description")
+        params["task_description"] = task_description
+
+    query = f"""
+    MATCH (c:Commitment {{id: $commitment_id}})
+    SET {", ".join(set_parts)}
+    RETURN c
+    """
+    result = await session.run(query, **params)
+    record = await result.single()
+    return dict(record["c"]) if record else {}
+
+
+async def link_commitment_to_email(
+    session: AsyncSession,
+    commitment_id: str,
+    gmail_id: str,
+) -> None:
+    """Create EXTRACTED_FROM relationship between Commitment and Email."""
+    query = """
+    MATCH (c:Commitment {id: $commitment_id})
+    MATCH (e:Email {gmail_id: $gmail_id})
+    MERGE (c)-[:EXTRACTED_FROM]->(e)
+    """
+    await session.run(query, commitment_id=commitment_id, gmail_id=gmail_id)
+
+
+async def link_commitment_to_person(
+    session: AsyncSession,
+    commitment_id: str,
+    person_email: str,
+    rel_type: str = "OWNED_BY",
+) -> None:
+    """Create OWNED_BY or WAITING_ON relationship between Commitment and Person."""
+    if rel_type not in ("OWNED_BY", "WAITING_ON"):
+        rel_type = "OWNED_BY"
+    query = f"""
+    MATCH (c:Commitment {{id: $commitment_id}})
+    MATCH (p:Person {{email: $person_email}})
+    MERGE (c)-[:{rel_type}]->(p)
+    """
+    await session.run(query, commitment_id=commitment_id, person_email=person_email)
+
+
+async def link_commitment_to_project(
+    session: AsyncSession,
+    commitment_id: str,
+    project_id: str,
+) -> None:
+    """Create COMMITTED_TO relationship between Commitment and Project."""
+    query = """
+    MATCH (c:Commitment {id: $commitment_id})
+    MATCH (p:Project {id: $project_id})
+    MERGE (c)-[:COMMITTED_TO]->(p)
+    """
+    await session.run(query, commitment_id=commitment_id, project_id=project_id)
+
+
+async def link_commitment_depends_on(
+    session: AsyncSession,
+    commitment_id: str,
+    depends_on_id: str,
+) -> None:
+    """Create DEPENDS_ON relationship between two Commitments."""
+    query = """
+    MATCH (c:Commitment {id: $commitment_id})
+    MATCH (dep:Commitment {id: $depends_on_id})
+    MERGE (c)-[:DEPENDS_ON]->(dep)
+    """
+    await session.run(query, commitment_id=commitment_id, depends_on_id=depends_on_id)
+
+
+async def get_commitments(
+    session: AsyncSession,
+    status: str | None = None,
+    owner: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    """Get commitments with optional filters."""
+    where_clauses = []
+    params: dict[str, Any] = {"limit": limit}
+
+    if status is not None:
+        where_clauses.append("c.status = $status")
+        params["status"] = status
+    if owner is not None:
+        where_clauses.append("c.owner = $owner")
+        params["owner"] = owner
+
+    where = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+    query = f"""
+    MATCH (c:Commitment)
+    {where}
+    OPTIONAL MATCH (c)-[:EXTRACTED_FROM]->(e:Email)
+    OPTIONAL MATCH (c)-[:COMMITTED_TO]->(p:Project)
+    OPTIONAL MATCH (c)-[:WAITING_ON]->(w:Person)
+    RETURN c,
+           e.subject as source_email_subject,
+           p.title as project_title,
+           w.email as waiting_on_email
+    ORDER BY c.deadline ASC, c.created_at DESC
+    LIMIT $limit
+    """
+    result = await session.run(query, **params)
+    records = await result.data()
+    commitments = []
+    for r in records:
+        c = dict(r["c"])
+        c["source_email_subject"] = r.get("source_email_subject")
+        c["project_title"] = r.get("project_title")
+        c["waiting_on_email"] = r.get("waiting_on_email")
+        commitments.append(c)
+    return commitments

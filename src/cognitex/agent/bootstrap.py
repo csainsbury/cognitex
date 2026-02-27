@@ -35,6 +35,7 @@ BOOTSTRAP_FILES = {
     "MEMORY.md": {"writable_by_agent": True, "required": False},
     "IDENTITY.md": {"writable_by_agent": False, "required": False},  # Legacy fallback
     "CONTEXT.md": {"writable_by_agent": True, "required": False},
+    "LEDGER.yaml": {"writable_by_agent": True, "required": False},
 }
 
 # Default file templates

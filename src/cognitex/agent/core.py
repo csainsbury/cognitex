@@ -24,6 +24,7 @@ MAX_REACT_ITERATIONS = 8
 @dataclass
 class ThoughtAction:
     """A single thought-action pair in the ReAct loop."""
+
     thought: str
     action: str | None = None  # Tool name, or None if ready to respond
     action_input: dict = field(default_factory=dict)
@@ -33,6 +34,7 @@ class ThoughtAction:
 @dataclass
 class ReactTrace:
     """Complete trace of a ReAct execution."""
+
     steps: list[ThoughtAction] = field(default_factory=list)
     final_response: str = ""
     pending_approvals: list[str] = field(default_factory=list)
@@ -76,6 +78,7 @@ class Agent:
         # Initialize the appropriate LLM client based on provider
         if self._provider == "google":
             import google.generativeai as genai
+
             api_key = settings.google_ai_api_key.get_secret_value()
             if not api_key:
                 raise ValueError("GOOGLE_AI_API_KEY not configured")
@@ -85,6 +88,7 @@ class Agent:
             logger.info("Using Google Gemini", model=self._model)
         elif self._provider == "anthropic":
             from anthropic import Anthropic
+
             api_key = settings.anthropic_api_key.get_secret_value()
             if not api_key:
                 raise ValueError("ANTHROPIC_API_KEY not configured")
@@ -93,6 +97,7 @@ class Agent:
             logger.info("Using Anthropic Claude", model=self._model)
         elif self._provider == "openai":
             from openai import OpenAI
+
             api_key = settings.openai_api_key.get_secret_value()
             if not api_key:
                 raise ValueError("OPENAI_API_KEY not configured")
@@ -122,7 +127,9 @@ class Agent:
         if not self._initialized:
             raise RuntimeError("Agent not initialized. Call initialize() first.")
 
-    def _llm_chat(self, messages: list[dict], max_tokens: int = 2048, temperature: float = 0.3) -> str:
+    def _llm_chat(
+        self, messages: list[dict], max_tokens: int = 2048, temperature: float = 0.3
+    ) -> str:
         """Call the LLM with provider-specific API handling."""
         if self._provider == "google":
             # Gemini API format with fallback to Together.ai
@@ -177,10 +184,11 @@ class Agent:
             if use_fallback:
                 logger.warning("Gemini failed, using Together.ai fallback", reason=fallback_reason)
                 from together import Together
+
                 settings = get_settings()
                 api_key = settings.together_api_key
                 # Handle SecretStr
-                if hasattr(api_key, 'get_secret_value'):
+                if hasattr(api_key, "get_secret_value"):
                     api_key = api_key.get_secret_value()
                 if api_key:
                     fallback_client = Together(api_key=api_key)
@@ -429,8 +437,7 @@ Example queries:
                 if rules_text:
                     sections.append(
                         "## User Preferences\n"
-                        "Learned preferences from past interactions:\n\n"
-                        + "\n".join(rules_text)
+                        "Learned preferences from past interactions:\n\n" + "\n".join(rules_text)
                     )
 
         except Exception as e:
@@ -508,7 +515,10 @@ Example queries:
         # Check if we need to summarize older interactions
         summary_prefix = ""
         settings = get_settings()
-        if settings.context_summarization_enabled and len(recent_interactions) > settings.recent_turns_to_keep:
+        if (
+            settings.context_summarization_enabled
+            and len(recent_interactions) > settings.recent_turns_to_keep
+        ):
             from cognitex.agent.summarization import get_summarizer, format_summary_for_prompt
 
             summarizer = get_summarizer()
@@ -528,7 +538,7 @@ Example queries:
                 )
             else:
                 # Just keep recent interactions
-                recent_interactions = recent_interactions[-settings.recent_turns_to_keep:]
+                recent_interactions = recent_interactions[-settings.recent_turns_to_keep :]
         else:
             # Fallback: keep last 10 if summarization disabled
             recent_interactions = recent_interactions[-10:]
@@ -596,18 +606,24 @@ Example queries:
                 trace.steps.append(step)
 
                 # Add to conversation for next iteration
-                conversation.append({
-                    "role": "assistant",
-                    "content": content,
-                })
-                conversation.append({
-                    "role": "user",
-                    "content": f"Observation: {observation}",
-                })
+                conversation.append(
+                    {
+                        "role": "assistant",
+                        "content": content,
+                    }
+                )
+                conversation.append(
+                    {
+                        "role": "user",
+                        "content": f"Observation: {observation}",
+                    }
+                )
 
             except Exception as e:
                 logger.error("ReAct iteration failed", error=str(e), iteration=iteration)
-                trace.final_response = f"I encountered an error while processing your request: {str(e)[:100]}"
+                trace.final_response = (
+                    f"I encountered an error while processing your request: {str(e)[:100]}"
+                )
                 break
 
         else:
@@ -666,13 +682,21 @@ Example queries:
         """
         tool = self.tool_registry.get(action)
         if not tool:
-            return f"Error: Unknown tool '{action}'. Available tools: {[t.name for t in self.tool_registry.all()]}", None, None
+            return (
+                f"Error: Unknown tool '{action}'. Available tools: {[t.name for t in self.tool_registry.all()]}",
+                None,
+                None,
+            )
 
         # Determine if this action should be traced
         # Trace: approval-required actions, task/event creation, email drafting
         should_trace = tool.risk == ToolRisk.APPROVAL or action in [
-            "create_task", "update_task", "complete_task",
-            "create_event", "draft_email", "send_email",
+            "create_task",
+            "update_task",
+            "complete_task",
+            "create_event",
+            "draft_email",
+            "send_email",
         ]
         trace_id = None
 
@@ -714,7 +738,11 @@ Example queries:
 
                 # Format the observation
                 if result.needs_approval:
-                    return f"Action staged for approval (ID: {result.approval_id}). Details: {result.data}", result.approval_id, trace_id
+                    return (
+                        f"Action staged for approval (ID: {result.approval_id}). Details: {result.data}",
+                        result.approval_id,
+                        trace_id,
+                    )
 
                 # Format data nicely for observation
                 if result.data is None:
@@ -727,7 +755,9 @@ Example queries:
                     for item in result.data[:15]:  # Limit to 15 items
                         if isinstance(item, dict):
                             # Pick key fields
-                            item_str = ", ".join(f"{k}: {v}" for k, v in list(item.items())[:6] if v is not None)
+                            item_str = ", ".join(
+                                f"{k}: {v}" for k, v in list(item.items())[:6] if v is not None
+                            )
                             items.append(f"  - {item_str}")
                         else:
                             items.append(f"  - {item}")
@@ -737,7 +767,11 @@ Example queries:
                         obs += f"\n  ... and {len(result.data) - 15} more"
                     return obs, None, trace_id
                 elif isinstance(result.data, dict):
-                    return f"Result: {json.dumps(result.data, indent=2, default=str)}", None, trace_id
+                    return (
+                        f"Result: {json.dumps(result.data, indent=2, default=str)}",
+                        None,
+                        trace_id,
+                    )
                 else:
                     return f"Result: {result.data}", None, trace_id
             else:
@@ -782,7 +816,9 @@ Your response:"""
             return response.strip()
         except Exception as e:
             logger.error("Summary generation failed", error=str(e))
-            return "I found some information but had trouble summarizing it. Please try asking again."
+            return (
+                "I found some information but had trouble summarizing it. Please try asking again."
+            )
 
     # =========================================================================
     # APPROVAL HANDLING
@@ -858,6 +894,7 @@ Your response:"""
 
             if action_type == "send_email":
                 from cognitex.services.gmail import GmailSender
+
                 gmail = GmailSender()
 
                 try:
@@ -884,6 +921,7 @@ Your response:"""
                         draft_id = approval["params"].get("draft_node_id")
                         if draft_id:
                             from cognitex.services.email_style import track_draft_sent
+
                             await track_draft_sent(
                                 draft_id=draft_id,
                                 final_body=params["body"],
@@ -908,11 +946,16 @@ Your response:"""
 
             elif action_type == "create_event":
                 from cognitex.services.calendar import CalendarService
+
                 calendar = CalendarService()
 
                 try:
                     # Preserve attendees from original if not in edited_action
-                    if edited_action and approval["params"].get("attendees") and not params.get("attendees"):
+                    if (
+                        edited_action
+                        and approval["params"].get("attendees")
+                        and not params.get("attendees")
+                    ):
                         params["attendees"] = approval["params"]["attendees"]
 
                     event = calendar.create_event(
@@ -948,6 +991,7 @@ Your response:"""
                     draft_id = approval["params"].get("draft_node_id")
                     if draft_id:
                         from cognitex.services.email_style import track_draft_discarded
+
                         await track_draft_discarded(draft_id)
                 except Exception as track_e:
                     logger.debug("Failed to track draft discarded", error=str(track_e))
@@ -958,7 +1002,10 @@ Your response:"""
                         content=f"User rejected {approval['action_type']}: {feedback}",
                         memory_type="feedback",
                         importance=4,
-                        metadata={"approval_id": approval_id, "action_type": approval["action_type"]},
+                        metadata={
+                            "approval_id": approval_id,
+                            "action_type": approval["action_type"],
+                        },
                     )
                 except Exception as mem_e:
                     logger.warning("Failed to store rejection to episodic memory", error=str(mem_e))
@@ -1037,7 +1084,7 @@ Your response:"""
         """
         patterns = {}
         body_lower = body.lower()
-        body_lines = body.strip().split('\n')
+        body_lines = body.strip().split("\n")
 
         # Detect greeting style
         first_line = body_lines[0].strip().lower() if body_lines else ""
@@ -1049,8 +1096,10 @@ Your response:"""
             patterns["greeting_style"] = "formal_title"
 
         # Detect sign-off style
-        last_lines = '\n'.join(body_lines[-3:]).lower() if len(body_lines) >= 3 else body_lower
-        if any(s in last_lines for s in ["best regards", "kind regards", "sincerely", "yours truly"]):
+        last_lines = "\n".join(body_lines[-3:]).lower() if len(body_lines) >= 3 else body_lower
+        if any(
+            s in last_lines for s in ["best regards", "kind regards", "sincerely", "yours truly"]
+        ):
             patterns["sign_off_style"] = "formal"
         elif any(s in last_lines for s in ["thanks", "cheers", "best", "talk soon"]):
             patterns["sign_off_style"] = "casual"
@@ -1097,12 +1146,71 @@ Your response:"""
         if context_section:
             briefing += f"\n\n{context_section}"
 
+        # Add commitment summary (WP5)
+        commitment_section = await self._get_commitment_summary()
+        if commitment_section:
+            briefing += f"\n\n{commitment_section}"
+
         # Add learning insights (Phase 4 integration)
         learning_section = await self._get_learning_insights()
         if learning_section:
             briefing += f"\n\n{learning_section}"
 
         return briefing
+
+    async def _get_commitment_summary(self) -> str | None:
+        """Get commitment ledger summary for the morning briefing.
+
+        Includes overdue and approaching commitments.
+        """
+        try:
+            from cognitex.agent.graph_observer import GraphObserver
+
+            observer = GraphObserver()
+            overdue, approaching = await asyncio.gather(
+                observer.get_overdue_commitments(),
+                observer.get_approaching_commitments(hours=48),
+                return_exceptions=True,
+            )
+
+            if isinstance(overdue, Exception):
+                overdue = []
+            if isinstance(approaching, Exception):
+                approaching = []
+
+            if not overdue and not approaching:
+                return None
+
+            sections = []
+
+            if overdue:
+                lines = []
+                for c in overdue[:5]:
+                    deadline_str = ""
+                    if c.get("deadline"):
+                        deadline_str = f" (due: {str(c['deadline'])[:10]})"
+                    lines.append(f"- {c.get('description', 'Unknown')}{deadline_str}")
+                sections.append(f"**Overdue Commitments** ({len(overdue)})\n" + "\n".join(lines))
+
+            if approaching:
+                lines = []
+                for c in approaching[:5]:
+                    deadline_str = ""
+                    if c.get("deadline"):
+                        deadline_str = f" (due: {str(c['deadline'])[:10]})"
+                    lines.append(f"- {c.get('description', 'Unknown')}{deadline_str}")
+                sections.append(
+                    f"**Approaching Deadlines** ({len(approaching)})\n" + "\n".join(lines)
+                )
+
+            if sections:
+                return "---\n**Commitment Ledger**\n\n" + "\n\n".join(sections)
+
+            return None
+
+        except Exception as e:
+            logger.warning("Failed to get commitment summary for briefing", error=str(e))
+            return None
 
     async def _get_learning_insights(self) -> str | None:
         """Get learning system insights for the morning briefing.
@@ -1236,13 +1344,18 @@ Your response:"""
                             pack_text += f"\n  • With: {', '.join(attendee_names)}"
 
                         if pack.artifacts:
-                            artifact_names = [a.get('title', a.get('name', 'doc'))[:30] for a in pack.artifacts[:3]]
+                            artifact_names = [
+                                a.get("title", a.get("name", "doc"))[:30]
+                                for a in pack.artifacts[:3]
+                            ]
                             pack_text += f"\n  • Related docs: {', '.join(artifact_names)}"
 
                         context_sections.append(pack_text)
 
                 except Exception as e:
-                    logger.debug("Failed to build context pack for event", event_title=title, error=str(e))
+                    logger.debug(
+                        "Failed to build context pack for event", event_title=title, error=str(e)
+                    )
                     continue
 
             if context_sections:
@@ -1283,8 +1396,10 @@ async def get_agent() -> Agent:
 # Keep AgentMode for backward compatibility with existing code
 from enum import Enum
 
+
 class AgentMode(Enum):
     """Operating modes for the agent (legacy, kept for compatibility)."""
+
     BRIEFING = "briefing"
     REVIEW = "review"
     MONITOR = "monitor"

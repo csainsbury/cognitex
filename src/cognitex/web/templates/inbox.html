@@ -53,7 +53,7 @@
 {% if items | length > 0 %}
 <div id="inbox-items"
      hx-get="/api/inbox/items{% if filter_type %}?type={{ filter_type }}{% endif %}"
-     hx-trigger="every 30s"
+     hx-trigger="every 30s [!isEditingEmail()]"
      hx-swap="innerHTML">
     {% include "partials/inbox_items.html" %}
 </div>
@@ -370,9 +370,44 @@
 /* Status rows */
 tr.approved { background-color: #f0fdf4; }
 tr.rejected { background-color: #fef2f2; }
+
+/* Dropdown items */
+.dropdown-item {
+    display: block;
+    width: 100%;
+    padding: 0.5rem 1rem;
+    text-align: left;
+    background: none;
+    border: none;
+    color: var(--text);
+    cursor: pointer;
+    font-size: 0.9rem;
+}
+
+.dropdown-item:hover {
+    background: var(--accent);
+    color: white;
+}
+
+/* Email draft edit form */
+.email-draft-payload input,
+.email-draft-payload textarea {
+    font-size: 0.9rem;
+}
 </style>
 
 <script>
+// Check if user is currently editing an email - pause auto-refresh if so
+function isEditingEmail() {
+    const editForms = document.querySelectorAll('[id^="edit-form-"]');
+    for (const form of editForms) {
+        if (form.style.display !== 'none') {
+            return true;
+        }
+    }
+    return false;
+}
+
 function selectInboxRejectReason(itemId, reason, label) {
     document.getElementById('inbox-reason-select-' + itemId).style.display = 'none';
     document.getElementById('inbox-feedback-prompt-' + itemId).style.display = 'block';
@@ -384,6 +419,19 @@ function showRejectDropdown(itemId) {
     const menu = document.getElementById('inbox-reject-menu-' + itemId);
     menu.classList.toggle('show');
     menu.style.display = menu.classList.contains('show') ? 'block' : 'none';
+}
+
+function toggleEditForm(itemId) {
+    const editForm = document.getElementById('edit-form-' + itemId);
+    const bodyPreview = editForm.closest('.email-draft-payload').querySelector('.email-body-preview');
+
+    if (editForm.style.display === 'none') {
+        editForm.style.display = 'block';
+        if (bodyPreview) bodyPreview.closest('details').style.display = 'none';
+    } else {
+        editForm.style.display = 'none';
+        if (bodyPreview) bodyPreview.closest('details').style.display = 'block';
+    }
 }
 
 // Close dropdowns when clicking outside
