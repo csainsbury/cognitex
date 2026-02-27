@@ -1,0 +1,436 @@
+{% extends "base_chat.html" %}
+
+{% block title %}Chat with Erdos - Cognitex{% endblock %}
+
+{% block chat_content %}
+<style>
+    .chat-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.75rem 1.25rem;
+        border-bottom: 1px solid var(--border);
+        background: var(--bg-card);
+    }
+    .chat-header-left {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+    }
+    .chat-header-name {
+        font-size: 1.1rem;
+        font-weight: 700;
+        color: var(--text-main);
+    }
+    .chat-header-model {
+        font-size: 0.75rem;
+        color: var(--text-muted);
+    }
+    .chat-header-right {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .clear-chat {
+        font-size: 0.8rem;
+        color: #dc2626;
+        cursor: pointer;
+        text-decoration: underline;
+        background: none;
+        border: none;
+    }
+    .clear-chat:hover { color: #b91c1c; }
+    .chat-messages {
+        flex: 1;
+        overflow-y: auto;
+        padding: 1.25rem;
+        display: flex;
+        flex-direction: column;
+    }
+    .message {
+        margin-bottom: 1rem;
+        max-width: 80%;
+        line-height: 1.5;
+    }
+    .message-user {
+        align-self: flex-end;
+    }
+    .message-user .message-bubble {
+        background: var(--primary);
+        color: #fff;
+        border-radius: 12px 12px 4px 12px;
+        padding: 0.6rem 1rem;
+    }
+    .message-agent {
+        align-self: flex-start;
+    }
+    .message-sender {
+        font-size: 0.7rem;
+        font-weight: 600;
+        color: var(--text-muted);
+        margin-bottom: 0.2rem;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+    }
+    .message-agent .message-bubble {
+        background: var(--bg-card);
+        color: var(--text-main);
+        border: 1px solid var(--border);
+        border-radius: 12px 12px 12px 4px;
+        padding: 0.6rem 1rem;
+    }
+    .message-agent .message-bubble pre {
+        background: #f1f5f9;
+        padding: 0.5rem;
+        border-radius: 4px;
+        overflow-x: auto;
+        font-size: 0.85rem;
+    }
+    .message-agent .message-bubble code {
+        background: #f1f5f9;
+        padding: 0.1rem 0.3rem;
+        border-radius: 3px;
+        font-size: 0.85rem;
+    }
+    .typing-indicator {
+        display: none;
+        padding: 0.5rem 1.25rem;
+        color: var(--text-muted);
+        font-size: 0.85rem;
+        font-style: italic;
+    }
+    .typing-indicator.show { display: block; }
+    .chat-input-area {
+        padding: 0.75rem 1.25rem;
+        border-top: 1px solid var(--border);
+        background: var(--bg-card);
+    }
+    .chat-input-row {
+        display: flex;
+        gap: 0.5rem;
+    }
+    .chat-input {
+        flex: 1;
+        padding: 0.65rem 1rem;
+        font-size: 0.95rem;
+        font-family: var(--font-sans);
+        border: 2px solid var(--border);
+        border-radius: 10px;
+        resize: none;
+        min-height: 44px;
+        max-height: 150px;
+        background: var(--bg-page);
+    }
+    .chat-input:focus {
+        border-color: var(--primary);
+        outline: none;
+    }
+    .chat-send {
+        padding: 0 1.25rem;
+        background: var(--primary);
+        color: #fff;
+        border: none;
+        border-radius: 10px;
+        cursor: pointer;
+        font-size: 0.95rem;
+        font-weight: 600;
+    }
+    .chat-send:hover { background: var(--primary-hover); }
+    .chat-send:disabled { background: #94a3b8; cursor: not-allowed; }
+    .command-helper {
+        margin-top: 0.35rem;
+    }
+    .command-toggle {
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        text-decoration: none;
+        cursor: pointer;
+    }
+    .command-toggle:hover { color: var(--primary); }
+    .command-panel {
+        margin-top: 0.5rem;
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 0.75rem;
+        max-height: 200px;
+        overflow-y: auto;
+    }
+    .command-category {
+        font-size: 0.7rem;
+        font-weight: 600;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-top: 0.5rem;
+        margin-bottom: 0.25rem;
+    }
+    .command-category:first-child { margin-top: 0; }
+    .command-item {
+        display: inline-block;
+        padding: 0.2rem 0.5rem;
+        margin: 0.1rem;
+        background: #f1f5f9;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        font-size: 0.75rem;
+        font-family: var(--font-mono);
+        cursor: pointer;
+        transition: background 0.15s;
+    }
+    .command-item:hover { background: var(--primary-light); border-color: #c7d2fe; }
+    .command-item .cmd-desc {
+        font-family: var(--font-sans);
+        color: var(--text-muted);
+        font-size: 0.7rem;
+        margin-left: 0.2rem;
+    }
+</style>
+
+<div class="chat-header">
+    <div class="chat-header-left">
+        <span class="chat-header-name">Erdos</span>
+        <span class="chat-header-model">{{ provider }} &middot; {{ model }}</span>
+    </div>
+    <div class="chat-header-right">
+        <button class="sidebar-toggle" id="sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                <line x1="15" y1="3" x2="15" y2="21"></line>
+            </svg>
+        </button>
+        <button class="clear-chat" onclick="clearChat()">Clear</button>
+    </div>
+</div>
+
+<div class="chat-messages" id="chat-messages">
+    <div class="message message-agent">
+        <div class="message-sender">Erdos</div>
+        <div class="message-bubble">
+            Hello! I'm <strong>Erdos</strong>, your cognitive assistant. I can help you with:
+            <ul style="margin: 0.4rem 0 0 1.2rem; padding: 0;">
+                <li>Searching your emails, documents, and calendar</li>
+                <li>Creating and managing tasks, projects, and goals</li>
+                <li>Drafting emails (with your approval)</li>
+                <li>Meeting prep and context packs</li>
+                <li>Answering questions about your data</li>
+            </ul>
+            <br>Type a message or try a <strong>/command</strong>. What can I help you with?
+        </div>
+    </div>
+</div>
+
+<div class="typing-indicator" id="typing-indicator">
+    Erdos is thinking...
+</div>
+
+<div class="chat-input-area">
+    <div class="chat-input-row">
+        <textarea
+            class="chat-input"
+            id="chat-input"
+            placeholder="Message Erdos... (Enter to send, Shift+Enter for new line)"
+            rows="1"
+        ></textarea>
+        <button class="chat-send" id="chat-send" onclick="sendMessage()">Send</button>
+    </div>
+    <div class="command-helper">
+        <a href="#" class="command-toggle" id="command-toggle" onclick="toggleCommands(event)">/ Commands</a>
+        <div class="command-panel" id="command-panel" style="display: none;"></div>
+    </div>
+</div>
+{% endblock %}
+
+{% block sidebar_content %}
+<!-- Inbox count -->
+<div class="sidebar-section">
+    <div class="sidebar-section-header">
+        <span class="sidebar-label">Inbox</span>
+        <a href="/inbox" class="sidebar-link">Open</a>
+    </div>
+    <div id="sidebar-inbox" hx-get="/api/inbox/count" hx-trigger="load, every 15s" hx-swap="innerHTML">
+    </div>
+</div>
+
+<!-- Commitments -->
+<div id="sidebar-commitments" hx-get="/api/sidebar/commitments" hx-trigger="load, every 60s" hx-swap="innerHTML">
+</div>
+
+<!-- Next Meeting -->
+<div id="sidebar-next-meeting" hx-get="/api/sidebar/next-meeting" hx-trigger="load, every 60s" hx-swap="innerHTML">
+</div>
+
+<!-- Operating Mode -->
+<div id="sidebar-mode" hx-get="/api/sidebar/mode" hx-trigger="load, every 120s" hx-swap="innerHTML">
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const messagesEl = document.getElementById('chat-messages');
+const inputEl = document.getElementById('chat-input');
+const sendBtn = document.getElementById('chat-send');
+const typingEl = document.getElementById('typing-indicator');
+
+// Auto-resize textarea
+inputEl.addEventListener('input', function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 150) + 'px';
+});
+
+// Enter to send, Shift+Enter for new line
+inputEl.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+    }
+});
+
+function addMessage(content, isUser) {
+    const div = document.createElement('div');
+    div.className = `message ${isUser ? 'message-user' : 'message-agent'}`;
+
+    if (isUser) {
+        div.innerHTML = `<div class="message-bubble">${escapeHtml(content)}</div>`;
+    } else {
+        div.innerHTML = `<div class="message-sender">Erdos</div><div class="message-bubble">${formatMessage(content)}</div>`;
+    }
+
+    messagesEl.appendChild(div);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function formatMessage(text) {
+    text = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    text = text.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
+    text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+    text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    text = text.replace(/_\(([^)]+)\)_/g, '<em>($1)</em>');
+    text = text.replace(/\n/g, '<br>');
+    return text;
+}
+
+async function sendMessage() {
+    const message = inputEl.value.trim();
+    if (!message) return;
+
+    addMessage(message, true);
+    inputEl.value = '';
+    inputEl.style.height = 'auto';
+
+    typingEl.classList.add('show');
+    sendBtn.disabled = true;
+
+    try {
+        const response = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message })
+        });
+
+        const data = await response.json();
+
+        if (data.error) {
+            addMessage('Error: ' + data.error, false);
+        } else {
+            addMessage(data.response, false);
+            if (data.approvals && data.approvals.length > 0) {
+                addMessage(`_I've created ${data.approvals.length} action(s) that need your approval. Check the Approvals page to review them._`, false);
+            }
+        }
+    } catch (err) {
+        addMessage('Error: Failed to connect to agent. ' + err.message, false);
+    } finally {
+        typingEl.classList.remove('show');
+        sendBtn.disabled = false;
+        inputEl.focus();
+    }
+}
+
+function clearChat() {
+    if (confirm('Clear chat history? This will also clear the agent\'s working memory.')) {
+        fetch('/api/chat/clear', { method: 'POST' })
+            .then(() => {
+                messagesEl.innerHTML = `
+                    <div class="message message-agent">
+                        <div class="message-sender">Erdos</div>
+                        <div class="message-bubble">Chat history cleared. How can I help you?</div>
+                    </div>
+                `;
+            });
+    }
+}
+
+// Focus input on page load
+inputEl.focus();
+
+// Sidebar toggle with localStorage persistence
+function toggleSidebar() {
+    const sidebar = document.getElementById('chat-sidebar');
+    const isCollapsed = sidebar.classList.toggle('collapsed');
+    localStorage.setItem('cognitex-sidebar-collapsed', isCollapsed ? '1' : '0');
+}
+
+// Restore sidebar state
+(function() {
+    const collapsed = localStorage.getItem('cognitex-sidebar-collapsed');
+    if (collapsed === '1') {
+        document.getElementById('chat-sidebar').classList.add('collapsed');
+    }
+})();
+
+// Command helper
+let commandsLoaded = false;
+
+async function toggleCommands(e) {
+    e.preventDefault();
+    const panel = document.getElementById('command-panel');
+    const isHidden = panel.style.display === 'none';
+    panel.style.display = isHidden ? 'block' : 'none';
+
+    if (isHidden && !commandsLoaded) {
+        panel.innerHTML = '<span style="color: #999; font-size: 0.8rem;">Loading commands...</span>';
+        try {
+            const resp = await fetch('/api/chat/commands');
+            const commands = await resp.json();
+            renderCommands(commands, panel);
+            commandsLoaded = true;
+        } catch (err) {
+            panel.innerHTML = '<span style="color: #dc2626; font-size: 0.8rem;">Failed to load commands</span>';
+        }
+    }
+}
+
+function renderCommands(commands, panel) {
+    const categories = {};
+    for (const cmd of commands) {
+        const cat = cmd.category || 'General';
+        if (!categories[cat]) categories[cat] = [];
+        categories[cat].push(cmd);
+    }
+
+    let html = '';
+    for (const [cat, cmds] of Object.entries(categories)) {
+        html += `<div class="command-category">${cat}</div><div>`;
+        for (const cmd of cmds) {
+            const escaped = cmd.description.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            html += `<span class="command-item" onclick="insertCommand('${cmd.name}')" title="${escaped}">/${cmd.name} <span class="cmd-desc">${escaped.substring(0, 30)}${escaped.length > 30 ? '...' : ''}</span></span>`;
+        }
+        html += '</div>';
+    }
+    panel.innerHTML = html;
+}
+
+function insertCommand(name) {
+    inputEl.value = '/' + name + ' ';
+    inputEl.focus();
+    document.getElementById('command-panel').style.display = 'none';
+}
+</script>
+{% endblock %}

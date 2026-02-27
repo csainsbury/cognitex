@@ -45,44 +45,183 @@
             font-size: 15px;
         }
 
-        /* Navigation */
-        nav {
-            background: #1e293b; /* Dark slate */
-            padding: 0 2rem;
-            height: 60px;
+        /* Top Bar */
+        .topbar {
+            background: #1e293b;
+            height: 56px;
             display: flex;
             align-items: center;
-            gap: 1.5rem;
-            box-shadow: var(--shadow);
-            position: sticky;
+            padding: 0 1rem;
+            position: fixed;
             top: 0;
-            z-index: 50;
+            left: 0;
+            right: 0;
+            z-index: 100;
+            box-shadow: var(--shadow);
+        }
+        .topbar-hamburger {
+            background: none;
+            border: none;
+            color: #94a3b8;
+            font-size: 1.4rem;
+            cursor: pointer;
+            padding: 0.5rem;
+            line-height: 1;
+            border-radius: 6px;
+        }
+        .topbar-hamburger:hover { color: #fff; background: rgba(255,255,255,0.08); }
+        .topbar-brand {
+            color: #fff;
+            font-weight: 700;
+            font-size: 1.1rem;
+            text-decoration: none;
+            margin-left: 0.75rem;
+        }
+        .topbar-brand:hover { color: #e0e7ff; }
+        .topbar-right {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        .topbar-inbox {
+            color: #94a3b8;
+            position: relative;
+            display: flex;
+            align-items: center;
+            text-decoration: none;
+            padding: 0.4rem;
+            border-radius: 6px;
+        }
+        .topbar-inbox:hover { color: #fff; background: rgba(255,255,255,0.08); }
+        #topbar-inbox-badge {
+            position: absolute;
+            top: 0;
+            right: -2px;
+        }
+        .topbar-logout {
+            color: #94a3b8;
+            display: flex;
+            align-items: center;
+            padding: 0.4rem;
+            border-radius: 6px;
+            text-decoration: none;
+        }
+        .topbar-logout:hover { color: #ef4444; background: rgba(255,255,255,0.08); }
+
+        /* Drawer Backdrop */
+        .drawer-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.4);
+            z-index: 199;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.25s, visibility 0.25s;
+        }
+        body.drawer-open .drawer-backdrop {
+            opacity: 1;
+            visibility: visible;
         }
 
-        nav a {
+        /* Navigation Drawer */
+        .nav-drawer {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 280px;
+            height: 100vh;
+            background: #1e293b;
+            z-index: 200;
+            transform: translateX(-100%);
+            transition: transform 0.25s ease;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+        }
+        body.drawer-open .nav-drawer {
+            transform: translateX(0);
+        }
+        .drawer-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 1rem 1.25rem;
+            border-bottom: 1px solid #334155;
+        }
+        .drawer-brand {
+            color: #fff;
+            font-weight: 700;
+            font-size: 1.15rem;
+        }
+        .drawer-close {
+            background: none;
+            border: none;
+            color: #94a3b8;
+            font-size: 1.5rem;
+            cursor: pointer;
+            padding: 0.25rem 0.5rem;
+            line-height: 1;
+            border-radius: 4px;
+        }
+        .drawer-close:hover { color: #fff; background: rgba(255,255,255,0.08); }
+        .drawer-section {
+            padding: 0.5rem 0;
+            border-bottom: 1px solid #334155;
+        }
+        .drawer-section:last-of-type { border-bottom: none; }
+        .drawer-group-label {
+            padding: 0.5rem 1.25rem 0.25rem;
+            font-size: 0.65rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: #64748b;
+        }
+        .drawer-link {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.55rem 1.25rem;
             color: #94a3b8;
             text-decoration: none;
             font-size: 0.9rem;
             font-weight: 500;
-            height: 100%;
-            display: flex;
-            align-items: center;
-            border-bottom: 2px solid transparent;
-            transition: all 0.2s;
+            transition: background 0.15s, color 0.15s;
+            border-left: 3px solid transparent;
         }
-
-        nav a:hover { color: #fff; }
-
-        nav a.active {
+        .drawer-link:hover {
+            background: rgba(255,255,255,0.05);
+            color: #e2e8f0;
+        }
+        .drawer-link.active {
             color: #fff;
-            border-bottom-color: var(--primary);
+            background: rgba(79, 70, 229, 0.15);
+            border-left-color: var(--primary);
+        }
+        .drawer-link svg {
+            flex-shrink: 0;
+        }
+        .drawer-badge {
+            margin-left: auto;
+        }
+        .drawer-footer {
+            margin-top: auto;
+            padding: 0.75rem 1.25rem;
+            border-top: 1px solid #334155;
+        }
+        .drawer-user-email {
+            color: #64748b;
+            font-size: 0.8rem;
+            word-break: break-all;
         }
 
         /* Layout */
         .container {
             max-width: 1400px;
-            margin: 2rem auto;
+            margin: 0 auto;
             padding: 0 1.5rem;
+            padding-top: 72px; /* 56px topbar + 16px spacing */
             padding-bottom: 4rem;
         }
 
@@ -373,95 +512,8 @@
            ============================================ */
 
         /* Hamburger menu button - hidden on desktop */
-        .nav-toggle {
-            display: none;
-            background: none;
-            border: none;
-            color: #94a3b8;
-            font-size: 1.5rem;
-            cursor: pointer;
-            padding: 0.5rem;
-            line-height: 1;
-        }
-        .nav-toggle:hover { color: #fff; }
-
-        /* Logo/brand - hidden on desktop (links show instead) */
-        .nav-brand {
-            display: none;
-            color: #fff;
-            font-weight: 600;
-            font-size: 1.1rem;
-            text-decoration: none;
-        }
-
-        /* Nav links container - inline on desktop */
-        .nav-links {
-            display: contents;
-        }
-
-        .nav-user {
-            display: contents;
-        }
-
         @media (max-width: 768px) {
-            /* Show hamburger and brand, hide regular nav links */
-            .nav-toggle { display: block; }
-            .nav-brand { display: block; }
-
-            nav {
-                flex-wrap: wrap;
-                padding: 0 1rem;
-                height: auto;
-                min-height: 50px;
-            }
-
-            .nav-brand {
-                order: 1;
-                padding: 0.75rem 0;
-                margin-right: auto;
-            }
-
-            .nav-toggle {
-                order: 2;
-                margin-left: auto;
-            }
-
-            .nav-links {
-                order: 3;
-                display: none;
-                width: 100%;
-                flex-direction: column;
-                background: #1e293b;
-                border-top: 1px solid #334155;
-                padding: 0.5rem 0;
-            }
-
-            .nav-links.open { display: flex; }
-
-            .nav-links a {
-                padding: 0.75rem 1rem;
-                border-bottom: none;
-                border-left: 3px solid transparent;
-            }
-
-            .nav-links a.active {
-                border-bottom: none;
-                border-left-color: var(--primary);
-                background: rgba(79, 70, 229, 0.1);
-            }
-
-            .nav-links a:hover {
-                background: rgba(255,255,255,0.05);
-            }
-
-            .nav-user {
-                width: 100%;
-                padding: 0.75rem 1rem;
-                border-top: 1px solid #334155;
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-            }
+            .nav-drawer { width: 260px; }
 
             /* Container adjustments */
             .container {
@@ -878,68 +930,14 @@
     </style>
 </head>
 <body>
-    <nav>
-        <a href="/" class="nav-brand">Cognitex</a>
-        <button class="nav-toggle" onclick="toggleNav()" aria-label="Toggle navigation">&#9776;</button>
-        <div class="nav-links" id="nav-links">
-            <a href="/" {% if request.url.path == "/" %}class="active"{% endif %}>Dashboard</a>
-            <a href="/today" {% if "/today" in request.url.path %}class="active"{% endif %}>Today</a>
-            <a href="/context-packs" {% if "/context-packs" in request.url.path %}class="active"{% endif %}>Context</a>
-            <a href="/chat" {% if "/chat" in request.url.path %}class="active"{% endif %}>Chat</a>
-            <a href="/inbox" {% if "/inbox" in request.url.path %}class="active"{% endif %} style="position: relative;">
-                Inbox
-                {% if "/auth/" not in request.url.path %}
-                <span id="inbox-badge"
-                      hx-get="/api/inbox/count"
-                      hx-trigger="load, every 15s, refresh from:body"
-                      hx-swap="innerHTML"
-                      style="position: absolute; top: 5px; right: -8px;"></span>
-                {% endif %}
-            </a>
-            <a href="/tasks" {% if "/tasks" in request.url.path %}class="active"{% endif %}>Tasks</a>
-            <a href="/projects" {% if "/projects" in request.url.path %}class="active"{% endif %}>Projects</a>
-            <a href="/goals" {% if "/goals" in request.url.path %}class="active"{% endif %}>Goals</a>
-            <a href="/commitments" {% if "/commitments" in request.url.path %}class="active"{% endif %}>Commitments</a>
-            <a href="/documents" {% if "/documents" in request.url.path %}class="active"{% endif %}>Documents</a>
-            <a href="/ideas" {% if "/ideas" in request.url.path %}class="active"{% endif %}>Ideas</a>
-            <a href="/graph" {% if "/graph" in request.url.path %}class="active"{% endif %}>Graph</a>
-            <a href="/learning" {% if "/learning" in request.url.path %}class="active"{% endif %}>Learning</a>
-            <a href="/agent-log" {% if "/agent-log" in request.url.path %}class="active"{% endif %}>Agent Log</a>
-            <a href="/bootstrap" {% if "/bootstrap" in request.url.path %}class="active"{% endif %}>Bootstrap</a>
-            <a href="/skills" {% if "/skills" in request.url.path %}class="active"{% endif %}>Skills</a>
-            <a href="/evolution" {% if "/evolution" in request.url.path %}class="active"{% endif %}>Evolution</a>
-            <a href="/memory" {% if "/memory" in request.url.path %}class="active"{% endif %}>Memory</a>
-            <a href="/settings" {% if "/settings" in request.url.path %}class="active"{% endif %}>Settings</a>
-            <a href="/help" {% if "/help" in request.url.path %}class="active"{% endif %} style="color: #60a5fa;">Help</a>
-            {% if request.state.user %}
-            <div class="nav-user">
-                <span style="color: #64748b; font-size: 0.85rem;">{{ request.state.user.email }}</span>
-                <a href="/auth/logout" style="color: #ef4444; font-size: 0.85rem;">Logout</a>
-            </div>
-            {% endif %}
-        </div>
-    </nav>
+    {% include "partials/nav_drawer.html" %}
 
     <div class="container">
         {% block content %}{% endblock %}
     </div>
 
     <script>
-    // Mobile nav toggle
-    function toggleNav() {
-        const navLinks = document.getElementById('nav-links');
-        navLinks.classList.toggle('open');
-    }
-
-    // Close nav when clicking a link (mobile)
-    document.addEventListener('DOMContentLoaded', function() {
-        const navLinks = document.querySelectorAll('.nav-links a');
-        navLinks.forEach(link => {
-            link.addEventListener('click', () => {
-                document.getElementById('nav-links').classList.remove('open');
-            });
-        });
-    });
+    // Nav drawer is handled by nav_drawer.html script
 
     // Subtasks expand/collapse
     function toggleSubtasks(taskId, event) {

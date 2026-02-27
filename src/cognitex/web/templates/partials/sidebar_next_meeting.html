@@ -1,0 +1,26 @@
+{% if event %}
+<div class="sidebar-section">
+    <div class="sidebar-section-header">
+        <span class="sidebar-label">Next Meeting</span>
+        <a href="/today" class="sidebar-link">Today</a>
+    </div>
+    <div class="sidebar-meeting-card">
+        <div class="sidebar-meeting-title">{{ event.title }}</div>
+        <div class="sidebar-meeting-time">{{ event.start_formatted }} - {{ event.end_formatted }}</div>
+        {% if event.attendees %}
+        <div class="sidebar-meeting-meta">{{ event.attendees|length }} attendee{{ 's' if event.attendees|length != 1 }}</div>
+        {% endif %}
+        {% if event.context_pack %}
+        <a href="/context-packs" class="sidebar-meeting-pack">Context pack ready</a>
+        {% endif %}
+    </div>
+</div>
+{% else %}
+<div class="sidebar-section">
+    <div class="sidebar-section-header">
+        <span class="sidebar-label">Next Meeting</span>
+        <a href="/today" class="sidebar-link">Today</a>
+    </div>
+    <div class="sidebar-empty">No upcoming meetings</div>
+</div>
+{% endif %}

@@ -1,0 +1,9 @@
+<div class="sidebar-section">
+    <div class="sidebar-section-header">
+        <span class="sidebar-label">Mode</span>
+    </div>
+    <div class="sidebar-mode">
+        <span class="mode-badge mode-{{ mode_class }}">{{ mode_label }}</span>
+        {% if notes %}<span class="sidebar-mode-notes">{{ notes }}</span>{% endif %}
+    </div>
+</div>

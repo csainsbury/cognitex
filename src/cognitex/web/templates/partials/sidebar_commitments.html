@@ -1,0 +1,34 @@
+{% if overdue or approaching %}
+<div class="sidebar-section">
+    <div class="sidebar-section-header">
+        <span class="sidebar-label">Commitments</span>
+        <a href="/commitments" class="sidebar-link">View all</a>
+    </div>
+    {% if overdue %}
+    {% for c in overdue[:3] %}
+    <div class="sidebar-item sidebar-item-danger">
+        <span class="sidebar-item-badge badge-danger">Overdue</span>
+        <span class="sidebar-item-text">{{ c.description[:60] }}{% if c.description|length > 60 %}...{% endif %}</span>
+        {% if c.project %}<span class="sidebar-item-meta">{{ c.project }}</span>{% endif %}
+    </div>
+    {% endfor %}
+    {% endif %}
+    {% if approaching %}
+    {% for c in approaching[:3] %}
+    <div class="sidebar-item sidebar-item-warning">
+        <span class="sidebar-item-badge badge-warning">Due soon</span>
+        <span class="sidebar-item-text">{{ c.description[:60] }}{% if c.description|length > 60 %}...{% endif %}</span>
+        {% if c.project %}<span class="sidebar-item-meta">{{ c.project }}</span>{% endif %}
+    </div>
+    {% endfor %}
+    {% endif %}
+</div>
+{% else %}
+<div class="sidebar-section">
+    <div class="sidebar-section-header">
+        <span class="sidebar-label">Commitments</span>
+        <a href="/commitments" class="sidebar-link">View all</a>
+    </div>
+    <div class="sidebar-empty">All clear</div>
+</div>
+{% endif %}

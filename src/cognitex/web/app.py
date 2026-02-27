@@ -631,7 +631,25 @@ async def auth_middleware(request: Request, call_next):
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    """Dashboard home page with comprehensive overview."""
+    """Chat-first landing page with Erdos."""
+    from cognitex.services.model_config import get_model_config_service
+
+    service = get_model_config_service()
+    config = await service.get_config()
+
+    return templates.TemplateResponse(
+        "chat_home.html",
+        {
+            "request": request,
+            "provider": config.provider.title(),
+            "model": config.planner_model,
+        },
+    )
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    """Dashboard page with comprehensive overview (formerly /)."""
     from cognitex.services.inbox import get_inbox_service
     from cognitex.services.ideas import list_ideas
     from cognitex.db.neo4j import get_neo4j_session
@@ -5333,6 +5351,103 @@ async def inbox_count():
         return HTMLResponse(content="")
 
 
+# -------------------------------------------------------------------
+# Sidebar API endpoints (HTMX fragments for chat landing page)
+# -------------------------------------------------------------------
+
+
+@app.get("/api/sidebar/commitments", response_class=HTMLResponse)
+async def sidebar_commitments(request: Request):
+    """Get commitment alerts for chat sidebar."""
+    from cognitex.db.neo4j import get_neo4j_session
+    from cognitex.agent.graph_observer import GraphObserver
+
+    overdue = []
+    approaching = []
+    try:
+        async for session in get_neo4j_session():
+            observer = GraphObserver(session)
+            approaching = await observer.get_approaching_commitments(hours=48)
+            overdue = await observer.get_overdue_commitments()
+            break
+    except Exception:
+        pass
+
+    return templates.TemplateResponse(
+        "partials/sidebar_commitments.html",
+        {"request": request, "overdue": overdue, "approaching": approaching},
+    )
+
+
+@app.get("/api/sidebar/next-meeting", response_class=HTMLResponse)
+async def sidebar_next_meeting(request: Request):
+    """Get next upcoming meeting for chat sidebar."""
+    from datetime import datetime as dt
+
+    events = []
+    try:
+        events = await get_today_events()
+    except Exception:
+        pass
+
+    # Find next event (start time in the future)
+    now = dt.now()
+    next_event = None
+    for event in events:
+        start_str = event.get("start_formatted", "")
+        # Events from get_today_events() have start_formatted; if the event
+        # hasn't passed yet, use it as next. We compare raw start_time if available.
+        raw_start = event.get("start_time")
+        if raw_start:
+            try:
+                # neo4j datetime objects have .to_native()
+                if hasattr(raw_start, "to_native"):
+                    event_dt = raw_start.to_native()
+                elif isinstance(raw_start, str):
+                    event_dt = dt.fromisoformat(raw_start.replace("Z", "+00:00"))
+                else:
+                    event_dt = raw_start
+                # Compare naive datetimes
+                if event_dt.replace(tzinfo=None) > now:
+                    next_event = event
+                    break
+            except Exception:
+                # Fallback: just use first event
+                next_event = event
+                break
+        else:
+            # No raw start available, use first event as fallback
+            next_event = event
+            break
+
+    return templates.TemplateResponse(
+        "partials/sidebar_next_meeting.html",
+        {"request": request, "event": next_event},
+    )
+
+
+@app.get("/api/sidebar/mode", response_class=HTMLResponse)
+async def sidebar_mode(request: Request):
+    """Get current operating mode for chat sidebar."""
+    mode_label = "Fragmented"
+    mode_class = "fragmented"
+    notes = None
+
+    try:
+        estimator = get_state_estimator()
+        state = await estimator.get_current_state()
+        mode_label = state.mode.value.replace("_", " ").title()
+        mode_class = state.mode.value
+        notes = state.notes
+    except Exception:
+        pass
+
+    return templates.TemplateResponse(
+        "partials/sidebar_mode.html",
+        {"request": request, "mode_label": mode_label, "mode_class": mode_class, "notes": notes},
+    )
+
+
 @app.get("/api/inbox/items", response_class=HTMLResponse)
 async def inbox_items_partial(request: Request, type: str | None = None):
     """Get inbox items partial (for HTMX refresh)."""
@@ -7446,22 +7561,10 @@ async def api_generate_briefing(request: Request):
 # -------------------------------------------------------------------
 
 
-@app.get("/chat", response_class=HTMLResponse)
-async def chat_page(request: Request):
-    """Chat page for interacting with the agent."""
-    from cognitex.services.model_config import get_model_config_service
-
-    service = get_model_config_service()
-    config = await service.get_config()
-
-    return templates.TemplateResponse(
-        "chat.html",
-        {
-            "request": request,
-            "provider": config.provider.title(),
-            "model": config.planner_model,
-        },
-    )
+@app.get("/chat")
+async def chat_page():
+    """Redirect /chat to / (chat is now the landing page)."""
+    return RedirectResponse(url="/", status_code=302)
 
 
 @app.post("/api/chat")

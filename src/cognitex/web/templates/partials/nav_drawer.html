@@ -1,0 +1,166 @@
+<!-- Top Bar -->
+<div class="topbar">
+    <button class="topbar-hamburger" onclick="toggleDrawer()" aria-label="Open navigation">&#9776;</button>
+    <a href="/" class="topbar-brand">Cognitex</a>
+    <div class="topbar-right">
+        {% if "/auth/" not in request.url.path %}
+        <a href="/inbox" class="topbar-inbox" aria-label="Inbox">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"></polyline>
+                <path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path>
+            </svg>
+            <span id="topbar-inbox-badge"
+                  hx-get="/api/inbox/count"
+                  hx-trigger="load, every 15s, refresh from:body"
+                  hx-swap="innerHTML"></span>
+        </a>
+        {% endif %}
+        {% if request.state.user %}
+        <a href="/auth/logout" class="topbar-logout" title="Logout ({{ request.state.user.email }})">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                <polyline points="16 17 21 12 16 7"></polyline>
+                <line x1="21" y1="12" x2="9" y2="12"></line>
+            </svg>
+        </a>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Drawer Backdrop -->
+<div class="drawer-backdrop" onclick="closeDrawer()"></div>
+
+<!-- Navigation Drawer -->
+<nav class="nav-drawer" id="nav-drawer">
+    <div class="drawer-header">
+        <span class="drawer-brand">Cognitex</span>
+        <button class="drawer-close" onclick="closeDrawer()" aria-label="Close navigation">&times;</button>
+    </div>
+
+    <div class="drawer-section">
+        <div class="drawer-group-label">Primary</div>
+        <a href="/" class="drawer-link {% if request.url.path == '/' %}active{% endif %}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+            Chat with Erdos
+        </a>
+        <a href="/inbox" class="drawer-link {% if '/inbox' in request.url.path %}active{% endif %}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"></polyline><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path></svg>
+            Inbox
+            <span class="drawer-badge" hx-get="/api/inbox/count" hx-trigger="load, every 15s" hx-swap="innerHTML"></span>
+        </a>
+        <a href="/today" class="drawer-link {% if '/today' in request.url.path %}active{% endif %}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+            Today
+        </a>
+    </div>
+
+    <div class="drawer-section">
+        <div class="drawer-group-label">Work</div>
+        <a href="/tasks" class="drawer-link {% if '/tasks' in request.url.path %}active{% endif %}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
+            Tasks
+        </a>
+        <a href="/projects" class="drawer-link {% if '/projects' in request.url.path %}active{% endif %}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+            Projects
+        </a>
+        <a href="/goals" class="drawer-link {% if '/goals' in request.url.path %}active{% endif %}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="6"></circle><circle cx="12" cy="12" r="2"></circle></svg>
+            Goals
+        </a>
+        <a href="/commitments" class="drawer-link {% if '/commitments' in request.url.path %}active{% endif %}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+            Commitments
+        </a>
+        <a href="/ideas" class="drawer-link {% if '/ideas' in request.url.path %}active{% endif %}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18h6"></path><path d="M10 22h4"></path><path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5A4.61 4.61 0 0 1 8.91 14"></path></svg>
+            Ideas
+        </a>
+    </div>
+
+    <div class="drawer-section">
+        <div class="drawer-group-label">Knowledge</div>
+        <a href="/documents" class="drawer-link {% if '/documents' in request.url.path %}active{% endif %}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+            Documents
+        </a>
+        <a href="/graph" class="drawer-link {% if '/graph' in request.url.path %}active{% endif %}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>
+            Graph
+        </a>
+        <a href="/context-packs" class="drawer-link {% if '/context-packs' in request.url.path %}active{% endif %}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+            Context Packs
+        </a>
+    </div>
+
+    <div class="drawer-section">
+        <div class="drawer-group-label">Agent</div>
+        <a href="/agent-log" class="drawer-link {% if '/agent-log' in request.url.path %}active{% endif %}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="12 8 12 12 14 14"></polyline><circle cx="12" cy="12" r="10"></circle></svg>
+            Agent Log
+        </a>
+        <a href="/learning" class="drawer-link {% if '/learning' in request.url.path %}active{% endif %}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>
+            Learning
+        </a>
+        <a href="/bootstrap" class="drawer-link {% if '/bootstrap' in request.url.path %}active{% endif %}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
+            Bootstrap
+        </a>
+        <a href="/skills" class="drawer-link {% if '/skills' in request.url.path %}active{% endif %}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+            Skills
+        </a>
+        <a href="/evolution" class="drawer-link {% if '/evolution' in request.url.path %}active{% endif %}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>
+            Evolution
+        </a>
+        <a href="/memory" class="drawer-link {% if '/memory' in request.url.path %}active{% endif %}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect><rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
+            Memory
+        </a>
+    </div>
+
+    <div class="drawer-section">
+        <div class="drawer-group-label">System</div>
+        <a href="/dashboard" class="drawer-link {% if '/dashboard' in request.url.path %}active{% endif %}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+            Dashboard
+        </a>
+        <a href="/settings" class="drawer-link {% if '/settings' in request.url.path %}active{% endif %}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            Settings
+        </a>
+        <a href="/help" class="drawer-link {% if '/help' in request.url.path %}active{% endif %}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+            Help
+        </a>
+    </div>
+
+    {% if request.state.user %}
+    <div class="drawer-footer">
+        <span class="drawer-user-email">{{ request.state.user.email }}</span>
+    </div>
+    {% endif %}
+</nav>
+
+<script>
+function toggleDrawer() {
+    document.body.classList.toggle('drawer-open');
+}
+
+function closeDrawer() {
+    document.body.classList.remove('drawer-open');
+}
+
+// Close drawer on Escape key
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeDrawer();
+});
+
+// Close drawer when clicking a link inside it
+document.getElementById('nav-drawer').addEventListener('click', function(e) {
+    if (e.target.closest('.drawer-link')) closeDrawer();
+});
+</script>
