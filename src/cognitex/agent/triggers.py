@@ -1540,7 +1540,12 @@ class TriggerSystem:
                     workflow=intent_result.suggested_workflow.value,
                     requires_doc_analysis=intent_result.requires_document_analysis,
                     confidence=intent_result.confidence,
+                    triage_decision=intent_result.triage_decision.value,
                 )
+
+                # WP4: Persist triage result on Email node (non-critical)
+                if gmail_id:
+                    await self._store_triage_result(gmail_id, intent_result)
 
                 # Step 2: Handle based on suggested workflow
                 if intent_result.suggested_workflow == SuggestedWorkflow.ARCHIVE:
@@ -1591,6 +1596,40 @@ class TriggerSystem:
                     subject=email.get("subject", "")[:50],
                     error=str(e),
                 )
+
+    async def _store_triage_result(self, gmail_id: str, intent_result) -> None:
+        """Persist WP4 triage fields on the Email node in Neo4j.
+
+        Non-critical — failures are logged but do not affect routing.
+        """
+        try:
+            from cognitex.db.graph_schema import update_email_triage
+            from cognitex.db.neo4j import get_neo4j_session
+
+            async for session in get_neo4j_session():
+                await update_email_triage(
+                    session,
+                    gmail_id=gmail_id,
+                    triage_decision=intent_result.triage_decision.value,
+                    action_verb=intent_result.action_verb or None,
+                    delegation_candidate=intent_result.delegation_candidate,
+                    factual_summary=intent_result.factual_summary or None,
+                    factual_urgency=intent_result.factual_urgency,
+                    deadline=intent_result.deadline,
+                    deadline_source=intent_result.deadline_source or None,
+                    project_context=intent_result.project_context,
+                    confidence=intent_result.confidence,
+                    clinical_flag=intent_result.clinical_flag,
+                    emotional_markers=intent_result.emotional_markers or [],
+                    intent=intent_result.intent.value,
+                )
+                break
+        except Exception as e:
+            logger.warning(
+                "Failed to store triage result",
+                gmail_id=gmail_id,
+                error=str(e),
+            )
 
     async def _handle_review_request_email(
         self,

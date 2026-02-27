@@ -24,7 +24,6 @@ SCHEMA_STATEMENTS = [
     "CREATE CONSTRAINT chunk_id IF NOT EXISTS FOR (c:Chunk) REQUIRE c.id IS UNIQUE",
     "CREATE CONSTRAINT topic_name IF NOT EXISTS FOR (t:Topic) REQUIRE t.name IS UNIQUE",
     "CREATE CONSTRAINT concept_name IF NOT EXISTS FOR (c:Concept) REQUIRE c.name IS UNIQUE",
-
     # Additional indexes for common queries
     "CREATE INDEX person_name IF NOT EXISTS FOR (p:Person) ON (p.name)",
     "CREATE INDEX person_org IF NOT EXISTS FOR (p:Person) ON (p.org)",
@@ -56,6 +55,9 @@ SCHEMA_STATEMENTS = [
     "CREATE INDEX coding_session_project IF NOT EXISTS FOR (cs:CodingSession) ON (cs.project_path)",
     "CREATE INDEX coding_session_ended IF NOT EXISTS FOR (cs:CodingSession) ON (cs.ended_at)",
     "CREATE INDEX coding_session_cli IF NOT EXISTS FOR (cs:CodingSession) ON (cs.cli_type)",
+    # WP4: Triage indexes
+    "CREATE INDEX email_triage_decision IF NOT EXISTS FOR (e:Email) ON (e.triage_decision)",
+    "CREATE INDEX email_triage_urgency IF NOT EXISTS FOR (e:Email) ON (e.triage_factual_urgency)",
     # Compound indexes for common query patterns
     "CREATE INDEX email_action_date IF NOT EXISTS FOR (e:Email) ON (e.action_required, e.date)",
     "CREATE INDEX task_status_priority IF NOT EXISTS FOR (t:Task) ON (t.status, t.priority)",
@@ -224,7 +226,9 @@ async def link_email_recipient(
     MATCH (p:Person {email: $recipient_email})
     MERGE (e)-[:RECEIVED_BY {type: $recipient_type}]->(p)
     """
-    await session.run(query, gmail_id=gmail_id, recipient_email=recipient_email, recipient_type=recipient_type)
+    await session.run(
+        query, gmail_id=gmail_id, recipient_email=recipient_email, recipient_type=recipient_type
+    )
 
 
 async def link_email_mentions(
@@ -310,6 +314,61 @@ async def mark_email_processed(
     )
 
 
+async def update_email_triage(
+    session: AsyncSession,
+    gmail_id: str,
+    triage_decision: str,
+    action_verb: str | None = None,
+    delegation_candidate: str | None = None,
+    factual_summary: str | None = None,
+    factual_urgency: int | None = None,
+    deadline: str | None = None,
+    deadline_source: str | None = None,
+    project_context: str | None = None,
+    confidence: float | None = None,
+    clinical_flag: bool = False,
+    emotional_markers: list[str] | None = None,
+    intent: str | None = None,
+) -> None:
+    """Store WP4 structured triage results on an Email node.
+
+    All triage properties are prefixed with ``triage_`` to avoid
+    collision with Stage 1 classification properties.
+    """
+    query = """
+    MATCH (e:Email {gmail_id: $gmail_id})
+    SET e.triage_decision = $triage_decision,
+        e.triage_action_verb = $action_verb,
+        e.triage_delegation_candidate = $delegation_candidate,
+        e.triage_factual_summary = $factual_summary,
+        e.triage_factual_urgency = $factual_urgency,
+        e.triage_deadline = $deadline,
+        e.triage_deadline_source = $deadline_source,
+        e.triage_project_context = $project_context,
+        e.triage_confidence = $confidence,
+        e.triage_clinical_flag = $clinical_flag,
+        e.triage_emotional_markers = $emotional_markers,
+        e.triage_intent = $intent,
+        e.triage_updated_at = datetime()
+    """
+    await session.run(
+        query,
+        gmail_id=gmail_id,
+        triage_decision=triage_decision,
+        action_verb=action_verb,
+        delegation_candidate=delegation_candidate,
+        factual_summary=factual_summary,
+        factual_urgency=factual_urgency,
+        deadline=deadline,
+        deadline_source=deadline_source,
+        project_context=project_context,
+        confidence=confidence,
+        clinical_flag=clinical_flag,
+        emotional_markers=emotional_markers or [],
+        intent=intent,
+    )
+
+
 async def infer_works_with_relationships(session: AsyncSession) -> int:
     """
     Infer WORKS_WITH relationships between people who appear in the same email threads.
@@ -333,6 +392,7 @@ async def infer_works_with_relationships(session: AsyncSession) -> int:
 # ============================================================================
 # Event (Calendar) operations
 # ============================================================================
+
 
 async def create_event(
     session: AsyncSession,
@@ -514,6 +574,7 @@ async def get_daily_energy_forecast(session: AsyncSession, date_str: str | None 
 # Task operations
 # ============================================================================
 
+
 async def create_task(
     session: AsyncSession,
     task_id: str,
@@ -624,7 +685,7 @@ async def update_task(
 
     query = f"""
     MATCH (t:Task {{id: $task_id}})
-    SET {', '.join(set_parts)}
+    SET {", ".join(set_parts)}
     RETURN t
     """
     result = await session.run(query, **params)
@@ -928,6 +989,7 @@ async def get_task(
     subtasks = []
     if subtasks_raw:
         import json
+
         try:
             subtasks = json.loads(subtasks_raw) if isinstance(subtasks_raw, str) else subtasks_raw
         except (json.JSONDecodeError, TypeError):
@@ -937,8 +999,12 @@ async def get_task(
         **task_data,
         "due": due_str,  # Alias for template compatibility
         "subtasks": subtasks,
-        "source_email": record["source_email"] if record["source_email"] and record["source_email"].get("gmail_id") else None,
-        "source_event": record["source_event"] if record["source_event"] and record["source_event"].get("gcal_id") else None,
+        "source_email": record["source_email"]
+        if record["source_email"] and record["source_email"].get("gmail_id")
+        else None,
+        "source_event": record["source_event"]
+        if record["source_event"] and record["source_event"].get("gcal_id")
+        else None,
         "projects": projects,
         "goals": goals,
         "people": people_display,  # Display-friendly names/emails
@@ -1017,15 +1083,17 @@ async def get_tasks(
         else:
             due_str = None
 
-        tasks.append({
-            **task_data,
-            "due": due_str,  # Alias for template compatibility
-            "source_subject": r["source_subject"],
-            "project": r["project_name"],  # Alias for template compatibility
-            "project_name": r["project_name"],
-            "people": [a for a in r["assignees"] if a],  # Alias for template
-            "assignees": [a for a in r["assignees"] if a],
-        })
+        tasks.append(
+            {
+                **task_data,
+                "due": due_str,  # Alias for template compatibility
+                "source_subject": r["source_subject"],
+                "project": r["project_name"],  # Alias for template compatibility
+                "project_name": r["project_name"],
+                "people": [a for a in r["assignees"] if a],  # Alias for template
+                "assignees": [a for a in r["assignees"] if a],
+            }
+        )
 
     return tasks
 
@@ -1180,7 +1248,9 @@ async def get_graph_stats(session: AsyncSession) -> dict:
     """
     rel_result = await session.run(rel_query)
     rel_record = await rel_result.single()
-    rel_counts = {item["type"]: item["count"] for item in rel_record["rel_counts"]} if rel_record else {}
+    rel_counts = (
+        {item["type"]: item["count"] for item in rel_record["rel_counts"]} if rel_record else {}
+    )
 
     return {"nodes": node_counts, "relationships": rel_counts}
 
@@ -1188,6 +1258,7 @@ async def get_graph_stats(session: AsyncSession) -> dict:
 # ============================================================================
 # Document (Drive) operations
 # ============================================================================
+
 
 async def create_document(
     session: AsyncSession,
@@ -1291,7 +1362,9 @@ async def mark_document_indexed(
         d.embedding_id = $embedding_id,
         d.indexed_at = datetime()
     """
-    await session.run(query, drive_id=drive_id, content_hash=content_hash, embedding_id=embedding_id)
+    await session.run(
+        query, drive_id=drive_id, content_hash=content_hash, embedding_id=embedding_id
+    )
 
 
 async def get_documents(
@@ -1412,6 +1485,7 @@ async def get_document_stats(session: AsyncSession) -> dict:
 # Project operations
 # ============================================================================
 
+
 async def create_project(
     session: AsyncSession,
     project_id: str,
@@ -1495,7 +1569,7 @@ async def update_project(
 
     query = f"""
     MATCH (p:Project {{id: $project_id}})
-    SET {', '.join(set_parts)}
+    SET {", ".join(set_parts)}
     RETURN p
     """
     result = await session.run(query, **params)
@@ -1537,7 +1611,9 @@ async def get_project(
     owner_email = record["owner_email"]
     owner_name = record.get("owner_name")
     stakeholders = [s for s in record["stakeholders"] if s.get("email")]
-    all_people = ([{"email": owner_email, "name": owner_name}] if owner_email else []) + stakeholders
+    all_people = (
+        [{"email": owner_email, "name": owner_name}] if owner_email else []
+    ) + stakeholders
     # Deduplicate by email while preserving order
     seen = set()
     people_full = []
@@ -1622,7 +1698,9 @@ async def get_projects(
         owner_email = r.get("owner_email")
         owner_name = r.get("owner_name")
         stakeholders = [s for s in (r.get("stakeholder_list") or []) if s.get("email")]
-        all_people = ([{"email": owner_email, "name": owner_name}] if owner_email else []) + stakeholders
+        all_people = (
+            [{"email": owner_email, "name": owner_name}] if owner_email else []
+        ) + stakeholders
 
         # Deduplicate by email while preserving order
         seen = set()
@@ -1639,16 +1717,18 @@ async def get_projects(
         if target_date:
             project_data["target_date"] = str(target_date)
 
-        projects.append({
-            **project_data,
-            "task_count": r["task_count"],
-            "completed_tasks": r["completed_tasks"],
-            "goal_name": r["goal_name"],
-            "goal": r["goal_name"],  # Alias for template compatibility
-            "people": people_emails,
-            "people_full": people_full,
-            "repositories": [repo for repo in (r.get("repositories") or []) if repo],
-        })
+        projects.append(
+            {
+                **project_data,
+                "task_count": r["task_count"],
+                "completed_tasks": r["completed_tasks"],
+                "goal_name": r["goal_name"],
+                "goal": r["goal_name"],  # Alias for template compatibility
+                "people": people_emails,
+                "people_full": people_full,
+                "repositories": [repo for repo in (r.get("repositories") or []) if repo],
+            }
+        )
 
     return projects
 
@@ -1772,6 +1852,7 @@ async def delete_project(
 # Goal operations
 # ============================================================================
 
+
 async def create_goal(
     session: AsyncSession,
     goal_id: str,
@@ -1846,7 +1927,7 @@ async def update_goal(
 
     query = f"""
     MATCH (g:Goal {{id: $goal_id}})
-    SET {', '.join(set_parts)}
+    SET {", ".join(set_parts)}
     RETURN g
     """
     result = await session.run(query, **params)
@@ -1886,7 +1967,9 @@ async def get_goal(
     owner_email = record["owner_email"]
     owner_name = record.get("owner_name")
     stakeholders = [s for s in record["stakeholders"] if s.get("email")]
-    all_people = ([{"email": owner_email, "name": owner_name}] if owner_email else []) + stakeholders
+    all_people = (
+        [{"email": owner_email, "name": owner_name}] if owner_email else []
+    ) + stakeholders
     # Deduplicate by email while preserving order
     seen = set()
     people_full = []
@@ -1995,6 +2078,7 @@ async def delete_goal(
 # ============================================================================
 # Repository operations (GitHub integration)
 # ============================================================================
+
 
 async def create_repository(
     session: AsyncSession,
@@ -2139,6 +2223,7 @@ async def delete_repository(
 # CodeFile operations
 # ============================================================================
 
+
 async def create_codefile(
     session: AsyncSession,
     codefile_id: str,
@@ -2230,7 +2315,11 @@ async def get_codefiles(
         filters.append("cf.language = $language")
         params["language"] = language
 
-    repo_match = "MATCH (r:Repository)-[:CONTAINS]->(cf:CodeFile)" if repository_id else "MATCH (cf:CodeFile)"
+    repo_match = (
+        "MATCH (r:Repository)-[:CONTAINS]->(cf:CodeFile)"
+        if repository_id
+        else "MATCH (cf:CodeFile)"
+    )
     where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
 
     query = f"""
@@ -2269,6 +2358,7 @@ async def link_codefiles_import(
 # ============================================================================
 # Chunk operations (Document semantic graph)
 # ============================================================================
+
 
 async def create_chunk(
     session: AsyncSession,
@@ -2746,7 +2836,12 @@ async def get_topic_connections(
     result = await session.run(query, topic_name=normalized)
     record = await result.single()
     if not record:
-        return {"related_concepts": [], "mentioned_people": [], "related_topics": [], "documents": []}
+        return {
+            "related_concepts": [],
+            "mentioned_people": [],
+            "related_topics": [],
+            "documents": [],
+        }
     return {
         "related_concepts": [c for c in record["related_concepts"] if c],
         "mentioned_people": [p for p in record["mentioned_people"] if p],
