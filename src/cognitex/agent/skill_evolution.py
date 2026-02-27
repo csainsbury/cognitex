@@ -829,6 +829,27 @@ class SkillEvolution:
             break
         return rows
 
+    async def get_feedback_summary(self) -> list[dict]:
+        """Get feedback counts per skill for the dashboard (last 30 days)."""
+        rows: list[dict] = []
+        try:
+            async for session in self._get_session():
+                await self._ensure_schema(session)
+                result = await session.execute(
+                    text("""
+                    SELECT skill_name, feedback_type, COUNT(*) as count
+                    FROM skill_feedback
+                    WHERE created_at > NOW() - INTERVAL '30 days'
+                    GROUP BY skill_name, feedback_type
+                    ORDER BY skill_name, count DESC
+                """)
+                )
+                rows = [dict(r) for r in result.mappings()]
+                break
+        except Exception as e:
+            logger.warning("Failed to get feedback summary", error=str(e)[:100])
+        return rows
+
     async def _get_all_proposals(self, limit: int = 50) -> list[dict[str, Any]]:
         """Get all proposals for history view."""
         async for session in self._get_session():

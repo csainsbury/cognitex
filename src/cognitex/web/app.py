@@ -1079,6 +1079,20 @@ async def task_reject_and_learn(
         }
     )
 
+    # Route to skill feedback
+    try:
+        from cognitex.agent.skill_feedback_router import route_rejection_to_skill
+        await route_rejection_to_skill(
+            proposal_type="create_task",
+            reason=reason,
+            context={
+                "task_title": task_info["title"],
+                "email_subject": email_info.get("subject") if email_info else None,
+            },
+        )
+    except Exception:
+        pass  # Skill feedback is non-critical
+
     # Delete the task
     await task_service.delete(task_id)
 
@@ -3114,6 +3128,17 @@ async def reject_draft_with_feedback(
             )
         except Exception as e:
             logger.warning("Failed to record draft rejection in unified learning", error=str(e))
+
+        # Route to skill feedback
+        try:
+            from cognitex.agent.skill_feedback_router import route_rejection_to_skill
+            await route_rejection_to_skill(
+                proposal_type="draft_email",
+                reason=reason,
+                context={"email_subject": email_subject, "email_sender": email_sender},
+            )
+        except Exception:
+            pass
 
         return HTMLResponse(f'''
             <div id="draft-{draft_id}" class="draft-card" style="background: #fef2f2; border-color: #b91c1c; opacity: 0.7;">
@@ -5722,6 +5747,17 @@ async def reject_inbox_item(
         summary=f"Rejected {item.item_type}: {item.title[:50]} ({reason})",
         details={"item_id": item_id, "item_type": item.item_type, "reason": reason}
     )
+
+    # Route to skill feedback
+    try:
+        from cognitex.agent.skill_feedback_router import route_rejection_to_skill
+        await route_rejection_to_skill(
+            proposal_type=item.item_type,
+            reason=reason,
+            context=item.payload,
+        )
+    except Exception:
+        pass
 
     return HTMLResponse(content=f"""
         <div class="inbox-item" style="background: #fee2e2; border-color: #fecaca; opacity: 0.8;">
@@ -9379,10 +9415,16 @@ async def skill_author_deploy(
 async def evolution_page(request: Request):
     """Evolution dashboard page."""
     from cognitex.agent.skill_evolution import get_skill_evolution
+    from cognitex.agent.skills import get_skills_loader
 
     evolution = get_skill_evolution()
     pending = await evolution._get_pending_proposals()
     history = await evolution._get_all_proposals(limit=50)
+    feedback_summary = await evolution.get_feedback_summary()
+
+    loader = get_skills_loader()
+    all_skills = await loader.list_skills()
+    skill_names = [s["name"] for s in all_skills]
 
     return templates.TemplateResponse(
         "evolution.html",
@@ -9390,6 +9432,8 @@ async def evolution_page(request: Request):
             "request": request,
             "pending": pending,
             "history": [h for h in history if h["status"] != "proposed"],
+            "feedback_summary": feedback_summary,
+            "skill_names": skill_names,
         },
     )
 
@@ -9439,6 +9483,33 @@ async def evolution_trigger():
         return HTMLResponse(
             '<div style="color: var(--text-muted); padding: 0.5rem;">'
             'Analysis complete: no new patterns detected.</div>'
+        )
+    except Exception as e:
+        return HTMLResponse(
+            f'<div style="color: var(--danger); padding: 0.5rem;">'
+            f'Error: {html.escape(str(e)[:200])}</div>'
+        )
+
+
+@app.post("/api/evolution/feedback", response_class=HTMLResponse)
+async def evolution_manual_feedback(
+    skill_name: str = Form(...),
+    feedback_type: str = Form(...),
+    description: str = Form(...),
+):
+    """Submit manual feedback about a skill from the evolution dashboard."""
+    from cognitex.agent.skill_feedback_router import submit_manual_feedback
+
+    try:
+        feedback_id = await submit_manual_feedback(skill_name, feedback_type, description)
+        return HTMLResponse(
+            f'<div style="color: var(--success); padding: 0.5rem;">'
+            f'Feedback recorded ({feedback_id}). This will be considered in the next evolution cycle.</div>'
+        )
+    except ValueError as e:
+        return HTMLResponse(
+            f'<div style="color: var(--danger); padding: 0.5rem;">'
+            f'Error: {html.escape(str(e))}</div>'
         )
     except Exception as e:
         return HTMLResponse(

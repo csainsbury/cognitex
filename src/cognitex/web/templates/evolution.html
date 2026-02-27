@@ -22,6 +22,88 @@
     <div id="trigger-result" style="margin-top: 0.5rem;"></div>
 </div>
 
+<!-- Skill Feedback Summary (last 30 days) -->
+<div class="card" style="margin-bottom: 1.5rem;">
+    <div class="card-header">
+        <h2>Skill Feedback</h2>
+        <span class="text-dim" style="font-size: 0.85rem;">Last 30 days</span>
+    </div>
+
+    {% if feedback_summary %}
+    {% set ns = namespace(skills={}) %}
+    {% for row in feedback_summary %}
+        {% if row.skill_name not in ns.skills %}
+            {% set _ = ns.skills.update({row.skill_name: {"correction": 0, "false_positive": 0, "missing_case": 0, "suggestion": 0, "total": 0}}) %}
+        {% endif %}
+        {% set _ = ns.skills[row.skill_name].update({row.feedback_type: row.count}) %}
+        {% set _ = ns.skills[row.skill_name].update({"total": ns.skills[row.skill_name].total + row.count}) %}
+    {% endfor %}
+    <table>
+        <thead>
+            <tr>
+                <th>Skill</th>
+                <th>Corrections</th>
+                <th>False Positives</th>
+                <th>Missing Cases</th>
+                <th>Suggestions</th>
+                <th>Total</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for skill_name, counts in ns.skills.items() %}
+            <tr>
+                <td><strong>{{ skill_name }}</strong></td>
+                <td>{{ counts.correction }}</td>
+                <td>{{ counts.false_positive }}</td>
+                <td>{{ counts.missing_case }}</td>
+                <td>{{ counts.suggestion }}</td>
+                <td><strong>{{ counts.total }}</strong></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty" style="padding: 1rem;">
+        No feedback recorded yet. Rejections and corrections from the inbox, tasks, and drafts will appear here.
+    </div>
+    {% endif %}
+</div>
+
+<!-- Manual Feedback -->
+<details style="margin-bottom: 1.5rem;">
+    <summary style="cursor: pointer; color: var(--primary); font-weight: 500;">Submit Manual Feedback</summary>
+    <div class="card" style="margin-top: 0.5rem;">
+        <form style="padding: 1rem; display: flex; flex-direction: column; gap: 0.75rem;"
+              hx-post="/api/evolution/feedback"
+              hx-target="#manual-feedback-result"
+              hx-swap="innerHTML">
+            <div>
+                <label style="display: block; margin-bottom: 0.25rem; font-size: 0.9rem;">Skill</label>
+                <select name="skill_name" required style="width: 100%; max-width: 300px;">
+                    {% for name in skill_names %}
+                    <option value="{{ name }}">{{ name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div>
+                <label style="display: block; margin-bottom: 0.25rem; font-size: 0.9rem;">Type</label>
+                <label style="margin-right: 1rem;"><input type="radio" name="feedback_type" value="correction" checked> Correction</label>
+                <label style="margin-right: 1rem;"><input type="radio" name="feedback_type" value="false_positive"> False Positive</label>
+                <label style="margin-right: 1rem;"><input type="radio" name="feedback_type" value="missing_case"> Missing Case</label>
+                <label><input type="radio" name="feedback_type" value="suggestion"> Suggestion</label>
+            </div>
+            <div>
+                <label style="display: block; margin-bottom: 0.25rem; font-size: 0.9rem;">Description</label>
+                <textarea name="description" required rows="3" style="width: 100%; max-width: 500px;" placeholder="Describe the issue or suggestion..."></textarea>
+            </div>
+            <div>
+                <button type="submit" class="btn btn-primary">Submit Feedback</button>
+            </div>
+            <div id="manual-feedback-result"></div>
+        </form>
+    </div>
+</details>
+
 <!-- Pending Proposals -->
 <div class="card" style="margin-bottom: 1.5rem;">
     <div class="card-header">
