@@ -48,6 +48,60 @@ async def ingest_email_to_graph(
     """
     # Classify email if requested
     classification_result = None
+
+    # Clinical data firewall — runs BEFORE any LLM call
+    clinical_scan_result = None
+    try:
+        from cognitex.config import get_settings
+
+        settings = get_settings()
+        if settings.clinical_firewall_enabled:
+            from cognitex.services.clinical_firewall import get_firewall
+
+            firewall = get_firewall()
+            scan_text = (
+                f"{email_data.get('subject', '')} "
+                f"{email_data.get('snippet', '')} "
+                f"{body or ''}"
+            )
+            clinical_scan_result = firewall.scan(scan_text)
+            if clinical_scan_result.is_clinical:
+                if settings.clinical_firewall_mode == "block":
+                    logger.info(
+                        "Clinical email blocked from LLM",
+                        gmail_id=email_data["gmail_id"],
+                        categories=clinical_scan_result.matched_categories,
+                    )
+                    classify = False
+                    classification_result = {
+                        "classification": "clinical_blocked",
+                        "urgency": 0,
+                        "action_required": False,
+                        "clinical_categories": clinical_scan_result.matched_categories,
+                    }
+                elif settings.clinical_firewall_mode == "redact":
+                    if body:
+                        body = firewall.filter_text(body)
+                    email_data = {**email_data}  # Don't mutate original
+                    email_data["snippet"] = firewall.filter_text(
+                        email_data.get("snippet", "")
+                    )
+                    email_data["subject"] = firewall.filter_text(
+                        email_data.get("subject", "")
+                    )
+                    logger.info(
+                        "Clinical email redacted",
+                        gmail_id=email_data["gmail_id"],
+                    )
+                else:  # flag mode
+                    logger.warning(
+                        "Clinical content detected (flag mode)",
+                        gmail_id=email_data["gmail_id"],
+                        categories=clinical_scan_result.matched_categories,
+                    )
+    except Exception as e:
+        logger.debug("Clinical firewall check failed", error=str(e))
+
     if classify:
         try:
             from cognitex.services.llm import get_llm_service
@@ -134,6 +188,8 @@ async def ingest_email_to_graph(
             is_sent=is_sent,
             needs_research=classification_result.get("needs_research", False) if classification_result else False,
             research_topics=classification_result.get("research_topics") if classification_result else None,
+            clinical_content_detected=clinical_scan_result.is_clinical if clinical_scan_result else False,
+            clinical_categories=clinical_scan_result.matched_categories if clinical_scan_result and clinical_scan_result.is_clinical else None,
         )
 
         # Create relationships
@@ -323,7 +379,7 @@ Use task numbers (1-indexed) from the list above. Return empty array if no tasks
 
 async def process_sent_emails(emails: list[dict], user_email: str) -> dict:
     """
-    Process sent emails to check for task auto-completion.
+    Process sent emails to check for task auto-completion and learn writing style.
 
     Args:
         emails: List of email metadata dicts
@@ -336,6 +392,7 @@ async def process_sent_emails(emails: list[dict], user_email: str) -> dict:
         "sent_emails_found": 0,
         "tasks_checked": 0,
         "tasks_completed": [],
+        "styles_analyzed": 0,
     }
 
     for email_data in emails:
@@ -345,6 +402,10 @@ async def process_sent_emails(emails: list[dict], user_email: str) -> dict:
             continue
 
         stats["sent_emails_found"] += 1
+
+        # Analyze writing style for learning
+        await _analyze_sent_email_style(email_data)
+        stats["styles_analyzed"] += 1
 
         # Find related tasks
         tasks = await check_sent_email_for_task_completion(email_data, user_email)
@@ -362,7 +423,56 @@ async def process_sent_emails(emails: list[dict], user_email: str) -> dict:
             task_ids=stats["tasks_completed"],
         )
 
+    if stats["styles_analyzed"] > 0:
+        logger.debug(
+            "Analyzed sent email styles",
+            count=stats["styles_analyzed"],
+        )
+
     return stats
+
+
+async def _analyze_sent_email_style(email_data: dict) -> None:
+    """Analyze a sent email's writing style for learning.
+
+    Extracts style metrics and updates both recipient-specific
+    and general writing style profiles.
+
+    Args:
+        email_data: Email metadata dict with body content
+    """
+    try:
+        from cognitex.services.email_style import get_email_style_analyzer
+
+        # Get email body
+        body = email_data.get("body") or email_data.get("body_preview", "")
+        if not body or len(body.strip()) < 20:
+            return
+
+        # Get recipient
+        recipients = email_data.get("recipients", [])
+        to_email = recipients[0] if recipients else None
+
+        # Extract style metrics
+        analyzer = get_email_style_analyzer()
+        metrics = await analyzer.extract_style(body, to_email)
+
+        # Update recipient-specific profile
+        if to_email:
+            await analyzer.update_recipient_profile(to_email, metrics)
+
+        # Update general profile
+        await analyzer.update_recipient_profile(None, metrics)
+
+        logger.debug(
+            "Analyzed sent email style",
+            recipient=to_email,
+            formality=f"{metrics.formality:.2f}",
+            greeting=metrics.greeting_style,
+        )
+
+    except Exception as e:
+        logger.warning("Failed to analyze sent email style", error=str(e))
 
 
 async def ingest_email_batch(emails: list[dict]) -> dict:

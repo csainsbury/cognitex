@@ -138,6 +138,8 @@ async def create_email(
     is_sent: bool = False,
     needs_research: bool = False,
     research_topics: list[str] | None = None,
+    clinical_content_detected: bool = False,
+    clinical_categories: list[str] | None = None,
 ) -> dict:
     """Create an Email node."""
     query = """
@@ -156,6 +158,8 @@ async def create_email(
         e.is_sent = $is_sent,
         e.needs_research = $needs_research,
         e.research_topics = $research_topics,
+        e.clinical_content_detected = $clinical_content_detected,
+        e.clinical_categories = $clinical_categories,
         e.created_at = datetime(),
         e.processed = false
     ON MATCH SET
@@ -166,7 +170,9 @@ async def create_email(
         e.labels = COALESCE($labels, e.labels),
         e.is_sent = COALESCE($is_sent, e.is_sent),
         e.needs_research = COALESCE($needs_research, e.needs_research),
-        e.research_topics = COALESCE($research_topics, e.research_topics)
+        e.research_topics = COALESCE($research_topics, e.research_topics),
+        e.clinical_content_detected = COALESCE($clinical_content_detected, e.clinical_content_detected),
+        e.clinical_categories = COALESCE($clinical_categories, e.clinical_categories)
     RETURN e
     """
     result = await session.run(
@@ -185,6 +191,8 @@ async def create_email(
         is_sent=is_sent,
         needs_research=needs_research,
         research_topics=research_topics or [],
+        clinical_content_detected=clinical_content_detected,
+        clinical_categories=clinical_categories or [],
     )
     record = await result.single()
     return dict(record["e"]) if record else {}

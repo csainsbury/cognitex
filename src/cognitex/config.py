@@ -237,6 +237,20 @@ class Settings(BaseSettings):
         description="Number of recent conversation turns to keep verbatim",
     )
 
+    # Clinical Data Firewall
+    clinical_firewall_enabled: bool = Field(
+        default=True,
+        description="Enable pre-LLM clinical data filtering",
+    )
+    clinical_firewall_mode: Literal["block", "redact", "flag"] = Field(
+        default="block",
+        description="block=skip LLM entirely, redact=remove PHI then process, flag=process but warn",
+    )
+    clinical_firewall_patterns_path: str = Field(
+        default="~/.cognitex/config/clinical_bypass_regex.txt",
+        description="Path to clinical data regex patterns file",
+    )
+
     @property
     def is_development(self) -> bool:
         return self.environment == "development"

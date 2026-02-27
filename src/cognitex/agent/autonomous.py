@@ -264,15 +264,42 @@ class AutonomousAgent:
         # Build a concise summary for the LLM
         summary = context["summary"]
 
+        # Load clinical firewall if enabled
+        firewall = None
+        fw_mode = "block"
+        try:
+            settings = get_settings()
+            if settings.clinical_firewall_enabled:
+                from cognitex.services.clinical_firewall import get_firewall
+
+                firewall = get_firewall()
+                fw_mode = settings.clinical_firewall_mode
+        except Exception:
+            pass
+
         # Format inbox items (captured interruptions waiting for triage)
         inbox_items = context.get("inbox_items", [])
         if inbox_items:
             inbox_lines = []
             for item in inbox_items:
+                subject = item.get("subject", "No subject")
+                preview = item.get("preview", "")[:100]
+                if firewall:
+                    scan = firewall.scan(f"{subject} {preview}")
+                    if scan.is_clinical and fw_mode == "block":
+                        source = item.get("source", "unknown")
+                        inbox_lines.append(
+                            f"  - [CLINICAL] [{source}] Blocked by clinical firewall\n"
+                            f"    ID: {item.get('id')}"
+                        )
+                        continue
+                    elif scan.is_clinical:
+                        subject = firewall.filter_text(subject)
+                        preview = firewall.filter_text(preview)
                 urgency = item.get("urgency", "normal").upper()
                 inbox_lines.append(
-                    f"  - [{urgency}] [{item.get('source', 'unknown')}] {item.get('subject', 'No subject')}\n"
-                    f"    Preview: {item.get('preview', '')[:100]}...\n"
+                    f"  - [{urgency}] [{item.get('source', 'unknown')}] {subject}\n"
+                    f"    Preview: {preview}...\n"
                     f"    Suggestion: {item.get('suggested', 'Review')}\n"
                     f"    ID: {item.get('id')}"
                 )
@@ -295,11 +322,22 @@ class AutonomousAgent:
         if pending_emails:
             email_lines = []
             for e in pending_emails:
-                urgency = str(e.get('urgency', 'normal')).upper()
                 sender = e.get('sender_name') or e.get('sender_email') or 'Unknown'
                 # Truncate snippet and subject to protect token budget
                 snippet = str(e.get('snippet', '') or '')[:300]
                 subject = str(e.get('subject', 'No subject') or 'No subject')[:100]
+                if firewall:
+                    scan = firewall.scan(f"{subject} {snippet}")
+                    if scan.is_clinical and fw_mode == "block":
+                        email_lines.append(
+                            f"  - [CLINICAL] From: {sender}"
+                            f" — blocked by clinical firewall"
+                        )
+                        continue
+                    elif scan.is_clinical:
+                        snippet = firewall.filter_text(snippet)
+                        subject = firewall.filter_text(subject)
+                urgency = str(e.get('urgency', 'normal')).upper()
                 email_lines.append(
                     f"  - [{urgency}] From: {sender}\n"
                     f"    Subject: {subject}\n"

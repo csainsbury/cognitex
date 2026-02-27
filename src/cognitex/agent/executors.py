@@ -123,6 +123,38 @@ Writing style:
         context_section = f"Context: {reasoning}"
 
         if deep_context:
+            # Clinical firewall — filter before LLM
+            try:
+                from cognitex.config import get_settings
+
+                settings = get_settings()
+                if settings.clinical_firewall_enabled:
+                    from cognitex.services.clinical_firewall import get_firewall
+
+                    fw = get_firewall()
+                    body_text = deep_context.get("full_body", "")
+                    if body_text:
+                        scan = fw.scan(body_text)
+                        if scan.is_clinical:
+                            if settings.clinical_firewall_mode == "block":
+                                return ToolResult(
+                                    success=False,
+                                    message="Cannot draft reply: email contains clinical content (blocked by firewall)",
+                                )
+                            else:
+                                deep_context["full_body"] = fw.filter_text(body_text)
+                                for msg in deep_context.get("thread_history", []):
+                                    if msg.get("body"):
+                                        msg["body"] = fw.filter_text(msg["body"])
+                                for i, item in enumerate(
+                                    deep_context.get("action_items_extracted", [])
+                                ):
+                                    deep_context["action_items_extracted"][i] = (
+                                        fw.filter_text(item)
+                                    )
+            except Exception as e:
+                logger.debug("Clinical firewall check failed in executor", error=str(e))
+
             # Include full email body
             if deep_context.get("full_body"):
                 context_section += f"\n\n--- Original Email Body ---\n{deep_context['full_body'][:3000]}"
