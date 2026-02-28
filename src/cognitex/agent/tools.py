@@ -170,6 +170,81 @@ class GetInboxTool(BaseTool):
             return ToolResult(success=False, error=str(e))
 
 
+class CheckEmailTool(BaseTool):
+    """Fetch recent emails from the live email provider (Gmail or AgentMail)."""
+
+    name = "check_email"
+    description = (
+        "Check the user's email for recent messages. Fetches live from Gmail or AgentMail "
+        "(not the knowledge graph). Use this when the user asks to check, read, or review "
+        "their email. Returns sender, subject, date, and snippet for each message."
+    )
+    risk = ToolRisk.READONLY
+    category = ToolCategory.READONLY
+    parameters = {
+        "limit": {
+            "type": "integer",
+            "description": "Max messages to return (default 15)",
+            "default": 15,
+        },
+        "query": {
+            "type": "string",
+            "description": "Search query to filter emails (Gmail search syntax or label filter)",
+            "optional": True,
+        },
+    }
+
+    async def execute(self, limit: int = 15, query: str | None = None) -> ToolResult:
+        from cognitex.services.email_provider import get_email_provider
+
+        try:
+            provider = get_email_provider()
+            labels = None
+            if query and query.lower() in ("inbox", "unread", "starred", "important"):
+                labels = [query.upper()]
+                query = None
+
+            if labels:
+                messages = await provider.get_messages(limit=limit, labels=labels)
+            else:
+                messages = await provider.get_messages(limit=limit)
+
+            if not messages:
+                return ToolResult(
+                    success=True,
+                    data={
+                        "provider": provider.provider_name,
+                        "count": 0,
+                        "messages": [],
+                        "message": "No messages found",
+                    },
+                )
+
+            summary = []
+            for msg in messages:
+                summary.append({
+                    "id": msg.get("gmail_id", msg.get("id", "")),
+                    "from": msg.get("sender_name") or msg.get("sender_email", "unknown"),
+                    "from_email": msg.get("sender_email", ""),
+                    "subject": msg.get("subject", "(no subject)"),
+                    "date": msg.get("date", ""),
+                    "snippet": msg.get("snippet", "")[:150],
+                    "labels": msg.get("labels", []),
+                })
+
+            return ToolResult(
+                success=True,
+                data={
+                    "provider": provider.provider_name,
+                    "count": len(summary),
+                    "messages": summary,
+                },
+            )
+        except Exception as e:
+            logger.warning("Check email failed", error=str(e))
+            return ToolResult(success=False, error=f"Failed to check email: {e}")
+
+
 class SearchDocumentsTool(BaseTool):
     """Semantic search over indexed documents."""
 
@@ -1837,6 +1912,7 @@ class ToolRegistry:
             # Read-only
             GraphQueryTool(),
             GetInboxTool(),
+            CheckEmailTool(),
             SearchDocumentsTool(),
             ReadDocumentTool(),
             SearchCodeTool(),
