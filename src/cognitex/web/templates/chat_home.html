@@ -204,20 +204,6 @@
 </div>
 
 <div class="chat-messages" id="chat-messages">
-    <div class="message message-agent">
-        <div class="message-sender">Erdos</div>
-        <div class="message-bubble">
-            Hello! I'm <strong>Erdos</strong>, your cognitive assistant. I can help you with:
-            <ul style="margin: 0.4rem 0 0 1.2rem; padding: 0;">
-                <li>Searching your emails, documents, and calendar</li>
-                <li>Creating and managing tasks, projects, and goals</li>
-                <li>Drafting emails (with your approval)</li>
-                <li>Meeting prep and context packs</li>
-                <li>Answering questions about your data</li>
-            </ul>
-            <br>Type a message or try a <strong>/command</strong>. What can I help you with?
-        </div>
-    </div>
 </div>
 
 <div class="typing-indicator" id="typing-indicator">
@@ -357,15 +343,47 @@ function clearChat() {
     if (confirm('Clear chat history? This will also clear the agent\'s working memory.')) {
         fetch('/api/chat/clear', { method: 'POST' })
             .then(() => {
-                messagesEl.innerHTML = `
-                    <div class="message message-agent">
-                        <div class="message-sender">Erdos</div>
-                        <div class="message-bubble">Chat history cleared. How can I help you?</div>
-                    </div>
-                `;
+                messagesEl.innerHTML = '';
+                showWelcome();
             });
     }
 }
+
+// Load chat history from working memory on page load
+async function loadHistory() {
+    try {
+        const resp = await fetch('/api/chat/history');
+        const data = await resp.json();
+        if (data.interactions && data.interactions.length > 0) {
+            for (const msg of data.interactions) {
+                addMessage(msg.content, msg.role === 'user');
+            }
+        } else {
+            showWelcome();
+        }
+    } catch (err) {
+        showWelcome();
+    }
+}
+
+function showWelcome() {
+    const div = document.createElement('div');
+    div.className = 'message message-agent';
+    div.innerHTML = `<div class="message-sender">Erdos</div><div class="message-bubble">
+        Hello! I'm <strong>Erdos</strong>, your cognitive assistant. I can help you with:
+        <ul style="margin: 0.4rem 0 0 1.2rem; padding: 0;">
+            <li>Searching your emails, documents, and calendar</li>
+            <li>Creating and managing tasks, projects, and goals</li>
+            <li>Drafting emails (with your approval)</li>
+            <li>Meeting prep and context packs</li>
+            <li>Answering questions about your data</li>
+        </ul>
+        <br>Type a message or try a <strong>/command</strong>. What can I help you with?
+    </div>`;
+    messagesEl.appendChild(div);
+}
+
+loadHistory();
 
 // Focus input on page load
 inputEl.focus();

@@ -7633,6 +7633,33 @@ async def api_chat_clear():
         await redis.close()
 
 
+@app.get("/api/chat/history")
+async def api_chat_history():
+    """Return the current session's chat history from working memory."""
+    import redis.asyncio as aioredis
+
+    settings = get_settings()
+    redis = aioredis.from_url(settings.redis_url)
+
+    try:
+        data = await redis.get("cognitex:memory:working:context")
+        if data:
+            context = json.loads(data)
+            interactions = context.get("interactions", [])
+            # Return only role + content for rendering
+            return JSONResponse({
+                "interactions": [
+                    {"role": i["role"], "content": i["content"]}
+                    for i in interactions
+                ],
+            })
+        return JSONResponse({"interactions": []})
+    except Exception as e:
+        return JSONResponse({"interactions": [], "error": str(e)})
+    finally:
+        await redis.close()
+
+
 @app.get("/api/chat/commands")
 async def api_chat_commands():
     """List available slash commands for the chat command helper."""
