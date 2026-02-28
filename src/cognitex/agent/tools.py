@@ -118,6 +118,58 @@ class GraphQueryTool(BaseTool):
             return ToolResult(success=False, error=str(e))
 
 
+class GetInboxTool(BaseTool):
+    """Get pending inbox items (task proposals, email drafts, flagged items)."""
+
+    name = "get_inbox"
+    description = (
+        "Get pending inbox items requiring user attention. "
+        "Returns task proposals, email drafts, context packs, and flagged items."
+    )
+    risk = ToolRisk.READONLY
+    category = ToolCategory.READONLY
+    parameters = {
+        "item_type": {
+            "type": "string",
+            "description": "Filter by type: task_proposal, email_draft, context_pack, flagged_item",
+            "optional": True,
+        },
+        "limit": {"type": "integer", "description": "Max results", "default": 20},
+    }
+
+    async def execute(self, item_type: str | None = None, limit: int = 20) -> ToolResult:
+        from cognitex.services.inbox import get_inbox_service
+
+        try:
+            inbox = get_inbox_service()
+            items = await inbox.get_pending_items(item_type=item_type, limit=limit)
+            if not items:
+                return ToolResult(
+                    success=True,
+                    data={"count": 0, "items": [], "message": "Inbox is empty"},
+                )
+            return ToolResult(
+                success=True,
+                data={
+                    "count": len(items),
+                    "items": [
+                        {
+                            "id": item.id,
+                            "type": item.item_type,
+                            "priority": item.priority,
+                            "title": item.title,
+                            "summary": item.summary,
+                            "created_at": item.created_at.isoformat() if item.created_at else None,
+                        }
+                        for item in items
+                    ],
+                },
+            )
+        except Exception as e:
+            logger.warning("Get inbox failed", error=str(e))
+            return ToolResult(success=False, error=str(e))
+
+
 class SearchDocumentsTool(BaseTool):
     """Semantic search over indexed documents."""
 
@@ -1784,6 +1836,7 @@ class ToolRegistry:
         default_tools = [
             # Read-only
             GraphQueryTool(),
+            GetInboxTool(),
             SearchDocumentsTool(),
             ReadDocumentTool(),
             SearchCodeTool(),

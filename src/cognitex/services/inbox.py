@@ -120,6 +120,31 @@ class InboxService:
         """
         from cognitex.db.postgres import get_session
 
+        # Deduplicate: skip if a pending item with the same source already exists
+        if source_id:
+            async for session in get_session():
+                try:
+                    result = await session.execute(
+                        text("""
+                            SELECT id FROM inbox_items
+                            WHERE source_id = :source_id
+                              AND status = 'pending'
+                            LIMIT 1
+                        """),
+                        {"source_id": source_id},
+                    )
+                    existing = result.fetchone()
+                    if existing:
+                        logger.debug(
+                            "Inbox item already exists for source",
+                            source_id=source_id,
+                            existing_id=existing[0],
+                        )
+                        return await self.get_item(existing[0])
+                except Exception:
+                    pass  # Proceed with creation on error
+                break
+
         item_id = f"inbox_{uuid.uuid4().hex[:12]}"
         now = datetime.now()
 
