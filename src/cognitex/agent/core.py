@@ -73,7 +73,18 @@ class Agent:
         logger.info("Initializing agent")
 
         settings = get_settings()
-        self._provider = settings.llm_provider
+
+        # Load model config from Redis (runtime overrides), falling back to env settings
+        try:
+            from cognitex.services.model_config import get_model_config_service
+            model_config = await get_model_config_service().get_config()
+            self._provider = model_config.provider
+            self._model = model_config.planner_model
+            logger.info("Loaded model config from Redis", provider=self._provider, model=self._model)
+        except Exception as e:
+            logger.warning("Failed to load model config from Redis, using env", error=str(e))
+            self._provider = settings.llm_provider
+            self._model = None  # Will be set below per provider
 
         # Initialize the appropriate LLM client based on provider
         if self._provider == "google":
@@ -84,7 +95,7 @@ class Agent:
                 raise ValueError("GOOGLE_AI_API_KEY not configured")
             genai.configure(api_key=api_key)
             self._client = genai
-            self._model = settings.google_model_planner
+            self._model = self._model or settings.google_model_planner
             logger.info("Using Google Gemini", model=self._model)
         elif self._provider == "anthropic":
             from anthropic import Anthropic
@@ -93,7 +104,7 @@ class Agent:
             if not api_key:
                 raise ValueError("ANTHROPIC_API_KEY not configured")
             self._client = Anthropic(api_key=api_key)
-            self._model = settings.anthropic_model_planner
+            self._model = self._model or settings.anthropic_model_planner
             logger.info("Using Anthropic Claude", model=self._model)
         elif self._provider == "openai":
             from openai import OpenAI
@@ -102,14 +113,26 @@ class Agent:
             if not api_key:
                 raise ValueError("OPENAI_API_KEY not configured")
             self._client = OpenAI(api_key=api_key)
-            self._model = settings.openai_model_planner
+            self._model = self._model or settings.openai_model_planner
             logger.info("Using OpenAI", model=self._model)
+        elif self._provider == "openrouter":
+            from openai import OpenAI
+
+            api_key = settings.openrouter_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("OPENROUTER_API_KEY not configured")
+            self._client = OpenAI(
+                api_key=api_key,
+                base_url="https://openrouter.ai/api/v1",
+            )
+            self._model = self._model or settings.openrouter_model_planner
+            logger.info("Using OpenRouter", model=self._model)
         else:  # together (default)
             api_key = settings.together_api_key.get_secret_value()
             if not api_key:
                 raise ValueError("TOGETHER_API_KEY not configured")
             self._client = Together(api_key=api_key)
-            self._model = settings.together_model_planner
+            self._model = self._model or settings.together_model_planner
             self._provider = "together"
             logger.info("Using Together.ai", model=self._model)
 
@@ -699,6 +722,12 @@ Example queries:
             "send_email",
         ]
         trace_id = None
+
+        # Set depth/model context for sub-agent spawning
+        if action == "spawn_subagent":
+            tool._current_depth = 0  # orchestrator is depth 0
+            tool._parent_model = self._model
+            tool._parent_provider = self._provider
 
         try:
             result = await tool.execute(**action_input)

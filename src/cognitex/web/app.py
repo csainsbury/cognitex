@@ -8449,7 +8449,7 @@ async def api_settings_models_update(
     from cognitex.services.model_config import get_model_config_service, ModelConfig
 
     # Determine embedding provider based on chat provider
-    # Anthropic and Google don't have embeddings, so use Together
+    # Anthropic, Google, and OpenRouter don't have embeddings, so use Together
     embedding_provider = provider if provider in ("together", "openai") else "together"
 
     service = get_model_config_service()
@@ -8535,7 +8535,7 @@ async def api_settings_provider_switch(request: Request, provider: str):
     """Switch to a different LLM provider."""
     from cognitex.services.model_config import get_model_config_service, ModelConfig
 
-    valid_providers = {"together", "anthropic", "openai", "google"}
+    valid_providers = {"together", "anthropic", "openai", "google", "openrouter"}
     if provider not in valid_providers:
         raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
 
@@ -8650,6 +8650,28 @@ async def api_settings_models_preset(request: Request, preset: str):
             embedding_model="BAAI/bge-base-en-v1.5",
             embedding_provider="together",
         ),
+        # OpenRouter presets
+        "openrouter-claude": ModelConfig(
+            provider="openrouter",
+            planner_model="anthropic/claude-sonnet-4",
+            executor_model="anthropic/claude-sonnet-4",
+            embedding_model="BAAI/bge-base-en-v1.5",
+            embedding_provider="together",
+        ),
+        "openrouter-deepseek": ModelConfig(
+            provider="openrouter",
+            planner_model="deepseek/deepseek-r1",
+            executor_model="deepseek/deepseek-chat-v3-0324",
+            embedding_model="BAAI/bge-base-en-v1.5",
+            embedding_provider="together",
+        ),
+        "openrouter-grok": ModelConfig(
+            provider="openrouter",
+            planner_model="x-ai/grok-3-mini-beta",
+            executor_model="x-ai/grok-3-mini-beta",
+            embedding_model="BAAI/bge-base-en-v1.5",
+            embedding_provider="together",
+        ),
         # Legacy presets (for backwards compatibility)
         "performance": ModelConfig(
             provider="together",
@@ -8725,6 +8747,189 @@ async def update_model_routing(request: Request):
     await service.set_config(config)
 
     return HTMLResponse('<span style="color: #16a34a;">Routing saved</span>')
+
+
+# =============================================================================
+# Models & Sub-Agents Page
+# =============================================================================
+
+
+@app.get("/models", response_class=HTMLResponse)
+async def models_page(request: Request):
+    """Models & Sub-Agents management page."""
+    from cognitex.services.model_config import (
+        MODEL_ALIASES,
+        get_model_config_service,
+    )
+    from cognitex.agent.subagent import get_subagent_registry
+    from cognitex.agent.tools import get_tool_registry
+
+    from cognitex.services.model_config import PROVIDERS
+
+    service = get_model_config_service()
+    config = await service.get_config()
+    chat_models = service.get_chat_models_for_provider(config.provider)
+    providers = service.get_available_providers()
+
+    # Build all-provider model map for grouped dropdowns
+    all_chat_models: dict[str, list[dict]] = {}
+    for p_id in ["anthropic", "openai", "google", "together", "openrouter"]:
+        models = service.get_chat_models_for_provider(p_id)
+        if models:
+            all_chat_models[PROVIDERS.get(p_id, p_id)] = models
+
+    registry = get_subagent_registry()
+    subagents = await registry.get_all()
+
+    tool_registry = get_tool_registry()
+    tool_names = sorted(t.name for t in tool_registry.all())
+
+    return templates.TemplateResponse(
+        "models.html",
+        {
+            "request": request,
+            "config": config.to_dict(),
+            "chat_models": chat_models,
+            "all_chat_models": all_chat_models,
+            "providers": providers,
+            "model_aliases": MODEL_ALIASES,
+            "subagents": subagents,
+            "tool_names": tool_names,
+        },
+    )
+
+
+@app.post("/api/models/core", response_class=HTMLResponse)
+async def update_core_models(request: Request):
+    """Update orchestrator (planner) and executor models."""
+    from cognitex.services.llm import reset_llm_service
+    from cognitex.services.model_config import get_model_config_service
+
+    form = await request.form()
+    service = get_model_config_service()
+    config = await service.get_config()
+
+    provider = form.get("provider", "").strip()
+    planner = form.get("planner_model", "").strip()
+    executor = form.get("executor_model", "").strip()
+
+    if provider:
+        config.provider = provider
+    if planner:
+        config.planner_model = planner
+    if executor:
+        config.executor_model = executor
+
+    await service.set_config(config)
+    reset_llm_service()
+
+    return HTMLResponse('<span style="color: #16a34a;">Saved</span>')
+
+
+@app.get("/api/models/subagents/{name}", response_class=JSONResponse)
+async def get_subagent(name: str):
+    """Get a sub-agent config as JSON."""
+    from cognitex.agent.subagent import get_subagent_registry
+
+    registry = get_subagent_registry()
+    agent = await registry.get(name)
+    if not agent:
+        raise HTTPException(status_code=404, detail=f"Sub-agent '{name}' not found")
+    return JSONResponse(agent.to_dict())
+
+
+@app.get("/api/models/subagents/{name}/edit", response_class=HTMLResponse)
+async def edit_subagent_form(request: Request, name: str):
+    """Render the sub-agent edit form partial."""
+    from cognitex.services.model_config import MODEL_ALIASES, get_model_config_service
+    from cognitex.agent.subagent import SubAgentConfig, get_subagent_registry
+    from cognitex.agent.tools import get_tool_registry
+
+    service = get_model_config_service()
+    providers = service.get_available_providers()
+
+    tool_registry = get_tool_registry()
+    tool_names = sorted(t.name for t in tool_registry.all())
+
+    is_new = name == "_new"
+    if is_new:
+        agent = SubAgentConfig(name="", purpose="")
+    else:
+        registry = get_subagent_registry()
+        agent = await registry.get(name)
+        if not agent:
+            raise HTTPException(status_code=404, detail=f"Sub-agent '{name}' not found")
+
+    return templates.TemplateResponse(
+        "partials/subagent_edit.html",
+        {
+            "request": request,
+            "agent": agent,
+            "is_new": is_new,
+            "model_aliases": MODEL_ALIASES,
+            "providers": providers,
+            "tool_names": tool_names,
+        },
+    )
+
+
+@app.post("/api/models/subagents", response_class=HTMLResponse)
+async def save_subagent(request: Request):
+    """Create or update a user-defined sub-agent."""
+    from cognitex.agent.subagent import SubAgentConfig, get_subagent_registry, BUILTIN_SUBAGENTS
+
+    form = await request.form()
+    name = form.get("name", "").strip()
+    if not name:
+        return HTMLResponse('<span style="color: var(--danger);">Name is required</span>')
+
+    # For builtins, only allow model/provider changes
+    if name in BUILTIN_SUBAGENTS:
+        model = form.get("model", "").strip()
+        provider = form.get("provider", "").strip()
+        registry = get_subagent_registry()
+        if model:
+            await registry.update_builtin_model(name, model)
+        return HTMLResponse(
+            f'<span style="color: #16a34a;">Updated {name} model override</span>'
+        )
+
+    allowed = form.getlist("allowed_tools")
+    denied = form.getlist("denied_tools")
+
+    config = SubAgentConfig(
+        name=name,
+        purpose=form.get("purpose", "").strip(),
+        model=form.get("model", "").strip(),
+        provider=form.get("provider", "").strip(),
+        allowed_tools=allowed,
+        denied_tools=denied,
+        max_iterations=int(form.get("max_iterations", "5")),
+        system_prompt_extra=form.get("system_prompt_extra", "").strip(),
+    )
+
+    registry = get_subagent_registry()
+    await registry.save_user_agent(config)
+
+    return HTMLResponse(f'<span style="color: #16a34a;">Saved {name}</span>')
+
+
+@app.delete("/api/models/subagents/{name}", response_class=HTMLResponse)
+async def delete_subagent(request: Request, name: str):
+    """Delete a user-defined sub-agent."""
+    from cognitex.agent.subagent import get_subagent_registry
+
+    registry = get_subagent_registry()
+    try:
+        deleted = await registry.delete_user_agent(name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Sub-agent '{name}' not found")
+
+    # Redirect to /models to refresh the page
+    return RedirectResponse(url="/models", status_code=303)
 
 
 # =============================================================================

@@ -200,6 +200,18 @@ class Planner:
             self.model = settings.openai_model_planner
             logger.info("Planner using OpenAI", model=self.model)
 
+        elif self.provider == "openrouter":
+            from openai import OpenAI
+            api_key = settings.openrouter_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("OPENROUTER_API_KEY not configured")
+            self.client = OpenAI(
+                api_key=api_key,
+                base_url="https://openrouter.ai/api/v1",
+            )
+            self.model = settings.openrouter_model_planner
+            logger.info("Planner using OpenRouter", model=self.model)
+
         else:  # together (default)
             from together import Together
             api_key = settings.together_api_key.get_secret_value()

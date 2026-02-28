@@ -1818,6 +1818,10 @@ class ToolRegistry:
             CreateEventTool(),
         ]
 
+        # Sub-agent spawn tool
+        from cognitex.agent.subagent import SpawnSubAgentTool
+        default_tools.append(SpawnSubAgentTool())
+
         for tool in default_tools:
             self._tools[tool.name] = tool
 

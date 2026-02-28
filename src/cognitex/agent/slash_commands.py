@@ -112,6 +112,24 @@ class SlashCommandRegistry:
 # ---------------------------------------------------------------------------
 
 
+def _is_known_model(model_id: str) -> bool:
+    """Check if a model ID appears in any provider's model list or aliases."""
+    from cognitex.services.model_config import (
+        ANTHROPIC_CHAT_MODELS,
+        GOOGLE_CHAT_MODELS,
+        MODEL_ALIASES,
+        OPENAI_CHAT_MODELS,
+        OPENROUTER_CHAT_MODELS,
+        TOGETHER_CHAT_MODELS,
+    )
+
+    all_ids = {m["id"] for m in (
+        TOGETHER_CHAT_MODELS + ANTHROPIC_CHAT_MODELS + OPENAI_CHAT_MODELS
+        + GOOGLE_CHAT_MODELS + OPENROUTER_CHAT_MODELS
+    )}
+    return model_id in all_ids or model_id in MODEL_ALIASES
+
+
 async def _handle_model(args: str) -> str:
     """Show or switch model configuration."""
     from cognitex.services.llm import reset_llm_service
@@ -128,18 +146,54 @@ async def _handle_model(args: str) -> str:
         # Show current config
         lines = [
             f"Provider: {config.provider}",
-            f"Planner: {config.planner_model}",
+            f"Orchestrator (planner): {config.planner_model}",
             f"Executor: {config.executor_model}",
+            "",
+            "Per-task overrides:",
         ]
         for slot in TASK_MODEL_SLOTS:
             val = getattr(config, f"{slot}_model", "")
             lines.append(f"  {slot}: {val or '(default)'}")
+
+        # Show custom sub-agents
+        try:
+            from cognitex.agent.subagent import get_subagent_registry
+            registry = get_subagent_registry()
+            all_agents = await registry.get_all()
+            custom = [a for a in all_agents.values() if not a.is_builtin]
+            if custom:
+                lines.append("\nCustom sub-agents:")
+                for a in custom:
+                    model_str = a.model or "(inherit)"
+                    lines.append(f"  {a.name}: {model_str} — {a.purpose}")
+        except Exception:
+            pass
+
         lines.append(f"\nAliases: {', '.join(sorted(MODEL_ALIASES.keys()))}")
         return "\n".join(lines)
 
     parts = args.strip().split()
 
-    # Check if first arg is a task slot: `/model autonomous opus`
+    # `/model executor <alias>` — change only executor
+    if len(parts) >= 2 and parts[0] == "executor":
+        alias_or_id = parts[1]
+        if alias_or_id in MODEL_ALIASES:
+            provider, model_id = MODEL_ALIASES[alias_or_id]
+            config.provider = provider
+        else:
+            model_id = alias_or_id
+        config.executor_model = model_id
+        await svc.set_config(config)
+        reset_llm_service()
+        warning = ""
+        if alias_or_id not in MODEL_ALIASES and not _is_known_model(model_id):
+            warning = "\n(not in known model list — may not work)"
+        return (
+            f"Executor changed to {model_id}\n"
+            f"Orchestrator unchanged: {config.planner_model}{warning}"
+        )
+
+    # `/model <slot> <alias>` — per-task override
     if len(parts) >= 2 and parts[0] in TASK_MODEL_SLOTS:
         slot = parts[0]
         alias_or_id = parts[1]
@@ -150,23 +204,30 @@ async def _handle_model(args: str) -> str:
         await svc.update_task_model(slot, model_id)
         return f"Set {slot} model to {model_id}"
 
-    # Single arg: alias or model ID for planner+executor switch
+    # Single arg: alias or model ID — change ONLY orchestrator (planner)
     alias_or_id = parts[0]
     if alias_or_id in MODEL_ALIASES:
         provider, model_id = MODEL_ALIASES[alias_or_id]
         config.provider = provider
         config.planner_model = model_id
-        config.executor_model = model_id
         await svc.set_config(config)
         reset_llm_service()
-        return f"Switched to {alias_or_id} ({provider}/{model_id})"
+        return (
+            f"Orchestrator changed to {alias_or_id} ({provider}/{model_id})\n"
+            f"Executor unchanged: {config.executor_model}"
+        )
 
-    # Treat as raw model ID
+    # Treat as raw model ID — change only orchestrator
     config.planner_model = alias_or_id
-    config.executor_model = alias_or_id
     await svc.set_config(config)
     reset_llm_service()
-    return f"Switched planner+executor to {alias_or_id}"
+    warning = ""
+    if not _is_known_model(alias_or_id):
+        warning = "\n(not in known model list — may not work)"
+    return (
+        f"Orchestrator changed to {alias_or_id}\n"
+        f"Executor unchanged: {config.executor_model}{warning}"
+    )
 
 
 async def _handle_provider(args: str) -> str:
@@ -424,7 +485,7 @@ def _register_builtin_commands(registry: SlashCommandRegistry) -> None:
         description="Show or switch model",
         handler=_handle_model,
         aliases=["m"],
-        usage="[alias | <slot> <alias>]",
+        usage="[alias | executor <alias> | <slot> <alias>]",
         category="config",
     ))
     registry.register(SlashCommand(

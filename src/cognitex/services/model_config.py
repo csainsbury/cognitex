@@ -19,7 +19,7 @@ logger = structlog.get_logger()
 REDIS_KEY = "cognitex:model_config"
 
 # Provider type
-ProviderType = Literal["together", "anthropic", "openai", "google"]
+ProviderType = Literal["together", "anthropic", "openai", "google", "openrouter"]
 
 # Available providers with their display names
 PROVIDERS = {
@@ -27,6 +27,7 @@ PROVIDERS = {
     "anthropic": "Anthropic (Claude)",
     "openai": "OpenAI (GPT)",
     "google": "Google (Gemini)",
+    "openrouter": "OpenRouter",
 }
 
 # Popular Together.ai models for different purposes
@@ -34,7 +35,6 @@ TOGETHER_CHAT_MODELS = [
     # Latest/Best
     {"id": "deepseek-ai/DeepSeek-V3", "display_name": "DeepSeek V3", "context_length": 128000},
     {"id": "deepseek-ai/DeepSeek-R1", "display_name": "DeepSeek R1 (Reasoning)", "context_length": 128000},
-    {"id": "Qwen/Qwen3-235B-A22B-fp8", "display_name": "Qwen3 235B", "context_length": 40960},
     {"id": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", "display_name": "Llama 4 Maverick 17B", "context_length": 131072},
     {"id": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "display_name": "Llama 3.3 70B Turbo", "context_length": 131072},
     {"id": "meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo", "display_name": "Llama 3.1 405B Turbo", "context_length": 130815},
@@ -88,6 +88,30 @@ GOOGLE_CHAT_MODELS = [
     {"id": "gemini-1.5-flash", "display_name": "Gemini 1.5 Flash", "context_length": 1000000},
 ]
 
+# OpenRouter models (multi-provider gateway, OpenAI-compatible)
+OPENROUTER_CHAT_MODELS = [
+    # Anthropic (via OpenRouter)
+    {"id": "anthropic/claude-sonnet-4", "display_name": "Claude Sonnet 4", "context_length": 200000},
+    {"id": "anthropic/claude-opus-4", "display_name": "Claude Opus 4", "context_length": 200000},
+    {"id": "anthropic/claude-haiku-3.5", "display_name": "Claude 3.5 Haiku (Fast)", "context_length": 200000},
+    # Google
+    {"id": "google/gemini-2.5-pro-preview", "display_name": "Gemini 2.5 Pro", "context_length": 1000000},
+    {"id": "google/gemini-2.5-flash-preview", "display_name": "Gemini 2.5 Flash", "context_length": 1000000},
+    # DeepSeek
+    {"id": "deepseek/deepseek-r1", "display_name": "DeepSeek R1 (Reasoning)", "context_length": 128000},
+    {"id": "deepseek/deepseek-chat-v3-0324", "display_name": "DeepSeek V3", "context_length": 128000},
+    # Meta Llama
+    {"id": "meta-llama/llama-4-maverick", "display_name": "Llama 4 Maverick", "context_length": 131072},
+    {"id": "meta-llama/llama-3.3-70b-instruct", "display_name": "Llama 3.3 70B", "context_length": 131072},
+    # Qwen
+    {"id": "qwen/qwen3-235b-a22b", "display_name": "Qwen3 235B", "context_length": 40960},
+    {"id": "qwen/qwq-32b", "display_name": "QwQ 32B (Reasoning)", "context_length": 131072},
+    # Mistral
+    {"id": "mistralai/mistral-medium-3", "display_name": "Mistral Medium 3", "context_length": 131072},
+    # xAI
+    {"id": "x-ai/grok-3-mini-beta", "display_name": "Grok 3 Mini", "context_length": 131072},
+]
+
 # Backwards compatibility
 RECOMMENDED_CHAT_MODELS = [m["id"] for m in TOGETHER_CHAT_MODELS]
 RECOMMENDED_EMBEDDING_MODELS = [m["id"] for m in TOGETHER_EMBEDDING_MODELS]
@@ -109,7 +133,12 @@ MODEL_ALIASES: dict[str, tuple[str, str]] = {
     "deepseek-r1": ("together", "deepseek-ai/DeepSeek-R1"),
     "llama-70b": ("together", "meta-llama/Llama-3.3-70B-Instruct-Turbo"),
     "llama-405b": ("together", "meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo"),
-    "qwen": ("together", "Qwen/Qwen3-235B-A22B-fp8"),
+    "qwen": ("together", "Qwen/Qwen3-30B-A3B"),
+    # OpenRouter aliases
+    "grok": ("openrouter", "x-ai/grok-3-mini-beta"),
+    "maverick": ("openrouter", "meta-llama/llama-4-maverick"),
+    "r1": ("openrouter", "deepseek/deepseek-r1"),
+    "mistral": ("openrouter", "mistralai/mistral-medium-3"),
 }
 
 # Per-task model override slots
@@ -184,6 +213,11 @@ class ModelConfig:
             executor = settings.google_model_executor
             embedding = settings.together_model_embedding  # Use Together for embeddings
             embedding_provider = "together"
+        elif provider == "openrouter":
+            planner = settings.openrouter_model_planner
+            executor = settings.openrouter_model_executor
+            embedding = settings.together_model_embedding  # Use Together for embeddings
+            embedding_provider = "together"
         else:  # together (default)
             planner = settings.together_model_planner
             executor = settings.together_model_executor
@@ -235,6 +269,8 @@ class ModelConfigService:
             return OPENAI_CHAT_MODELS
         elif provider == "google":
             return GOOGLE_CHAT_MODELS
+        elif provider == "openrouter":
+            return OPENROUTER_CHAT_MODELS
         return TOGETHER_CHAT_MODELS
 
     def get_embedding_models_for_provider(self, provider: str) -> list[dict]:
@@ -243,7 +279,7 @@ class ModelConfigService:
             return TOGETHER_EMBEDDING_MODELS
         elif provider == "openai":
             return OPENAI_EMBEDDING_MODELS
-        # Anthropic and Google don't have their own embeddings, use Together
+        # Anthropic, Google, and OpenRouter don't have their own embeddings, use Together
         return TOGETHER_EMBEDDING_MODELS
 
     def get_available_providers(self) -> list[dict]:
@@ -260,6 +296,8 @@ class ModelConfigService:
                 has_key = bool(settings.openai_api_key.get_secret_value())
             elif key == "google":
                 has_key = bool(settings.google_ai_api_key.get_secret_value())
+            elif key == "openrouter":
+                has_key = bool(settings.openrouter_api_key.get_secret_value())
 
             providers.append({
                 "id": key,

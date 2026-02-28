@@ -128,6 +128,19 @@ class LLMService:
             self.fast_model = settings.openai_model_executor
             logger.info("LLMService using OpenAI (async)", model=self.primary_model)
 
+        elif self.provider == "openrouter":
+            from openai import AsyncOpenAI
+            api_key = settings.openrouter_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("OPENROUTER_API_KEY not configured")
+            self.client = AsyncOpenAI(
+                api_key=api_key,
+                base_url="https://openrouter.ai/api/v1",
+            )
+            self.primary_model = settings.openrouter_model_planner
+            self.fast_model = settings.openrouter_model_executor
+            logger.info("LLMService using OpenRouter (async)", model=self.primary_model)
+
         else:  # together (default)
             from together import AsyncTogether
             api_key = settings.together_api_key.get_secret_value()
@@ -220,6 +233,175 @@ class LLMService:
         except Exception as e:
             logger.warning("Failed to resolve task model, using default", task=task, error=str(e))
         return None
+
+    async def complete_messages(
+        self,
+        messages: list[dict[str, str]],
+        model: str | None = None,
+        provider: str | None = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.3,
+        task: str | None = None,
+    ) -> str:
+        """Generate a completion from a structured message list.
+
+        Unlike complete(), this takes a full message list (system/user/assistant)
+        instead of a single prompt string. Used by sub-agents for multi-turn loops.
+
+        Args:
+            messages: List of {"role": ..., "content": ...} dicts
+            model: Model to use (defaults to primary)
+            provider: Provider override (defaults to self.provider)
+            max_tokens: Maximum tokens in response
+            temperature: Sampling temperature
+            task: Optional task slot for per-task model routing
+
+        Returns:
+            Generated text response
+        """
+        if model is None and task:
+            model = await self._resolve_task_model(task)
+        model = model or self.primary_model
+        use_provider = provider or self.provider
+
+        return await self._complete_messages_internal(
+            messages=messages,
+            model=model,
+            provider=use_provider,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+
+    @with_retry(max_attempts=3, base_delay=1.0)
+    async def _complete_messages_internal(
+        self,
+        messages: list[dict[str, str]],
+        model: str,
+        provider: str,
+        max_tokens: int = 2048,
+        temperature: float = 0.3,
+    ) -> str:
+        """Internal messages completion with retry logic."""
+        if provider == "google":
+            import google.generativeai as genai
+
+            from cognitex.config import get_settings
+
+            # Convert to Gemini format
+            gemini_messages = []
+            system_prompt = None
+            for msg in messages:
+                role = msg["role"]
+                content = msg["content"]
+                if role == "system":
+                    system_prompt = content
+                elif role == "assistant":
+                    gemini_messages.append({"role": "model", "parts": [content]})
+                else:
+                    gemini_messages.append({"role": "user", "parts": [content]})
+
+            if system_prompt and gemini_messages:
+                first_content = gemini_messages[0]["parts"][0]
+                gemini_messages[0]["parts"][0] = f"{system_prompt}\n\n{first_content}"
+
+            safety_settings = [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ]
+
+            use_fallback = False
+            fallback_reason = None
+            try:
+                genai_model = self.client.GenerativeModel(model) if provider == self.provider else genai.GenerativeModel(model)
+                response = await genai_model.generate_content_async(
+                    gemini_messages,
+                    generation_config={
+                        "max_output_tokens": max_tokens,
+                        "temperature": temperature,
+                    },
+                    safety_settings=safety_settings,
+                )
+                try:
+                    return response.text
+                except Exception as text_err:
+                    use_fallback = True
+                    fallback_reason = f"response.text failed: {text_err}"
+            except Exception as e:
+                use_fallback = True
+                fallback_reason = str(e)
+
+            if use_fallback:
+                logger.warning("Gemini messages call failed, using Together fallback", reason=fallback_reason)
+                settings = get_settings()
+                api_key = settings.together_api_key
+                if hasattr(api_key, "get_secret_value"):
+                    api_key = api_key.get_secret_value()
+                if api_key:
+                    from together import AsyncTogether
+                    fallback = AsyncTogether(api_key=api_key)
+                    resp = await fallback.chat.completions.create(
+                        model="meta-llama/Llama-3.3-70B-Instruct-Turbo",
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    )
+                    return resp.choices[0].message.content
+                raise ValueError(f"Gemini failed ({fallback_reason}) and no fallback key")
+
+        elif provider == "anthropic":
+            # Extract system message, pass rest to messages.create
+            system_prompt = None
+            anthropic_messages = []
+            for msg in messages:
+                if msg["role"] == "system":
+                    system_prompt = msg["content"]
+                else:
+                    anthropic_messages.append(msg)
+
+            # Use self.client if same provider, otherwise create a new one
+            if provider == self.provider:
+                client = self.client
+            else:
+                from anthropic import AsyncAnthropic
+                settings = get_settings()
+                client = AsyncAnthropic(api_key=settings.anthropic_api_key.get_secret_value())
+
+            response = await client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                system=system_prompt or "",
+                messages=anthropic_messages,
+            )
+            return response.content[0].text
+
+        else:
+            # OpenAI / Together format
+            if provider == self.provider:
+                client = self.client
+            else:
+                settings = get_settings()
+                if provider == "openai":
+                    from openai import AsyncOpenAI
+                    client = AsyncOpenAI(api_key=settings.openai_api_key.get_secret_value())
+                elif provider == "openrouter":
+                    from openai import AsyncOpenAI
+                    client = AsyncOpenAI(
+                        api_key=settings.openrouter_api_key.get_secret_value(),
+                        base_url="https://openrouter.ai/api/v1",
+                    )
+                else:
+                    from together import AsyncTogether
+                    client = AsyncTogether(api_key=settings.together_api_key.get_secret_value())
+
+            response = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            return response.choices[0].message.content
 
     @with_retry(max_attempts=3, base_delay=1.0)
     async def _complete_internal(

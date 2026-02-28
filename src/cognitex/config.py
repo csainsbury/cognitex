@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     # LLM Provider Selection
     llm_provider: str = Field(
         default="google",
-        description="Active LLM provider: together, anthropic, openai, or google",
+        description="Active LLM provider: together, anthropic, openai, google, or openrouter",
     )
 
     # Together.ai
@@ -93,6 +93,17 @@ class Settings(BaseSettings):
     openai_model_embedding: str = Field(
         default="text-embedding-3-small",
         description="OpenAI embedding model",
+    )
+
+    # OpenRouter (multi-model gateway, OpenAI-compatible)
+    openrouter_api_key: SecretStr = Field(default=SecretStr(""))
+    openrouter_model_planner: str = Field(
+        default="anthropic/claude-sonnet-4",
+        description="OpenRouter model for planning",
+    )
+    openrouter_model_executor: str = Field(
+        default="anthropic/claude-sonnet-4",
+        description="OpenRouter model for execution",
     )
 
     # Google (Gemini)

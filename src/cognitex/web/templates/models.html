@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+
+{% block title %}Models & Sub-Agents - Cognitex{% endblock %}
+
+{% block content %}
+<h1>Models & Sub-Agents</h1>
+
+<div class="two-col">
+    <!-- Left Column: Orchestrator + Sub-Agents list -->
+    <div>
+        <div class="card">
+            <h2>Orchestrator & Executor</h2>
+            <p style="color: #666; font-size: 0.85rem; margin-bottom: 0.75rem;">
+                The orchestrator (planner) drives reasoning. The executor handles structured tasks.
+            </p>
+            <form hx-post="/api/models/core" hx-swap="innerHTML" hx-target="#core-result">
+                <table style="font-size: 0.85rem;">
+                    <tr>
+                        <td style="width: 130px; font-weight: 500;">Provider</td>
+                        <td>
+                            <select name="provider" style="width: 100%; font-size: 0.85rem;">
+                                {% for p in providers %}
+                                <option value="{{ p.id }}" {% if p.id == config.provider %}selected{% endif %}
+                                        {% if not p.has_api_key %}disabled{% endif %}>
+                                    {{ p.name }}{% if not p.has_api_key %} (no key){% endif %}
+                                </option>
+                                {% endfor %}
+                            </select>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="font-weight: 500;">Orchestrator</td>
+                        <td>
+                            <select name="planner_model" style="width: 100%; font-size: 0.85rem;" onchange="syncProviderFromModel(this)">
+                                {% for provider_name, models in all_chat_models.items() %}
+                                <optgroup label="{{ provider_name }}">
+                                    {% for model in models %}
+                                    <option value="{{ model.id }}" {% if model.id == config.planner_model %}selected{% endif %}>
+                                        {{ model.display_name }}
+                                    </option>
+                                    {% endfor %}
+                                </optgroup>
+                                {% endfor %}
+                            </select>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="font-weight: 500;">Executor</td>
+                        <td>
+                            <select name="executor_model" style="width: 100%; font-size: 0.85rem;" onchange="syncProviderFromModel(this)">
+                                {% for provider_name, models in all_chat_models.items() %}
+                                <optgroup label="{{ provider_name }}">
+                                    {% for model in models %}
+                                    <option value="{{ model.id }}" {% if model.id == config.executor_model %}selected{% endif %}>
+                                        {{ model.display_name }}
+                                    </option>
+                                    {% endfor %}
+                                </optgroup>
+                                {% endfor %}
+                            </select>
+                        </td>
+                    </tr>
+                </table>
+                <div style="margin-top: 0.75rem; display: flex; gap: 0.5rem; align-items: center;">
+                    <button type="submit" class="btn btn-primary" style="font-size: 0.85rem;">Save</button>
+                    <span id="core-result"></span>
+                </div>
+            </form>
+        </div>
+
+        <div class="card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                <h2 style="margin: 0;">Sub-Agents</h2>
+                <button class="btn btn-secondary" style="font-size: 0.8rem;"
+                        hx-get="/api/models/subagents/_new/edit"
+                        hx-target="#agent-editor"
+                        hx-swap="innerHTML">
+                    + New Agent
+                </button>
+            </div>
+            <table style="font-size: 0.85rem; width: 100%;">
+                <thead>
+                    <tr style="border-bottom: 1px solid var(--border);">
+                        <th style="text-align: left; padding: 0.4rem 0.5rem;">Name</th>
+                        <th style="text-align: left; padding: 0.4rem 0.5rem;">Type</th>
+                        <th style="text-align: left; padding: 0.4rem 0.5rem;">Model</th>
+                        <th style="text-align: left; padding: 0.4rem 0.5rem;">Purpose</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for name, agent in subagents.items() %}
+                    <tr style="cursor: pointer; border-bottom: 1px solid var(--border);"
+                        hx-get="/api/models/subagents/{{ name }}/edit"
+                        hx-target="#agent-editor"
+                        hx-swap="innerHTML"
+                        class="hover-row">
+                        <td style="padding: 0.4rem 0.5rem; font-weight: 500;">{{ name }}</td>
+                        <td style="padding: 0.4rem 0.5rem;">
+                            {% if agent.is_builtin %}
+                            <span style="background: var(--primary-light); color: var(--primary-text); padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.75rem;">builtin</span>
+                            {% else %}
+                            <span style="background: var(--success-bg); color: #065f46; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.75rem;">custom</span>
+                            {% endif %}
+                        </td>
+                        <td style="padding: 0.4rem 0.5rem; color: var(--text-muted); font-size: 0.8rem;">
+                            {{ agent.model or '(inherit)' }}
+                        </td>
+                        <td style="padding: 0.4rem 0.5rem; color: var(--text-muted); font-size: 0.8rem; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                            {{ agent.purpose }}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Right Column: Editor + Per-Task Routing -->
+    <div>
+        <div class="card">
+            <h2>Sub-Agent Editor</h2>
+            <div id="agent-editor">
+                <p style="color: var(--text-muted); font-size: 0.85rem; font-style: italic;">
+                    Click a sub-agent to edit, or create a new one.
+                </p>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Per-Task Routing</h2>
+            <p style="color: #666; font-size: 0.85rem; margin-bottom: 0.75rem;">
+                Override the model used for specific task slots. Leave as "Default" to use the orchestrator model.
+            </p>
+            <form hx-post="/api/settings/models/routing" hx-swap="innerHTML" hx-target="#routing-result">
+                <table style="font-size: 0.85rem;">
+                    {% set task_slots = [
+                        ("autonomous", "Autonomous Agent"),
+                        ("triage", "Email Triage"),
+                        ("draft", "Draft Composition"),
+                        ("context_pack", "Context Packs"),
+                        ("skill_evolution", "Skill Evolution"),
+                    ] %}
+                    {% for slot, label in task_slots %}
+                    <tr>
+                        <td style="width: 140px; font-weight: 500;">{{ label }}</td>
+                        <td>
+                            <select name="{{ slot }}_model" style="width: 100%; font-size: 0.85rem;">
+                                <option value="" {% if not config[slot + '_model'] %}selected{% endif %}>Default (orchestrator)</option>
+                                {% for alias, info in model_aliases.items() %}
+                                <option value="{{ info[1] }}" {% if config[slot + '_model'] == info[1] %}selected{% endif %}>
+                                    {{ alias }} ({{ info[0] }})
+                                </option>
+                                {% endfor %}
+                            </select>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </table>
+                <div style="margin-top: 0.75rem; display: flex; gap: 0.5rem; align-items: center;">
+                    <button type="submit" class="btn btn-primary" style="font-size: 0.85rem;">Save Routing</button>
+                    <span id="routing-result"></span>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<style>
+.hover-row:hover {
+    background: var(--primary-light);
+}
+</style>
+
+<script>
+// Map provider display names back to provider IDs
+const providerDisplayToId = {
+    {% for p in providers %}
+    "{{ p.name }}": "{{ p.id }}",
+    {% endfor %}
+};
+
+function syncProviderFromModel(select) {
+    const selectedOption = select.options[select.selectedIndex];
+    if (!selectedOption || !selectedOption.parentElement.tagName === 'OPTGROUP') return;
+    const groupLabel = selectedOption.parentElement.label;
+    const providerId = providerDisplayToId[groupLabel];
+    if (providerId) {
+        const providerSelect = select.closest('form').querySelector('select[name="provider"]');
+        if (providerSelect) {
+            const opt = providerSelect.querySelector('option[value="' + providerId + '"]');
+            if (opt && !opt.disabled) {
+                providerSelect.value = providerId;
+            }
+        }
+    }
+}
+</script>
+{% endblock %}
