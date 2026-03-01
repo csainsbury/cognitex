@@ -9523,7 +9523,7 @@ async def api_sessions_link_bulk(request: Request):
 
 
 @app.post("/api/sessions/skip", response_class=HTMLResponse)
-async def api_sessions_skip(_session_id: Annotated[str, Form()]):
+async def api_sessions_skip(session_id: Annotated[str, Form()]):  # noqa: ARG001
     """Mark a session as skipped (no project link needed)."""
     # For now, just return a visual indicator - could store in Redis if we want persistence
     return HTMLResponse('<span class="badge">Skipped</span>')
