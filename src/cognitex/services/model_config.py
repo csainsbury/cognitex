@@ -80,8 +80,9 @@ OPENAI_EMBEDDING_MODELS = [
 
 # Google Gemini models
 GOOGLE_CHAT_MODELS = [
-    {"id": "gemini-3-pro-preview", "display_name": "Gemini 3 Pro (Latest)", "context_length": 1000000},
+    {"id": "gemini-3.1-pro-preview", "display_name": "Gemini 3.1 Pro (Latest)", "context_length": 1000000},
     {"id": "gemini-3-flash-preview", "display_name": "Gemini 3 Flash (Fast)", "context_length": 1000000},
+    {"id": "gemini-3-pro-preview", "display_name": "Gemini 3 Pro (Deprecated)", "context_length": 1000000},
     {"id": "gemini-2.0-flash", "display_name": "Gemini 2.0 Flash", "context_length": 1000000},
     {"id": "gemini-2.0-flash-thinking-exp", "display_name": "Gemini 2.0 Flash Thinking", "context_length": 1000000},
     {"id": "gemini-1.5-pro", "display_name": "Gemini 1.5 Pro (2M ctx)", "context_length": 2000000},
@@ -127,7 +128,7 @@ MODEL_ALIASES: dict[str, tuple[str, str]] = {
     "gpt4o-mini": ("openai", "gpt-4o-mini"),
     "o1": ("openai", "o1"),
     "o3-mini": ("openai", "o3-mini"),
-    "gemini-pro": ("google", "gemini-3-pro-preview"),
+    "gemini-pro": ("google", "gemini-3.1-pro-preview"),
     "gemini-flash": ("google", "gemini-3-flash-preview"),
     "deepseek": ("together", "deepseek-ai/DeepSeek-V3"),
     "deepseek-r1": ("together", "deepseek-ai/DeepSeek-R1"),

@@ -109,7 +109,7 @@ class Settings(BaseSettings):
     # Google (Gemini)
     google_ai_api_key: SecretStr = Field(default=SecretStr(""))
     google_model_planner: str = Field(
-        default="gemini-3-pro-preview",
+        default="gemini-3.1-pro-preview",
         description="Gemini model for planning (main agent)",
     )
     google_model_executor: str = Field(

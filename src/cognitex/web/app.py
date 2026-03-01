@@ -8734,7 +8734,7 @@ async def api_settings_models_preset(request: Request, preset: str):
         ),
         "google-gemini-pro": ModelConfig(
             provider="google",
-            planner_model="gemini-3-pro-preview",
+            planner_model="gemini-3.1-pro-preview",
             executor_model="gemini-3-flash-preview",
             embedding_model="BAAI/bge-base-en-v1.5",
             embedding_provider="together",
