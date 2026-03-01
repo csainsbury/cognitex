@@ -4,16 +4,15 @@ import asyncio
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
 
 import structlog
 from together import Together
 
+from cognitex.agent.decision_memory import DecisionMemory, init_decision_memory
+from cognitex.agent.memory import Memory, init_memory
+from cognitex.agent.tool_filter import get_tool_filter
+from cognitex.agent.tools import ToolRisk, get_tool_registry
 from cognitex.config import get_settings
-from cognitex.agent.memory import Memory, init_memory, get_memory
-from cognitex.agent.decision_memory import DecisionMemory, init_decision_memory, get_decision_memory
-from cognitex.agent.tools import ToolRisk, ToolResult, get_tool_registry
-from cognitex.agent.tool_filter import ModeToolFilter, get_tool_filter
 
 logger = structlog.get_logger()
 
@@ -423,7 +422,6 @@ Example queries:
                 examples = []
                 for d in similar_decisions:
                     if d["similarity"] > 0.3:  # Only include reasonably similar
-                        action_desc = d.get("final_action") or d.get("proposed_action")
                         status_note = ""
                         if d["status"] == "edited":
                             status_note = " (user edited this)"
@@ -543,7 +541,7 @@ Example queries:
             settings.context_summarization_enabled
             and len(recent_interactions) > settings.recent_turns_to_keep
         ):
-            from cognitex.agent.summarization import get_summarizer, format_summary_for_prompt
+            from cognitex.agent.summarization import format_summary_for_prompt, get_summarizer
 
             summarizer = get_summarizer()
             if summarizer.should_summarize(recent_interactions):
@@ -886,10 +884,7 @@ Your response:"""
             try:
                 trace = await self.decision_memory.traces.find_by_approval_id(approval_id)
                 if trace:
-                    if approved:
-                        status = "edited" if edited_action else "approved"
-                    else:
-                        status = "rejected"
+                    status = ("edited" if edited_action else "approved") if approved else "rejected"
 
                     await self.decision_memory.traces.record_feedback(
                         trace["id"],
@@ -1321,9 +1316,10 @@ Your response:"""
     async def _get_todays_context_packs(self) -> str | None:
         """Get context packs for today's events to include in briefing."""
         try:
-            from cognitex.agent.context_pack import get_context_pack_compiler, BuildStage
+            from datetime import datetime
+
+            from cognitex.agent.context_pack import BuildStage, get_context_pack_compiler
             from cognitex.services.calendar import CalendarService
-            from datetime import datetime, timedelta
 
             calendar = CalendarService()
             now = datetime.now()
@@ -1424,7 +1420,7 @@ async def get_agent() -> Agent:
 
 
 # Keep AgentMode for backward compatibility with existing code
-from enum import Enum
+from enum import Enum  # noqa: E402
 
 
 class AgentMode(Enum):

@@ -2,32 +2,32 @@
 
 from __future__ import annotations
 
+import contextlib
 import html
 from contextlib import asynccontextmanager
+from datetime import date, datetime
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Form, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from datetime import date, datetime
-
+from cognitex.agent.interruption_firewall import get_interruption_firewall
+from cognitex.agent.state_model import (
+    ContinuousSignals,
+    ModeRules,
+    OperatingMode,
+    UserState,
+    get_state_estimator,
+)
 from cognitex.services.tasks import (
     get_goal_service,
     get_project_service,
     get_repository_service,
     get_task_service,
 )
-from cognitex.agent.state_model import (
-    OperatingMode,
-    ModeRules,
-    UserState,
-    ContinuousSignals,
-    get_state_estimator,
-)
-from cognitex.agent.interruption_firewall import get_interruption_firewall
 
 # Template and static directories
 TEMPLATE_DIR = Path(__file__).parent / "templates"
@@ -66,10 +66,12 @@ async def _record_task_outcome(
     the temporal energy model.
     """
     from datetime import datetime
+
     import structlog
+    from sqlalchemy import text
+
     from cognitex.db.postgres import get_session
     from cognitex.db.redis import get_redis
-    from sqlalchemy import text
 
     logger = structlog.get_logger()
 
@@ -192,18 +194,19 @@ async def create_person(email: str, name: str | None = None) -> dict:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     """Application lifespan handler."""
     import structlog
-    from cognitex.db.neo4j import init_neo4j, close_neo4j
-    from cognitex.db.graph_schema import init_graph_schema
-    from cognitex.db.postgres import init_postgres, close_postgres
-    from cognitex.db.redis import init_redis, close_redis
-    from cognitex.db.phase4_schema import init_phase4_schema
+
     from cognitex.agent.triggers import start_triggers, stop_triggers
-    from cognitex.services.push_notifications import get_watch_manager
-    from cognitex.services.notifications import init_notification_service, get_notification_service
     from cognitex.config import get_settings
+    from cognitex.db.graph_schema import init_graph_schema
+    from cognitex.db.neo4j import close_neo4j, init_neo4j
+    from cognitex.db.phase4_schema import init_phase4_schema
+    from cognitex.db.postgres import close_postgres, init_postgres
+    from cognitex.db.redis import close_redis, init_redis
+    from cognitex.services.notifications import get_notification_service, init_notification_service
+    from cognitex.services.push_notifications import get_watch_manager
 
     logger = structlog.get_logger()
 
@@ -264,22 +267,16 @@ async def lifespan(app: FastAPI):
     # Cancel notification subscriber
     if _notification_subscriber_task:
         _notification_subscriber_task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await _notification_subscriber_task
-        except asyncio.CancelledError:
-            pass
 
     # Stop notification service (flushes pending notifications)
-    try:
+    with contextlib.suppress(Exception):
         notification_service = get_notification_service()
         await notification_service.stop()
-    except Exception:
-        pass
 
-    try:
+    with contextlib.suppress(Exception):
         await stop_triggers()
-    except Exception:
-        pass
     await close_redis()
     await close_neo4j()
     await close_postgres()
@@ -300,23 +297,25 @@ if STATIC_DIR.exists():
 # Authentication
 # -------------------------------------------------------------------
 
-from cognitex.web.auth import (
+import asyncio  # noqa: E402
+import json  # noqa: E402
+from asyncio import Queue  # noqa: E402
+
+import structlog  # noqa: E402
+
+from cognitex.config import get_settings  # noqa: E402
+from cognitex.db.redis import get_redis  # noqa: E402
+from cognitex.web.auth import (  # noqa: E402
     SESSION_COOKIE_NAME,
     SESSION_MAX_AGE,
     create_oauth_flow,
     create_session,
-    verify_session,
     destroy_session,
     get_allowed_emails,
     store_oauth_state,
     verify_oauth_state,
+    verify_session,
 )
-from cognitex.config import get_settings
-from cognitex.db.redis import get_redis
-import structlog
-import asyncio
-import json
-from asyncio import Queue
 
 auth_logger = structlog.get_logger("auth")
 
@@ -650,11 +649,11 @@ async def home(request: Request):
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request):
     """Dashboard page with comprehensive overview (formerly /)."""
-    from cognitex.services.inbox import get_inbox_service
-    from cognitex.services.ideas import list_ideas
-    from cognitex.db.neo4j import get_neo4j_session
+
     from cognitex.agent.action_log import get_recent_actions
-    from datetime import datetime, timedelta
+    from cognitex.db.neo4j import get_neo4j_session
+    from cognitex.services.ideas import list_ideas
+    from cognitex.services.inbox import get_inbox_service
 
     task_service = get_task_service()
     project_service = get_project_service()
@@ -899,8 +898,12 @@ async def task_update(
         raise HTTPException(status_code=404, detail="Task not found")
 
     # Handle relationships
+    from cognitex.db.graph_schema import (
+        link_task_to_goal,
+        link_task_to_person,
+        link_task_to_project,
+    )
     from cognitex.db.neo4j import get_neo4j_session
-    from cognitex.db.graph_schema import link_task_to_person, link_task_to_project, link_task_to_goal
 
     async for session in get_neo4j_session():
         # Remove old people relationships
@@ -941,7 +944,7 @@ async def task_update(
 
 
 @app.post("/tasks/{task_id}/complete", response_class=HTMLResponse)
-async def task_complete(request: Request, task_id: str):
+async def task_complete(_request: Request, task_id: str):
     """Mark task as complete and record state observation for learning."""
     task_service = get_task_service()
 
@@ -1004,7 +1007,7 @@ async def task_complete(request: Request, task_id: str):
         raise
     except Exception as e:
         logger.error("Task completion failed", task_id=task_id, error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.delete("/tasks/{task_id}", response_class=HTMLResponse)
@@ -1017,7 +1020,7 @@ async def task_delete(task_id: str):
 
 @app.post("/tasks/{task_id}/reject", response_class=HTMLResponse)
 async def task_reject_and_learn(
-    request: Request,
+    _request: Request,
     task_id: str,
     reason: str = Form(...),
 ):
@@ -1026,8 +1029,8 @@ async def task_reject_and_learn(
     This is used when the autonomous agent created a task that shouldn't exist.
     Records the rejection pattern to prevent similar tasks in the future.
     """
+    from cognitex.agent.action_log import learn_from_rejection, log_action
     from cognitex.db.neo4j import get_neo4j_session
-    from cognitex.agent.action_log import log_action, learn_from_rejection
 
     task_service = get_task_service()
 
@@ -1141,8 +1144,8 @@ async def task_unlink_project(request: Request, task_id: str, project_id: str):
 
     Records as learning feedback if the link was created by the autonomous agent.
     """
-    from cognitex.db.neo4j import get_neo4j_session
     from cognitex.agent.action_log import log_action
+    from cognitex.db.neo4j import get_neo4j_session
 
     task_service = get_task_service()
 
@@ -1182,9 +1185,11 @@ async def task_unlink_project(request: Request, task_id: str, project_id: str):
         # Record as negative learning signal if autonomous agent created this link
         if link_info["created_by"] == "autonomous_agent":
             try:
-                from cognitex.db.postgres import get_postgres_session
-                from sqlalchemy import text
                 import uuid
+
+                from sqlalchemy import text
+
+                from cognitex.db.postgres import get_postgres_session
 
                 async for session in get_postgres_session():
                     # Record as a learned pattern (negative feedback on link suggestion)
@@ -1234,8 +1239,9 @@ async def task_unlink_project(request: Request, task_id: str, project_id: str):
 @app.get("/tasks/{task_id}/subtasks", response_class=HTMLResponse)
 async def get_subtasks(request: Request, task_id: str):
     """Get subtasks partial for a task."""
-    from cognitex.db.neo4j import get_neo4j_session
     import json
+
+    from cognitex.db.neo4j import get_neo4j_session
 
     subtasks = []
     async for session in get_neo4j_session():
@@ -1263,9 +1269,10 @@ async def get_subtasks(request: Request, task_id: str):
 @app.post("/tasks/{task_id}/subtasks", response_class=HTMLResponse)
 async def add_subtask(request: Request, task_id: str, text: Annotated[str, Form()]):
     """Add a new subtask to a task."""
-    from cognitex.db.neo4j import get_neo4j_session
     import json
     import secrets
+
+    from cognitex.db.neo4j import get_neo4j_session
 
     async for session in get_neo4j_session():
         # Get existing subtasks
@@ -1304,8 +1311,9 @@ async def add_subtask(request: Request, task_id: str, text: Annotated[str, Form(
 @app.post("/tasks/{task_id}/subtasks/{subtask_id}/toggle", response_class=HTMLResponse)
 async def toggle_subtask(request: Request, task_id: str, subtask_id: str):
     """Toggle a subtask's done status."""
-    from cognitex.db.neo4j import get_neo4j_session
     import json
+
+    from cognitex.db.neo4j import get_neo4j_session
 
     async for session in get_neo4j_session():
         result = await session.run(
@@ -1340,8 +1348,9 @@ async def toggle_subtask(request: Request, task_id: str, subtask_id: str):
 @app.delete("/tasks/{task_id}/subtasks/{subtask_id}", response_class=HTMLResponse)
 async def delete_subtask(request: Request, task_id: str, subtask_id: str):
     """Delete a subtask."""
-    from cognitex.db.neo4j import get_neo4j_session
     import json
+
+    from cognitex.db.neo4j import get_neo4j_session
 
     async for session in get_neo4j_session():
         result = await session.run(
@@ -1377,8 +1386,9 @@ async def delete_subtask(request: Request, task_id: str, subtask_id: str):
 @app.post("/tasks/{task_id}/subtasks/reorder")
 async def reorder_subtasks(request: Request, task_id: str):
     """Reorder subtasks based on drag-and-drop."""
-    from cognitex.db.neo4j import get_neo4j_session
     import json
+
+    from cognitex.db.neo4j import get_neo4j_session
 
     body = await request.json()
     ordered_ids = body.get("order", [])
@@ -1572,8 +1582,8 @@ async def project_update(
         raise HTTPException(status_code=404, detail="Project not found")
 
     # Handle relationships
-    from cognitex.db.neo4j import get_neo4j_session
     from cognitex.db.graph_schema import link_project_to_person, link_project_to_repository
+    from cognitex.db.neo4j import get_neo4j_session
 
     async for session in get_neo4j_session():
         # Remove old people relationships (both directions)
@@ -1671,8 +1681,8 @@ async def project_create(
         owner_email=owner_email,
     )
 
-    from cognitex.db.neo4j import get_neo4j_session
     from cognitex.db.graph_schema import link_project_to_person, link_project_to_repository
+    from cognitex.db.neo4j import get_neo4j_session
 
     async for session in get_neo4j_session():
         # Link repository if specified
@@ -1800,8 +1810,8 @@ async def goal_update(
         raise HTTPException(status_code=404, detail="Goal not found")
 
     # Handle people linking
-    from cognitex.db.neo4j import get_neo4j_session
     from cognitex.db.graph_schema import link_goal_to_person
+    from cognitex.db.neo4j import get_neo4j_session
 
     async for session in get_neo4j_session():
         # Remove old relationships first
@@ -1856,8 +1866,8 @@ async def goal_create(
     # Handle people linking
     people_emails = [e for e in (people or []) if e]
     if people_emails:
-        from cognitex.db.neo4j import get_neo4j_session
         from cognitex.db.graph_schema import link_goal_to_person
+        from cognitex.db.neo4j import get_neo4j_session
 
         async for session in get_neo4j_session():
             # First person is owner, rest are stakeholders
@@ -1911,9 +1921,10 @@ async def goal_detail(request: Request, goal_id: str):
 async def commitments_page(request: Request):
     """Commitments page showing all tracked commitments with status grouping."""
     import structlog
-    from cognitex.db.neo4j import get_neo4j_session
-    from cognitex.db.graph_schema import get_commitments
+
     from cognitex.agent.graph_observer import GraphObserver
+    from cognitex.db.graph_schema import get_commitments
+    from cognitex.db.neo4j import get_neo4j_session
 
     logger = structlog.get_logger()
 
@@ -2111,6 +2122,7 @@ async def today_page(request: Request):
 async def view_briefing(request: Request):
     """Render the morning briefing as a web page (on-demand)."""
     import structlog
+
     from cognitex.agent.core import get_agent
 
     logger = structlog.get_logger()
@@ -2148,9 +2160,8 @@ async def view_briefing(request: Request):
 
 async def get_document_stats() -> dict:
     """Get document statistics from Neo4j and postgres."""
+
     from cognitex.db.neo4j import get_neo4j_session
-    from cognitex.db.postgres import get_session
-    from sqlalchemy import text
 
     stats = {"documents": 0, "analyzed": 0, "topics": 0, "concepts": 0}
 
@@ -2398,7 +2409,7 @@ async def documents_page(
 
 
 @app.get("/documents/search", response_class=HTMLResponse)
-async def documents_search(request: Request, q: str = ""):
+async def documents_search(_request: Request, q: str = ""):
     """HTMX endpoint for document search."""
     if not q or len(q) < 2:
         return HTMLResponse('<p class="empty">Enter a search query to find documents</p>')
@@ -2437,8 +2448,9 @@ async def documents_search(request: Request, q: str = ""):
 @app.get("/agent-log", response_class=HTMLResponse)
 async def agent_log_page(request: Request):
     """Agent action log page - shows all agent actions."""
-    from cognitex.db.postgres import get_session
     from sqlalchemy import text
+
+    from cognitex.db.postgres import get_session
 
     actions = []
     stats = {"total": 0, "last_24h": 0, "failed": 0, "action_types": 0, "sources": 0}
@@ -2541,9 +2553,11 @@ async def agent_log_page(request: Request):
 @app.get("/agent-log/{action_id}", response_class=HTMLResponse)
 async def agent_log_detail(action_id: str):
     """Get action details for modal."""
-    from cognitex.db.postgres import get_session
-    from sqlalchemy import text
     import json
+
+    from sqlalchemy import text
+
+    from cognitex.db.postgres import get_session
 
     async for session in get_session():
         result = await session.execute(text("""
@@ -2581,7 +2595,7 @@ async def agent_log_detail(action_id: str):
             try:
                 details = row.details if isinstance(row.details, dict) else json.loads(row.details)
                 details_str = json.dumps(details, indent=2)
-            except:
+            except Exception:
                 details_str = str(row.details)
             html += f"""
             <div>
@@ -2672,7 +2686,8 @@ async def test_agent_notification():
 # Digital Twin Review
 # -------------------------------------------------------------------
 
-import structlog
+import structlog  # noqa: E402
+
 logger = structlog.get_logger()
 
 
@@ -2806,9 +2821,10 @@ async def twin_page_deprecated(request: Request):
     """Digital Twin configuration page - configure agent persona and voice.
     DEPRECATED: Now part of unified Settings page.
     """
-    from cognitex.db.postgres import get_session
-    from cognitex.db.neo4j import get_neo4j_session
     from sqlalchemy import text
+
+    from cognitex.db.neo4j import get_neo4j_session
+    from cognitex.db.postgres import get_session
 
     # Get approval stats
     approved_drafts = 0
@@ -2902,10 +2918,12 @@ async def save_twin_settings(
     signature: str = Form(""),
 ):
     """Save digital twin voice/tone settings."""
-    from cognitex.db.postgres import get_session
-    from sqlalchemy import text
     import json
     import uuid
+
+    from sqlalchemy import text
+
+    from cognitex.db.postgres import get_session
 
     settings = {
         "formality": formality,
@@ -3027,7 +3045,7 @@ async def approve_draft(draft_id: str):
 
 
 @app.get("/api/twin/drafts/{draft_id}/edit")
-async def edit_draft_form(request: Request, draft_id: str):
+async def edit_draft_form(_request: Request, draft_id: str):
     """Get edit form for a draft."""
     from cognitex.db.neo4j import get_neo4j_session
 
@@ -3164,9 +3182,9 @@ async def reject_draft_with_feedback(
     reason_text: Annotated[str, Form()] = "",
 ):
     """Reject a draft with feedback reason for learning."""
-    from cognitex.db.neo4j import get_neo4j_session
-    from cognitex.agent.decision_memory import get_decision_memory
     from cognitex.agent.action_log import learn_from_rejection, log_action
+    from cognitex.agent.decision_memory import get_decision_memory
+    from cognitex.db.neo4j import get_neo4j_session
 
     async for session in get_neo4j_session():
         # Update draft status and store rejection reason, also get original email info
@@ -3306,19 +3324,18 @@ async def record_user_feedback_api(
         context: JSON string with rich context (email_subject, sender, etc.)
         action_taken: What action was taken ('rejected', 'edited', 'approved_with_note')
     """
-    from cognitex.agent.feedback_learning import record_feedback
     import json as json_module
+
+    from cognitex.agent.feedback_learning import record_feedback
 
     # Parse context JSON if provided
     context_data = {}
     if context:
-        try:
+        with contextlib.suppress(json_module.JSONDecodeError):
             context_data = json_module.loads(context)
-        except json_module.JSONDecodeError:
-            pass
 
     try:
-        feedback_id = await record_feedback(
+        _feedback_id = await record_feedback(
             target_type=target_type,
             target_id=target_id,
             feedback_category=feedback_category,
@@ -3328,7 +3345,7 @@ async def record_user_feedback_api(
             action_taken=action_taken,
         )
 
-        return HTMLResponse(f'''
+        return HTMLResponse('''
             <div class="alert alert-success" style="padding: 0.5rem; font-size: 0.85rem;">
                 <strong>Feedback recorded</strong> - This helps improve future suggestions.
             </div>
@@ -3336,7 +3353,7 @@ async def record_user_feedback_api(
 
     except Exception as e:
         logger.error("Failed to record feedback", error=str(e))
-        return HTMLResponse(f'''
+        return HTMLResponse('''
             <div class="alert alert-warning" style="padding: 0.5rem; font-size: 0.85rem;">
                 <strong>Note:</strong> Feedback could not be saved, but action was completed.
             </div>
@@ -3572,8 +3589,9 @@ async def get_draft_deep_context(draft_id: str):
     then searches the graph for relevant documents, tasks, and context.
     """
     import json
-    from cognitex.db.neo4j import get_neo4j_session
+
     from cognitex.agent.graph_observer import GraphObserver
+    from cognitex.db.neo4j import get_neo4j_session
     from cognitex.services.llm import LLMService
 
     async for session in get_neo4j_session():
@@ -3762,7 +3780,7 @@ Return ONLY valid JSON, no other text."""
                 drive_id = doc.get("drive_id", "")
                 relevance = doc.get("relevance", 0)
                 summary = escape_html((doc.get("summary") or doc.get("matched_content") or "")[:100])
-                html_parts.append(f'<li style="font-size: 0.9rem; margin-bottom: 0.5rem;">')
+                html_parts.append('<li style="font-size: 0.9rem; margin-bottom: 0.5rem;">')
                 html_parts.append(f'<a href="https://drive.google.com/file/d/{drive_id}/view" target="_blank">{name}</a>')
                 html_parts.append(f' <span style="color: #6b7280;">({relevance:.0%})</span>')
                 if summary:
@@ -3804,9 +3822,9 @@ Return ONLY valid JSON, no other text."""
         html_parts.append(f'<div id="research-results-{draft_id}" style="margin-top: 1rem;"></div>')
 
         # Add the SSE JavaScript for this draft
-        html_parts.append(f'''
+        html_parts.append('''
         <script>
-        function startResearch(draftId) {{
+        function startResearch(draftId) {
             const btn = document.getElementById('research-btn-' + draftId);
             const statusDiv = document.getElementById('research-status-' + draftId);
             const resultsDiv = document.getElementById('research-results-' + draftId);
@@ -3820,42 +3838,42 @@ Return ONLY valid JSON, no other text."""
             // Start SSE connection
             const eventSource = new EventSource('/api/twin/drafts/' + draftId + '/research/stream');
 
-            eventSource.addEventListener('status', function(e) {{
+            eventSource.addEventListener('status', function(e) {
                 // Unescape newlines from SSE data
                 statusDiv.innerHTML = e.data.replace(/\\\\n/g, '\\n');
-            }});
+            });
 
-            eventSource.addEventListener('result', function(e) {{
+            eventSource.addEventListener('result', function(e) {
                 statusDiv.innerHTML = '';  // Clear status
                 // Unescape newlines and render HTML
                 resultsDiv.innerHTML = e.data.replace(/\\\\n/g, '\\n');
-            }});
+            });
 
-            eventSource.addEventListener('error', function(e) {{
-                if (e.data) {{
+            eventSource.addEventListener('error', function(e) {
+                if (e.data) {
                     statusDiv.innerHTML = '';
                     resultsDiv.innerHTML = e.data.replace(/\\\\n/g, '\\n');
-                }}
-            }});
+                }
+            });
 
-            eventSource.addEventListener('done', function(e) {{
+            eventSource.addEventListener('done', function(e) {
                 eventSource.close();
                 btn.disabled = false;
                 btn.innerHTML = '🔍 Research (Internal + Web)';
-                if (e.data === 'error') {{
+                if (e.data === 'error') {
                     statusDiv.innerHTML = '';
-                }}
-            }});
+                }
+            });
 
-            eventSource.onerror = function(e) {{
+            eventSource.onerror = function(e) {
                 eventSource.close();
                 btn.disabled = false;
                 btn.innerHTML = '🔍 Research (Internal + Web)';
-                if (!resultsDiv.innerHTML) {{
+                if (!resultsDiv.innerHTML) {
                     statusDiv.innerHTML = '<div class="alert alert-error">Connection error. Please try again.</div>';
-                }}
-            }};
-        }}
+                }
+            };
+        }
         </script>
         ''')
         html_parts.append('</div>')
@@ -3872,15 +3890,17 @@ async def research_for_draft_stream(draft_id: str):
 
     Streams progress updates to prevent timeout and provide real-time feedback.
     """
-    import json
     import asyncio
+    import json
     import re
+
     from fastapi.responses import StreamingResponse
-    from cognitex.db.neo4j import get_neo4j_session
+
     from cognitex.agent.graph_observer import GraphObserver
-    from cognitex.services.llm import get_llm_service
+    from cognitex.db.neo4j import get_neo4j_session
     from cognitex.db.postgres import get_session
     from cognitex.services.ingestion import search_chunks_semantic
+    from cognitex.services.llm import get_llm_service
 
     # Helper functions for SSE
     def sse_event(event_type: str, data: str) -> str:
@@ -4045,7 +4065,7 @@ Give 3-5 bullet points of key facts. Be concise."""
                     results = await asyncio.wait_for(search_internal_docs(q), timeout=10.0)
                     internal_results.extend(results)
                     yield sse_event("status", status_html(f"Internal {i+1}/{len(internal_queries)}", 35 + (i+1)*5, "📁"))
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.warning("Internal search timeout", query=q.get("query"))
 
             yield sse_event("status", status_html("External research...", 50, "🌐"))
@@ -4062,9 +4082,9 @@ Give 3-5 bullet points of key facts. Be concise."""
                 while not web_task.done():
                     try:
                         await asyncio.wait_for(asyncio.shield(web_task), timeout=5.0)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         hb += 1
-                        yield f": hb\n\n"
+                        yield ": hb\n\n"
                         if hb > 4:  # 20 second timeout per query
                             web_task.cancel()
                             break
@@ -4115,7 +4135,7 @@ Be concise."""
             while not compile_task.done():
                 try:
                     await asyncio.wait_for(asyncio.shield(compile_task), timeout=5.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     # Send heartbeat to keep connection alive
                     heartbeat_count += 1
                     yield f": heartbeat {heartbeat_count}\n\n"
@@ -4186,8 +4206,8 @@ async def trigger_research_pack(
     If topics is provided, uses those. Otherwise, uses the email's
     stored research_topics from classification.
     """
-    from cognitex.db.neo4j import get_neo4j_session
     from cognitex.agent.context_pack import get_context_pack_compiler
+    from cognitex.db.neo4j import get_neo4j_session
 
     async for session in get_neo4j_session():
         # Get email details and stored research topics
@@ -4250,9 +4270,10 @@ async def generate_focus_blocks():
     - User's energy patterns (peak hours)
     - Calendar availability
     """
-    from cognitex.db.neo4j import get_neo4j_session
-    from cognitex.agent.graph_observer import GraphObserver
     import uuid
+
+    from cognitex.agent.graph_observer import GraphObserver
+    from cognitex.db.neo4j import get_neo4j_session
 
     try:
         async for session in get_neo4j_session():
@@ -4376,6 +4397,7 @@ async def generate_focus_blocks():
 async def approve_block(block_id: str):
     """Approve a suggested focus block (add to calendar)."""
     from datetime import datetime, timedelta
+
     from cognitex.db.neo4j import get_neo4j_session
     from cognitex.services.calendar import CalendarService
 
@@ -4526,8 +4548,8 @@ async def reject_block_with_feedback(
     reason_text: Annotated[str, Form()] = "",
 ):
     """Reject a focus block suggestion with feedback for learning."""
-    from cognitex.db.neo4j import get_neo4j_session
     from cognitex.agent.decision_memory import get_decision_memory
+    from cognitex.db.neo4j import get_neo4j_session
 
     async for session in get_neo4j_session():
         # Update block status and store rejection reason
@@ -4649,8 +4671,8 @@ async def api_state_update(mode: str):
     """Update operating mode."""
     try:
         new_mode = OperatingMode(mode)
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid mode: {mode}")
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=f"Invalid mode: {mode}") from err
 
     estimator = get_state_estimator()
     await estimator.update_state(mode=new_mode)
@@ -4739,7 +4761,7 @@ async def focus_dashboard(request: Request):
     Shows only tasks that match current energy/mode, hiding everything else
     for a distraction-free work session.
     """
-    from cognitex.agent.state_model import get_state_estimator, ModeRules, get_temporal_model
+    from cognitex.agent.state_model import ModeRules, get_state_estimator, get_temporal_model
     from cognitex.services.tasks import get_tasks
 
     estimator = get_state_estimator()
@@ -4811,11 +4833,12 @@ async def weekly_review_page(request: Request):
 @app.get("/api/review/generate", response_class=HTMLResponse)
 async def api_generate_review():
     """Generate weekly review using LLM summarization."""
+    from datetime import datetime, timedelta
+
+    from cognitex.agent.action_log import get_action_summary
+    from cognitex.agent.learning import get_state_observations_summary
     from cognitex.services.llm import get_llm_service
     from cognitex.services.tasks import get_tasks
-    from cognitex.agent.learning import get_state_observations_summary
-    from cognitex.agent.action_log import get_action_summary
-    from datetime import datetime, timedelta
 
     llm = get_llm_service()
 
@@ -4889,7 +4912,11 @@ async def api_voice_transcribe(request: Request):
     Accepts audio file upload, transcribes using speech-to-text,
     and creates an inbox item for processing.
     """
-    from cognitex.agent.interruption_firewall import get_interruption_firewall, IncomingItem, Urgency
+    from cognitex.agent.interruption_firewall import (
+        IncomingItem,
+        Urgency,
+        get_interruption_firewall,
+    )
 
     form = await request.form()
     audio_file = form.get("audio")
@@ -4898,12 +4925,12 @@ async def api_voice_transcribe(request: Request):
         raise HTTPException(status_code=400, detail="No audio file provided")
 
     # Read audio content
-    audio_content = await audio_file.read()
+    _audio_content = await audio_file.read()
 
     # Transcribe using LLM service (if supported) or placeholder
     try:
         from cognitex.services.llm import get_llm_service
-        llm = get_llm_service()
+        _llm = get_llm_service()
 
         # For now, use a simple placeholder since most LLM services
         # don't directly support audio transcription
@@ -4949,7 +4976,11 @@ async def api_quick_capture(
 
     Accepts text content, URLs, or both and adds to inbox for triage.
     """
-    from cognitex.agent.interruption_firewall import get_interruption_firewall, IncomingItem, Urgency
+    from cognitex.agent.interruption_firewall import (
+        IncomingItem,
+        Urgency,
+        get_interruption_firewall,
+    )
 
     if not content and not url:
         raise HTTPException(status_code=400, detail="No content or URL provided")
@@ -5024,9 +5055,10 @@ async def proposals_redirect():
 @app.get("/proposals-legacy", response_class=HTMLResponse)
 async def proposals_page_legacy(request: Request):
     """Task proposals management page (legacy - use /inbox instead)."""
-    from cognitex.db.postgres import get_session
-    from cognitex.db.neo4j import get_neo4j_session
     from sqlalchemy import text
+
+    from cognitex.db.neo4j import get_neo4j_session
+    from cognitex.db.postgres import get_session
 
     proposals = []
     stats = {"pending": 0, "approved": 0, "rejected": 0}
@@ -5073,7 +5105,7 @@ async def proposals_page_legacy(request: Request):
     # Get project names for display
     project_names = {}
     async for neo_session in get_neo4j_session():
-        project_ids = list(set(p["project_id"] for p in proposals if p["project_id"]))
+        project_ids = list({p["project_id"] for p in proposals if p["project_id"]})
         if project_ids:
             result = await neo_session.run("""
                 MATCH (p:Project)
@@ -5157,9 +5189,10 @@ async def reject_proposal_web(
     reason: str = Form("not_needed"),
 ):
     """Reject a task proposal from the web UI."""
-    from cognitex.agent.action_log import reject_proposal, log_action, learn_from_rejection
-    from cognitex.db.postgres import get_session
     from sqlalchemy import text
+
+    from cognitex.agent.action_log import learn_from_rejection, log_action, reject_proposal
+    from cognitex.db.postgres import get_session
 
     # Get proposal details before rejection
     proposal_title = ""
@@ -5212,9 +5245,10 @@ async def bulk_reject_proposals(
     reason: str = Form("duplicate"),
 ):
     """Bulk reject selected proposals."""
-    from cognitex.agent.action_log import reject_proposal, log_action, learn_from_rejection
-    from cognitex.db.postgres import get_session
     from sqlalchemy import text
+
+    from cognitex.agent.action_log import learn_from_rejection, log_action, reject_proposal
+    from cognitex.db.postgres import get_session
 
     form_data = await request.form()
     proposal_ids = form_data.getlist("proposal_ids")
@@ -5288,7 +5322,7 @@ async def inbox_page(request: Request, type: str | None = None):
 # -------------------------------------------------------------------
 
 @app.get("/api/notifications/stream")
-async def notification_stream(request: Request):
+async def notification_stream(_request: Request):
     """SSE endpoint for real-time notifications.
 
     Clients connect here to receive notifications as they happen.
@@ -5310,7 +5344,7 @@ async def notification_stream(request: Request):
                     # Wait for notifications with timeout for keepalive
                     data = await asyncio.wait_for(client_queue.get(), timeout=30.0)
                     yield f"event: notification\ndata: {data}\n\n"
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     # Send keepalive ping
                     yield "event: ping\ndata: {}\n\n"
                 except asyncio.CancelledError:
@@ -5359,8 +5393,8 @@ async def inbox_count():
 @app.get("/api/sidebar/commitments", response_class=HTMLResponse)
 async def sidebar_commitments(request: Request):
     """Get commitment alerts for chat sidebar."""
-    from cognitex.db.neo4j import get_neo4j_session
     from cognitex.agent.graph_observer import GraphObserver
+    from cognitex.db.neo4j import get_neo4j_session
 
     overdue = []
     approaching = []
@@ -5385,16 +5419,14 @@ async def sidebar_next_meeting(request: Request):
     from datetime import datetime as dt
 
     events = []
-    try:
+    with contextlib.suppress(Exception):
         events = await get_today_events()
-    except Exception:
-        pass
 
     # Find next event (start time in the future)
     now = dt.now()
     next_event = None
     for event in events:
-        start_str = event.get("start_formatted", "")
+        _start_str = event.get("start_formatted", "")
         # Events from get_today_events() have start_formatted; if the event
         # hasn't passed yet, use it as next. We compare raw start_time if available.
         raw_start = event.get("start_time")
@@ -5550,8 +5582,8 @@ def _append_to_section(lines: list[str], header: str, entry: str) -> list[str]:
 @app.post("/api/inbox/{item_id}/approve", response_class=HTMLResponse)
 async def approve_inbox_item(item_id: str):
     """Approve an inbox item."""
-    from cognitex.services.inbox import get_inbox_service
     from cognitex.agent.action_log import log_action
+    from cognitex.services.inbox import get_inbox_service
 
     inbox = get_inbox_service()
     item = await inbox.get_item(item_id)
@@ -5638,8 +5670,9 @@ async def approve_inbox_item(item_id: str):
     # For email drafts, actually send the email
     if item.item_type == "email_draft":
         try:
-            from cognitex.services.gmail import GmailService
             import asyncio
+
+            from cognitex.services.gmail import GmailService
 
             gmail = GmailService()
             to = item.payload.get("to", "")
@@ -5717,10 +5750,11 @@ async def edit_and_send_email(
     original_body: str = Form(""),
 ):
     """Edit an email draft and send it, learning from the edits."""
-    from cognitex.services.inbox import get_inbox_service
+    from difflib import SequenceMatcher
+
     from cognitex.agent.action_log import log_action
     from cognitex.agent.feedback_learning import record_feedback
-    from difflib import SequenceMatcher
+    from cognitex.services.inbox import get_inbox_service
 
     inbox = get_inbox_service()
     item = await inbox.get_item(item_id)
@@ -5877,11 +5911,12 @@ async def decide_inbox_item(
     Creates a draft response based on the selected decision and document analysis,
     then presents it for final approval.
     """
-    from cognitex.services.inbox import get_inbox_service
-    from cognitex.agent.action_log import log_action
-    from cognitex.db.postgres import get_session
-    from cognitex.db.models import InboxItem as InboxItemModel
     import structlog
+
+    from cognitex.agent.action_log import log_action
+    from cognitex.db.models import InboxItem as InboxItemModel
+    from cognitex.db.postgres import get_session
+    from cognitex.services.inbox import get_inbox_service
 
     logger = structlog.get_logger()
     inbox = get_inbox_service()
@@ -5974,7 +6009,7 @@ Return ONLY the email body text, no subject line or headers."""
         draft_body = await agent.chat(draft_prompt)
     except Exception as e:
         logger.error("Failed to generate draft response", error=str(e))
-        draft_body = response_template or f"[Draft generation failed - please write manually]"
+        draft_body = response_template or "[Draft generation failed - please write manually]"
 
     # Create a new email_draft inbox item for final approval
     draft_payload = {
@@ -6048,8 +6083,8 @@ async def reject_inbox_item(
     reason_text: str = Form(None),
 ):
     """Reject an inbox item with feedback."""
+    from cognitex.agent.action_log import learn_from_rejection, log_action
     from cognitex.services.inbox import get_inbox_service
-    from cognitex.agent.action_log import log_action, learn_from_rejection
 
     inbox = get_inbox_service()
     item = await inbox.get_item(item_id)
@@ -6118,8 +6153,8 @@ async def reject_inbox_item(
 @app.post("/api/inbox/{item_id}/dismiss", response_class=HTMLResponse)
 async def dismiss_inbox_item(item_id: str):
     """Dismiss an inbox item (no longer relevant)."""
-    from cognitex.services.inbox import get_inbox_service
     from cognitex.agent.action_log import log_action
+    from cognitex.services.inbox import get_inbox_service
 
     inbox = get_inbox_service()
     item = await inbox.get_item(item_id)
@@ -6155,8 +6190,8 @@ async def skip_inbox_email(
     This endpoint specifically handles email-related inbox items and
     records the decision to help learn which emails need responses.
     """
-    from cognitex.services.inbox import get_inbox_service
     from cognitex.agent.action_log import log_action
+    from cognitex.services.inbox import get_inbox_service
 
     inbox = get_inbox_service()
     item = await inbox.get_item(item_id)
@@ -6194,9 +6229,11 @@ async def _record_email_skip_decision(item, reason: str | None) -> None:
         item: The inbox item being skipped
         reason: Optional reason for skipping
     """
-    from cognitex.db.postgres import get_session
-    from sqlalchemy import text
     from datetime import datetime
+
+    from sqlalchemy import text
+
+    from cognitex.db.postgres import get_session
 
     try:
         # Extract email details from payload
@@ -6273,8 +6310,8 @@ async def _record_email_skip_decision(item, reason: str | None) -> None:
 @app.post("/api/inbox/{item_id}/helpful")
 async def mark_inbox_item_helpful(item_id: str, helpful: bool = True):
     """Mark a context pack or similar item as helpful/not helpful."""
-    from cognitex.services.inbox import get_inbox_service
     from cognitex.agent.action_log import log_action
+    from cognitex.services.inbox import get_inbox_service
 
     inbox = get_inbox_service()
     item = await inbox.get_item(item_id)
@@ -6309,12 +6346,14 @@ async def mark_inbox_item_helpful(item_id: str, helpful: bool = True):
 @app.post("/api/inbox/{item_id}/rebuild", response_class=HTMLResponse)
 async def rebuild_context_pack(request: Request, item_id: str):
     """Rebuild a context pack with fresh data."""
-    from cognitex.services.inbox import get_inbox_service
-    from cognitex.agent.context_pack import get_context_pack_compiler, BuildStage
-    from cognitex.services.calendar import CalendarService
-    from cognitex.agent.action_log import log_action
     from datetime import datetime, timedelta
+
     from dateutil.parser import parse as parse_dt
+
+    from cognitex.agent.action_log import log_action
+    from cognitex.agent.context_pack import BuildStage, get_context_pack_compiler
+    from cognitex.services.calendar import CalendarService
+    from cognitex.services.inbox import get_inbox_service
 
     inbox = get_inbox_service()
     item = await inbox.get_item(item_id)
@@ -6392,11 +6431,11 @@ async def rebuild_context_pack(request: Request, item_id: str):
             priority = "high"
 
         # Set expiry
-        expires_at = None
+        _expires_at = None
         if event_time_str:
             try:
                 event_dt = parse_dt(event_time_str)
-                expires_at = event_dt + timedelta(minutes=30)
+                _expires_at = event_dt + timedelta(minutes=30)
             except Exception:
                 pass
 
@@ -6455,9 +6494,9 @@ async def rebuild_context_pack(request: Request, item_id: str):
 @app.post("/api/inbox/{item_id}/notes")
 async def save_inbox_notes(item_id: str, notes: str = Form(...)):
     """Save user notes on an inbox item for learning."""
-    from cognitex.services.inbox import get_inbox_service
     from cognitex.agent.action_log import log_action
     from cognitex.agent.feedback_learning import record_feedback
+    from cognitex.services.inbox import get_inbox_service
 
     inbox = get_inbox_service()
     item = await inbox.get_item(item_id)
@@ -6492,9 +6531,10 @@ async def save_inbox_notes(item_id: str, notes: str = Form(...)):
 @app.get("/context-packs", response_class=HTMLResponse)
 async def context_packs_page(request: Request):
     """View all context packs (pending and past)."""
-    from cognitex.services.inbox import get_inbox_service
-    from cognitex.db.postgres import get_session
     from sqlalchemy import text
+
+    from cognitex.db.postgres import get_session
+    from cognitex.services.inbox import get_inbox_service
 
     inbox = get_inbox_service()
 
@@ -6535,16 +6575,14 @@ async def context_packs_page(request: Request):
 @app.get("/learning", response_class=HTMLResponse)
 async def learning_page(request: Request):
     """Learning system dashboard showing accumulated patterns and insights."""
-    from cognitex.agent.learning import get_learning_system, init_learning_system
     from cognitex.agent.action_log import get_proposal_patterns, get_recent_rejections
-    from cognitex.services.tasks import get_calibration_summary
+    from cognitex.agent.learning import get_learning_system, init_learning_system
     from cognitex.agent.state_model import get_high_risk_tasks
+    from cognitex.services.tasks import get_calibration_summary
 
     # Initialize learning system if needed
-    try:
+    with contextlib.suppress(Exception):
         await init_learning_system()
-    except Exception:
-        pass
 
     # Get learning system summary
     ls = get_learning_system()
@@ -6602,8 +6640,9 @@ async def learning_page(request: Request):
     # Get learned patterns from database
     learned_patterns = []
     try:
-        from cognitex.db.postgres import get_session as get_postgres_session
         from sqlalchemy import text
+
+        from cognitex.db.postgres import get_session as get_postgres_session
 
         async for session in get_postgres_session():
             result = await session.execute(text("""
@@ -6641,8 +6680,9 @@ async def learning_page(request: Request):
     # Get last policy update from action log
     last_update = None
     try:
-        from cognitex.db.postgres import get_session as get_pg_session
         from sqlalchemy import text
+
+        from cognitex.db.postgres import get_session as get_pg_session
 
         async for session in get_pg_session():
             result = await session.execute(text("""
@@ -6780,8 +6820,8 @@ async def api_learning_refresh():
 @app.post("/api/learning/run-update")
 async def api_learning_run_update():
     """Manually trigger a policy update cycle."""
-    from cognitex.agent.learning import init_learning_system, get_learning_system
     from cognitex.agent.action_log import log_action
+    from cognitex.agent.learning import get_learning_system, init_learning_system
 
     try:
         await init_learning_system()
@@ -6811,7 +6851,7 @@ async def api_learning_run_update():
 # ========================================================================
 
 @app.get("/expertise", response_class=HTMLResponse)
-async def expertise_page(request: Request):
+async def expertise_page(_request: Request):
     """Agent Expertise dashboard - view and manage agent mental models."""
     from cognitex.agent.expertise import get_expertise_manager
 
@@ -7062,8 +7102,8 @@ async def get_task_insights():
     - Chronically deferred tasks
     - Commitments extracted from emails
     """
-    from cognitex.db.neo4j import get_neo4j_session
     from cognitex.agent.graph_observer import GraphObserver
+    from cognitex.db.neo4j import get_neo4j_session
 
     async for session in get_neo4j_session():
         observer = GraphObserver(session)
@@ -7081,8 +7121,8 @@ async def get_task_insights():
 @app.get("/api/tasks/insights/html")
 async def get_task_insights_html():
     """Get proactive task insights as HTML for dashboard embedding."""
-    from cognitex.db.neo4j import get_neo4j_session
     from cognitex.agent.graph_observer import GraphObserver
+    from cognitex.db.neo4j import get_neo4j_session
 
     async for session in get_neo4j_session():
         observer = GraphObserver(session)
@@ -7160,8 +7200,8 @@ async def extract_email_commitments():
     Analyzes sent emails from the past 7 days to find implied
     commitments that should be tracked as tasks.
     """
-    from cognitex.db.neo4j import get_neo4j_session
     from cognitex.agent.graph_observer import GraphObserver
+    from cognitex.db.neo4j import get_neo4j_session
 
     async for session in get_neo4j_session():
         observer = GraphObserver(session)
@@ -7225,8 +7265,9 @@ async def extract_email_commitments():
 @app.get("/api/momentum/today")
 async def get_todays_momentum():
     """Get today's momentum status including must-do items."""
-    from cognitex.db.neo4j import get_neo4j_session
     from datetime import datetime
+
+    from cognitex.db.neo4j import get_neo4j_session
 
     today = datetime.now().date().isoformat()
 
@@ -7376,9 +7417,10 @@ async def get_momentum_html():
 @app.post("/api/momentum/add")
 async def add_must_do(title: Annotated[str, Form()]):
     """Add a new must-do item for today."""
-    from cognitex.db.neo4j import get_neo4j_session
-    from datetime import datetime
     import uuid
+    from datetime import datetime
+
+    from cognitex.db.neo4j import get_neo4j_session
 
     if not title or len(title.strip()) < 2:
         return await get_momentum_html()
@@ -7461,8 +7503,9 @@ async def delete_must_do(must_do_id: str):
 @app.get("/api/momentum/weekly")
 async def get_weekly_momentum():
     """Get weekly momentum summary with trends."""
-    from cognitex.db.neo4j import get_neo4j_session
     from datetime import datetime, timedelta
+
+    from cognitex.db.neo4j import get_neo4j_session
 
     async for session in get_neo4j_session():
         # Get all must-dos from the past 4 weeks
@@ -7530,7 +7573,7 @@ async def get_weekly_momentum():
         return {
             "weeks": weekly_data,
             "momentum_score": momentum_score,
-            "total_days_tracked": len(set(item.get("date") for item in data if item.get("date"))),
+            "total_days_tracked": len({item.get("date") for item in data if item.get("date")}),
             "current_streak": calculate_streak([{"percentage": w["percentage"]} for w in weekly_data]),
         }
 
@@ -7538,7 +7581,7 @@ async def get_weekly_momentum():
 
 
 @app.post("/api/briefing/generate", response_class=HTMLResponse)
-async def api_generate_briefing(request: Request):
+async def api_generate_briefing(_request: Request):
     """Generate morning briefing."""
     from cognitex.agent.core import CognitexAgent
 
@@ -7610,6 +7653,7 @@ async def api_chat(request: Request):
 async def api_chat_clear():
     """Clear chat history and working memory."""
     import redis.asyncio as aioredis
+
     from cognitex.config import get_settings
 
     settings = get_settings()
@@ -8008,7 +8052,7 @@ async def api_graph_data(
     if len(nodes) > limit:
         nodes = nodes[:limit]
         node_ids = {n["id"] for n in nodes}
-        links = [l for l in links if l["source"] in node_ids and l["target"] in node_ids]
+        links = [lnk for lnk in links if lnk["source"] in node_ids and lnk["target"] in node_ids]
 
     return JSONResponse({"nodes": nodes, "links": links})
 
@@ -8072,16 +8116,21 @@ async def api_graph_link(
     source_id: str,
     target_type: str,
     target_id: str,
-    relationship: str,
+    _relationship: str,
     action: str = "create",  # "create" or "delete"
 ):
     """Create or delete a relationship between two nodes."""
-    from cognitex.db.neo4j import get_neo4j_session
     from cognitex.db.graph_schema import (
-        link_task_to_project, link_task_to_goal, link_task_to_person,
-        link_project_to_goal, link_project_to_person, link_project_to_repository,
-        link_goal_to_person, link_goal_parent,
+        link_goal_parent,
+        link_goal_to_person,
+        link_project_to_goal,
+        link_project_to_person,
+        link_project_to_repository,
+        link_task_to_goal,
+        link_task_to_person,
+        link_task_to_project,
     )
+    from cognitex.db.neo4j import get_neo4j_session
 
     # Map of valid relationships by source->target types
     # Each entry: (source_type, target_type) -> (relationship_type, link_function)
@@ -8230,8 +8279,8 @@ async def api_analyze_node(
     Called after creating a task/project/goal to suggest relationships.
     High confidence (>=90%) links are auto-applied.
     """
-    from cognitex.services.linking import get_linking_service
     from cognitex.db.postgres import get_postgres_session
+    from cognitex.services.linking import get_linking_service
 
     linking_service = get_linking_service()
 
@@ -8268,10 +8317,11 @@ async def api_analyze_node(
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request, tab: str = "general"):
     """Unified settings page with tabs for General, Agent, State, Integrations."""
-    from cognitex.services.model_config import get_model_config_service, MODEL_ALIASES
+    from sqlalchemy import text
+
     from cognitex.db.neo4j import get_driver, get_neo4j_session
     from cognitex.db.postgres import get_session
-    from sqlalchemy import text
+    from cognitex.services.model_config import MODEL_ALIASES, get_model_config_service
 
     # Initialize all template variables
     template_data = {
@@ -8287,6 +8337,7 @@ async def settings_page(request: Request, tab: str = "general"):
     providers = service.get_available_providers()
 
     import redis.asyncio as aioredis
+
     from cognitex.config import get_settings
     app_settings = get_settings()
     redis_client = aioredis.from_url(app_settings.redis_url)
@@ -8468,7 +8519,9 @@ async def settings_page(request: Request, tab: str = "general"):
 async def api_get_email_labels():
     """Return current email label filter and render checkboxes."""
     import json
+
     import redis.asyncio as aioredis
+
     from cognitex.config import get_settings
 
     ALL_LABELS = [
@@ -8508,7 +8561,9 @@ async def api_get_email_labels():
 async def api_save_email_labels(request: Request):
     """Save email label filter to Redis."""
     import json
+
     import redis.asyncio as aioredis
+
     from cognitex.config import get_settings
 
     form = await request.form()
@@ -8530,6 +8585,7 @@ async def api_save_email_labels(request: Request):
 async def api_get_research_settings():
     """Return current research max cycles setting as an input field."""
     import redis.asyncio as aioredis
+
     from cognitex.config import get_settings
 
     settings = get_settings()
@@ -8553,6 +8609,7 @@ async def api_get_research_settings():
 async def api_save_research_settings(request: Request):
     """Save research max cycles setting to Redis."""
     import redis.asyncio as aioredis
+
     from cognitex.config import get_settings
 
     form = await request.form()
@@ -8574,14 +8631,14 @@ async def api_save_research_settings(request: Request):
 
 @app.post("/api/settings/models", response_class=HTMLResponse)
 async def api_settings_models_update(
-    request: Request,
+    _request: Request,
     planner_model: Annotated[str, Form()],
     executor_model: Annotated[str, Form()],
     embedding_model: Annotated[str, Form()],
     provider: Annotated[str, Form()] = "together",
 ):
     """Update all model settings."""
-    from cognitex.services.model_config import get_model_config_service, ModelConfig
+    from cognitex.services.model_config import ModelConfig, get_model_config_service
 
     # Determine embedding provider based on chat provider
     # Anthropic, Google, and OpenRouter don't have embeddings, so use Together
@@ -8603,9 +8660,10 @@ async def api_settings_models_update(
 @app.post("/api/settings/models/reset", response_class=HTMLResponse)
 async def api_settings_models_reset(request: Request):
     """Reset models to environment defaults."""
-    from cognitex.services.model_config import get_model_config_service
     import redis.asyncio as aioredis
+
     from cognitex.config import get_settings
+    from cognitex.services.model_config import get_model_config_service
 
     settings = get_settings()
     redis = aioredis.from_url(settings.redis_url)
@@ -8668,7 +8726,7 @@ async def api_settings_models_refresh(request: Request):
 @app.post("/api/settings/provider/{provider}", response_class=HTMLResponse)
 async def api_settings_provider_switch(request: Request, provider: str):
     """Switch to a different LLM provider."""
-    from cognitex.services.model_config import get_model_config_service, ModelConfig
+    from cognitex.services.model_config import ModelConfig, get_model_config_service
 
     valid_providers = {"together", "anthropic", "openai", "google", "openrouter"}
     if provider not in valid_providers:
@@ -8714,7 +8772,7 @@ async def api_settings_provider_switch(request: Request, provider: str):
 @app.post("/api/settings/models/preset/{preset}", response_class=HTMLResponse)
 async def api_settings_models_preset(request: Request, preset: str):
     """Apply a preset model configuration."""
-    from cognitex.services.model_config import get_model_config_service, ModelConfig
+    from cognitex.services.model_config import ModelConfig, get_model_config_service
 
     # Presets organized by provider
     presets = {
@@ -8892,14 +8950,13 @@ async def update_model_routing(request: Request):
 @app.get("/models", response_class=HTMLResponse)
 async def models_page(request: Request):
     """Models & Sub-Agents management page."""
-    from cognitex.services.model_config import (
-        MODEL_ALIASES,
-        get_model_config_service,
-    )
     from cognitex.agent.subagent import get_subagent_registry
     from cognitex.agent.tools import get_tool_registry
-
-    from cognitex.services.model_config import PROVIDERS
+    from cognitex.services.model_config import (
+        MODEL_ALIASES,
+        PROVIDERS,
+        get_model_config_service,
+    )
 
     service = get_model_config_service()
     config = await service.get_config()
@@ -8976,9 +9033,9 @@ async def get_subagent(name: str):
 @app.get("/api/models/subagents/{name}/edit", response_class=HTMLResponse)
 async def edit_subagent_form(request: Request, name: str):
     """Render the sub-agent edit form partial."""
-    from cognitex.services.model_config import MODEL_ALIASES, get_model_config_service
     from cognitex.agent.subagent import SubAgentConfig, get_subagent_registry
     from cognitex.agent.tools import get_tool_registry
+    from cognitex.services.model_config import MODEL_ALIASES, get_model_config_service
 
     service = get_model_config_service()
     providers = service.get_available_providers()
@@ -9011,7 +9068,7 @@ async def edit_subagent_form(request: Request, name: str):
 @app.post("/api/models/subagents", response_class=HTMLResponse)
 async def save_subagent(request: Request):
     """Create or update a user-defined sub-agent."""
-    from cognitex.agent.subagent import SubAgentConfig, get_subagent_registry, BUILTIN_SUBAGENTS
+    from cognitex.agent.subagent import BUILTIN_SUBAGENTS, SubAgentConfig, get_subagent_registry
 
     form = await request.form()
     name = form.get("name", "").strip()
@@ -9021,7 +9078,7 @@ async def save_subagent(request: Request):
     # For builtins, only allow model/provider changes
     if name in BUILTIN_SUBAGENTS:
         model = form.get("model", "").strip()
-        provider = form.get("provider", "").strip()
+        _provider = form.get("provider", "").strip()
         registry = get_subagent_registry()
         if model:
             await registry.update_builtin_model(name, model)
@@ -9050,7 +9107,7 @@ async def save_subagent(request: Request):
 
 
 @app.delete("/api/models/subagents/{name}", response_class=HTMLResponse)
-async def delete_subagent(request: Request, name: str):
+async def delete_subagent(_request: Request, name: str):
     """Delete a user-defined sub-agent."""
     from cognitex.agent.subagent import get_subagent_registry
 
@@ -9058,7 +9115,7 @@ async def delete_subagent(request: Request, name: str):
     try:
         deleted = await registry.delete_user_agent(name)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Sub-agent '{name}' not found")
@@ -9075,6 +9132,7 @@ async def delete_subagent(request: Request, name: str):
 def verify_sync_api_key(authorization: str = Header(None)) -> bool:
     """Verify the sync API key from Authorization header."""
     import hmac
+
     from cognitex.config import get_settings
 
     settings = get_settings()
@@ -9157,7 +9215,7 @@ async def api_sync_sessions(
     try:
         data = await request.json()
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}") from e
 
     machine_id = data.get("machine_id", "unknown")
     cli_type = data.get("cli_type", "claude")
@@ -9211,7 +9269,7 @@ async def download_sync_installer(request: Request):
     # Get the server URL and API key for the install script
     from cognitex.config import get_settings
     settings = get_settings()
-    sync_api_key = settings.sync_api_key.get_secret_value()
+    _sync_api_key = settings.sync_api_key.get_secret_value()
 
     script = f'''#!/bin/bash
 # cognitex-sync installer
@@ -9269,8 +9327,8 @@ echo "  cognitex-sync push"
 @app.get("/downloads/cognitex-sync.tar.gz", name="download_sync_package")
 async def download_sync_package():
     """Download the cognitex-sync package as a tarball."""
-    import tarfile
     import io
+    import tarfile
     from pathlib import Path
 
     # Find the cognitex-sync package directory
@@ -9465,7 +9523,7 @@ async def api_sessions_link_bulk(request: Request):
 
 
 @app.post("/api/sessions/skip", response_class=HTMLResponse)
-async def api_sessions_skip(session_id: Annotated[str, Form()]):
+async def api_sessions_skip(_session_id: Annotated[str, Form()]):
     """Mark a session as skipped (no project link needed)."""
     # For now, just return a visual indicator - could store in Redis if we want persistence
     return HTMLResponse('<span class="badge">Skipped</span>')
@@ -9479,7 +9537,7 @@ async def api_sessions_skip(session_id: Annotated[str, Form()]):
 @app.get("/ideas", response_class=HTMLResponse)
 async def ideas_page(request: Request, status: str | None = None):
     """Ideas capture and triage page."""
-    from cognitex.services.ideas import list_ideas, get_idea_stats
+    from cognitex.services.ideas import get_idea_stats, list_ideas
 
     # Default to showing pending ideas
     filter_status = status if status else None
@@ -9508,7 +9566,7 @@ async def create_idea_web(
     text: Annotated[str, Form()],
 ):
     """Create a new idea from web form."""
-    from cognitex.services.ideas import create_idea, list_ideas, get_idea_stats
+    from cognitex.services.ideas import create_idea, get_idea_stats, list_ideas
 
     await create_idea(text=text, source="web")
 
@@ -9558,7 +9616,7 @@ async def convert_idea_to_task(
     priority: Annotated[str, Form()] = "medium",
 ):
     """Convert an idea to a task."""
-    from cognitex.services.ideas import convert_to_task, list_ideas, get_idea_stats
+    from cognitex.services.ideas import convert_to_task, get_idea_stats, list_ideas
 
     task = await convert_to_task(
         idea_id=idea_id,
@@ -9588,7 +9646,7 @@ async def convert_idea_to_task(
 @app.post("/ideas/{idea_id}/dismiss", response_class=HTMLResponse)
 async def dismiss_idea_route(request: Request, idea_id: str):
     """Dismiss an idea."""
-    from cognitex.services.ideas import dismiss_idea, list_ideas, get_idea_stats
+    from cognitex.services.ideas import dismiss_idea, get_idea_stats, list_ideas
 
     await dismiss_idea(idea_id)
 
@@ -9612,7 +9670,7 @@ async def dismiss_idea_route(request: Request, idea_id: str):
 @app.delete("/ideas/{idea_id}", response_class=HTMLResponse)
 async def delete_idea_route(request: Request, idea_id: str):
     """Delete an idea permanently."""
-    from cognitex.services.ideas import delete_idea, list_ideas, get_idea_stats
+    from cognitex.services.ideas import delete_idea, get_idea_stats, list_ideas
 
     await delete_idea(idea_id)
 
@@ -9640,7 +9698,7 @@ async def link_idea_to_project(
     project_id: Annotated[str, Form()],
 ):
     """Link an idea to a project."""
-    from cognitex.services.ideas import link_to_project, list_ideas, get_idea_stats
+    from cognitex.services.ideas import get_idea_stats, link_to_project, list_ideas
 
     await link_to_project(idea_id, project_id)
 
@@ -9669,8 +9727,9 @@ async def link_idea_to_project(
 @app.get("/help", response_class=HTMLResponse)
 async def help_page(request: Request):
     """Help page with usage information and learning stats."""
-    from cognitex.db.postgres import get_session
     from sqlalchemy import text
+
+    from cognitex.db.postgres import get_session
 
     stats = {}
 
@@ -9716,7 +9775,7 @@ async def help_page(request: Request):
 
 
 @app.post("/api/maintenance/clear-old-inbox", response_class=HTMLResponse)
-async def clear_old_inbox(request: Request):
+async def clear_old_inbox(_request: Request):
     """Clear inbox items older than 7 days."""
     from cognitex.services.inbox import get_inbox_service
 
@@ -9731,7 +9790,7 @@ async def clear_old_inbox(request: Request):
 
 
 @app.post("/api/maintenance/clear-old-drafts", response_class=HTMLResponse)
-async def clear_old_drafts(request: Request):
+async def clear_old_drafts(_request: Request):
     """Clear old email drafts from Neo4j."""
     from cognitex.db.neo4j import get_neo4j_session
 
@@ -9758,7 +9817,7 @@ async def clear_old_drafts(request: Request):
 
 
 @app.post("/api/maintenance/clear-dismissed", response_class=HTMLResponse)
-async def clear_dismissed_items(request: Request):
+async def clear_dismissed_items(_request: Request):
     """Clear all dismissed inbox items."""
     from cognitex.services.inbox import get_inbox_service
 
@@ -9780,7 +9839,7 @@ async def clear_dismissed_items(request: Request):
 @app.get("/bootstrap", response_class=HTMLResponse)
 async def bootstrap_page(request: Request):
     """Bootstrap files editor page."""
-    from cognitex.agent.bootstrap import init_bootstrap, get_bootstrap_loader
+    from cognitex.agent.bootstrap import get_bootstrap_loader, init_bootstrap
 
     await init_bootstrap()
     loader = get_bootstrap_loader()
@@ -9822,7 +9881,7 @@ async def get_bootstrap_file(filename: str):
 
 @app.post("/api/bootstrap/{filename}", response_class=HTMLResponse)
 async def save_bootstrap_file(
-    request: Request,
+    _request: Request,
     filename: str,
     content: Annotated[str, Form()],
 ):
@@ -9844,7 +9903,7 @@ async def save_bootstrap_file(
 
 @app.post("/api/bootstrap/test-voice", response_class=HTMLResponse)
 async def test_bootstrap_voice(
-    request: Request,
+    _request: Request,
     to: Annotated[str, Form()] = "colleague@example.com",
     subject: Annotated[str, Form()] = "Test Email",
     instructions: Annotated[str, Form()] = "Write a brief follow-up",
@@ -9886,7 +9945,7 @@ async def test_bootstrap_voice(
 @app.get("/skills", response_class=HTMLResponse)
 async def skills_page(request: Request):
     """Skills editor page."""
-    from cognitex.agent.skills import init_skills, get_skills_loader
+    from cognitex.agent.skills import get_skills_loader, init_skills
 
     await init_skills()
     loader = get_skills_loader()
@@ -9930,7 +9989,7 @@ async def get_skill(name: str):
 
 @app.post("/api/skills/{name}", response_class=HTMLResponse)
 async def save_skill(
-    request: Request,
+    _request: Request,
     name: str,
     content: Annotated[str, Form()],
 ):
@@ -9962,7 +10021,7 @@ async def delete_skill(name: str):
 
 @app.post("/api/skills/test/{name}", response_class=HTMLResponse)
 async def test_skill(
-    request: Request,
+    _request: Request,
     name: str,
     input_text: Annotated[str, Form()],
 ):
@@ -10067,7 +10126,7 @@ async def community_skill_sync():
 
 @app.post("/api/skills/author/create", response_class=JSONResponse)
 async def skill_author_create(
-    request: Request,
+    _request: Request,
     description: str = Form(...),
     name: str = Form(None),
 ):
@@ -10090,7 +10149,7 @@ async def skill_author_create(
 
 @app.post("/api/skills/author/refine", response_class=JSONResponse)
 async def skill_author_refine(
-    request: Request,
+    _request: Request,
     name: str = Form(...),
     content: str = Form(...),
     feedback: str = Form(...),
@@ -10118,7 +10177,7 @@ async def skill_author_refine(
 
 @app.post("/api/skills/author/test", response_class=JSONResponse)
 async def skill_author_test(
-    request: Request,
+    _request: Request,
     name: str = Form(...),
     content: str = Form(...),
     test_input: str = Form(...),
@@ -10142,7 +10201,7 @@ async def skill_author_test(
 
 @app.post("/api/skills/author/deploy", response_class=HTMLResponse)
 async def skill_author_deploy(
-    request: Request,
+    _request: Request,
     name: str = Form(...),
     content: str = Form(...),
 ):
@@ -10279,8 +10338,10 @@ async def evolution_manual_feedback(
 @app.get("/memory", response_class=HTMLResponse)
 async def memory_page(request: Request, date: str | None = None):
     """Memory browser page."""
-    from datetime import date as date_type, datetime, timedelta
-    from cognitex.services.memory_files import init_memory_files, get_memory_file_service
+    from datetime import date as date_type
+    from datetime import datetime, timedelta
+
+    from cognitex.services.memory_files import get_memory_file_service, init_memory_files
 
     await init_memory_files()
     service = get_memory_file_service()
@@ -10322,14 +10383,15 @@ async def memory_page(request: Request, date: str | None = None):
 async def get_daily_memory(date_str: str):
     """Get a daily memory log."""
     from datetime import datetime
+
     from cognitex.services.memory_files import get_memory_file_service
 
     service = get_memory_file_service()
 
     try:
         target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid date format")
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail="Invalid date format") from err
 
     log = await service.get_daily_log(target_date)
 
@@ -10354,7 +10416,7 @@ async def get_daily_memory(date_str: str):
 
 @app.post("/api/memory/write", response_class=HTMLResponse)
 async def write_memory_entry(
-    request: Request,
+    _request: Request,
     content: Annotated[str, Form()],
     category: Annotated[str, Form()] = "User Note",
 ):
@@ -10389,7 +10451,7 @@ async def get_curated_memory():
 
 @app.post("/api/memory/curated", response_class=HTMLResponse)
 async def save_curated_memory(
-    request: Request,
+    _request: Request,
     content: Annotated[str, Form()],
 ):
     """Save curated memory."""

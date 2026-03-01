@@ -2,6 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import UTC
 from enum import Enum
 from typing import Any
 
@@ -301,12 +302,13 @@ class GetCalendarTool(BaseTool):
     }
 
     async def execute(self, days_back: int = 0, days_ahead: int = 1) -> ToolResult:
+        from datetime import datetime, timedelta
+
         from cognitex.db.neo4j import get_neo4j_session
-        from datetime import datetime, timedelta, timezone
 
         try:
             # Use UTC and format for Neo4j datetime comparison
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
 
             # For "today" queries, use start of day and end of day
             if days_back == 0 and days_ahead <= 1:
@@ -367,8 +369,8 @@ class GetTasksTool(BaseTool):
         limit: int = 20,
         include_overdue: bool = False,
     ) -> ToolResult:
-        from cognitex.db.neo4j import get_neo4j_session
         from cognitex.db.graph_schema import get_tasks
+        from cognitex.db.neo4j import get_neo4j_session
 
         try:
             # Normalize status: "all" or empty string means no filter
@@ -641,8 +643,8 @@ class UpdateTaskTool(BaseTool):
         effort_estimate: float | None = None,
         energy_cost: str | None = None,
     ) -> ToolResult:
+
         from cognitex.services.tasks import get_task_service
-        from datetime import datetime
 
         try:
             if not any([title, status, priority, due_date, effort_estimate, energy_cost]):
@@ -694,8 +696,10 @@ class UpdateTaskTool(BaseTool):
     ) -> None:
         """Record timing and deferral events for the learning system."""
         from datetime import datetime
-        from cognitex.db.postgres import get_session
+
         from sqlalchemy import text
+
+        from cognitex.db.postgres import get_session
 
         try:
             # 1. Record start time when status changes to in_progress
@@ -739,6 +743,7 @@ class UpdateTaskTool(BaseTool):
             if new_due and original_due:
                 try:
                     from dateutil.parser import parse as parse_date
+
                     from cognitex.agent.state_model import record_deferral
 
                     original_dt = parse_date(original_due) if isinstance(original_due, str) else original_due
@@ -862,11 +867,10 @@ class DraftEmailTool(BaseTool):
         reply_to_id: str | None = None,
         reasoning: str = "",
     ) -> ToolResult:
-        from cognitex.agent.memory import get_memory
-        from cognitex.db.redis import get_redis
-        from cognitex.db.neo4j import get_neo4j_session
         import uuid
-        import json
+
+        from cognitex.agent.memory import get_memory
+        from cognitex.db.neo4j import get_neo4j_session
 
         try:
             draft_id = f"draft_{uuid.uuid4().hex[:12]}"
@@ -1016,8 +1020,9 @@ class CreateEventTool(BaseTool):
         description: str | None = None,
         reasoning: str = "",
     ) -> ToolResult:
-        from cognitex.agent.memory import get_memory
         import uuid
+
+        from cognitex.agent.memory import get_memory
 
         try:
             memory = get_memory()
@@ -1139,8 +1144,8 @@ class CreateProjectTool(BaseTool):
         owner_email: str | None = None,
         stakeholder_emails: list[str] | None = None,
     ) -> ToolResult:
-        from cognitex.db.neo4j import get_neo4j_session
         from cognitex.db.graph_schema import link_project_to_person
+        from cognitex.db.neo4j import get_neo4j_session
         from cognitex.services.tasks import get_project_service
 
         try:
@@ -1188,8 +1193,8 @@ class LinkProjectToPersonTool(BaseTool):
         person_email: str,
         role: str = "stakeholder",
     ) -> ToolResult:
-        from cognitex.db.neo4j import get_neo4j_session
         from cognitex.db.graph_schema import link_project_to_person
+        from cognitex.db.neo4j import get_neo4j_session
 
         try:
             async for session in get_neo4j_session():
@@ -1491,21 +1496,17 @@ class LinkTaskTool(BaseTool):
             task_service = get_task_service()
             linked = []
 
-            if project_id:
-                if await task_service.link_to_project(task_id, project_id):
-                    linked.append(f"project:{project_id}")
+            if project_id and await task_service.link_to_project(task_id, project_id):
+                linked.append(f"project:{project_id}")
 
-            if goal_id:
-                if await task_service.link_to_goal(task_id, goal_id):
-                    linked.append(f"goal:{goal_id}")
+            if goal_id and await task_service.link_to_goal(task_id, goal_id):
+                linked.append(f"goal:{goal_id}")
 
-            if document_id:
-                if await task_service.link_to_document(task_id, document_id):
-                    linked.append(f"document:{document_id}")
+            if document_id and await task_service.link_to_document(task_id, document_id):
+                linked.append(f"document:{document_id}")
 
-            if blocked_by_task_id:
-                if await task_service.set_blocked_by(task_id, blocked_by_task_id):
-                    linked.append(f"blocked_by:{blocked_by_task_id}")
+            if blocked_by_task_id and await task_service.set_blocked_by(task_id, blocked_by_task_id):
+                linked.append(f"blocked_by:{blocked_by_task_id}")
 
             if linked:
                 logger.info("Linked task", task_id=task_id, links=linked)
@@ -1571,8 +1572,9 @@ class ReadCodeFileTool(BaseTool):
     }
 
     async def execute(self, file_id: str, max_length: int = 15000) -> ToolResult:
-        from cognitex.db.postgres import get_session
         from sqlalchemy import text
+
+        from cognitex.db.postgres import get_session
 
         try:
             async for session in get_session():
@@ -1615,8 +1617,8 @@ class GetRepositoriesTool(BaseTool):
     parameters = {}
 
     async def execute(self) -> ToolResult:
-        from cognitex.db.neo4j import get_neo4j_session
         from cognitex.db.graph_schema import list_repositories
+        from cognitex.db.neo4j import get_neo4j_session
 
         try:
             async for session in get_neo4j_session():
@@ -1711,8 +1713,9 @@ class WebFetchTool(BaseTool):
     }
 
     async def execute(self, url: str, max_length: int = 8000) -> ToolResult:
-        import httpx
         import re
+
+        import httpx
 
         try:
             async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
@@ -1783,8 +1786,9 @@ class ReadDocumentTool(BaseTool):
     }
 
     async def execute(self, drive_id: str, max_length: int = 10000) -> ToolResult:
-        from cognitex.db.postgres import get_session
         from sqlalchemy import text
+
+        from cognitex.db.postgres import get_session
 
         try:
             async for session in get_session():
@@ -1843,8 +1847,8 @@ class AnalyzeDocumentTool(BaseTool):
         context: str = "",
     ) -> ToolResult:
         try:
-            from cognitex.services.drive import get_drive_service
             from cognitex.services.document_analyzer import get_document_analyzer
+            from cognitex.services.drive import get_drive_service
 
             drive = get_drive_service()
             analyzer = get_document_analyzer()
