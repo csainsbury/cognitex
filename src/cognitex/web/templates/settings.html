@@ -397,6 +397,28 @@
     </div>
 
     <div class="card">
+        <h2>Email Filters</h2>
+        <p style="color: #666; margin-bottom: 1rem;">
+            Default labels to include when checking email.
+        </p>
+
+        <form hx-post="/api/settings/email-labels" hx-target="#email-labels-result" hx-swap="innerHTML"
+              hx-trigger="submit" id="email-labels-form">
+            <div id="email-labels-checkboxes"
+                 hx-get="/api/settings/email-labels"
+                 hx-trigger="load"
+                 hx-swap="innerHTML">
+                <span style="color: #999; font-size: 0.85rem;">Loading...</span>
+            </div>
+
+            <div style="margin-top: 1rem; display: flex; gap: 0.5rem; align-items: center;">
+                <button type="submit" class="btn btn-primary">Save</button>
+                <span id="email-labels-result"></span>
+            </div>
+        </form>
+    </div>
+
+    <div class="card">
         <h2>Email Provider</h2>
         <p style="color: #666; margin-bottom: 1rem;">
             Choose between direct Gmail API or AgentMail for agent email operations.

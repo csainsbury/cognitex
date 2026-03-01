@@ -8464,6 +8464,68 @@ async def settings_page(request: Request, tab: str = "general"):
     return templates.TemplateResponse("settings.html", template_data)
 
 
+@app.get("/api/settings/email-labels")
+async def api_get_email_labels():
+    """Return current email label filter and render checkboxes."""
+    import json
+    import redis.asyncio as aioredis
+    from cognitex.config import get_settings
+
+    ALL_LABELS = [
+        ("INBOX", "Inbox"),
+        ("UNREAD", "Unread"),
+        ("STARRED", "Starred"),
+        ("IMPORTANT", "Important"),
+        ("CATEGORY_PROMOTIONS", "Promotions"),
+        ("CATEGORY_SOCIAL", "Social"),
+        ("CATEGORY_UPDATES", "Updates"),
+        ("CATEGORY_FORUMS", "Forums"),
+    ]
+
+    settings = get_settings()
+    redis_client = aioredis.from_url(settings.redis_url)
+    try:
+        raw = await redis_client.get("cognitex:settings:email_labels")
+        selected = json.loads(raw) if raw else ["INBOX"]
+    except Exception:
+        selected = ["INBOX"]
+    finally:
+        await redis_client.close()
+
+    # Render checkbox HTML
+    html_parts = ['<div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.5rem;">']
+    for value, label in ALL_LABELS:
+        checked = "checked" if value in selected else ""
+        html_parts.append(
+            f'<label style="display: flex; align-items: center; gap: 0.4rem; font-size: 0.9rem;">'
+            f'<input type="checkbox" name="labels" value="{value}" {checked}> {label}</label>'
+        )
+    html_parts.append("</div>")
+    return HTMLResponse("".join(html_parts))
+
+
+@app.post("/api/settings/email-labels", response_class=HTMLResponse)
+async def api_save_email_labels(request: Request):
+    """Save email label filter to Redis."""
+    import json
+    import redis.asyncio as aioredis
+    from cognitex.config import get_settings
+
+    form = await request.form()
+    labels = form.getlist("labels")
+    if not labels:
+        labels = ["INBOX"]
+
+    settings = get_settings()
+    redis_client = aioredis.from_url(settings.redis_url)
+    try:
+        await redis_client.set("cognitex:settings:email_labels", json.dumps(labels))
+    finally:
+        await redis_client.close()
+
+    return HTMLResponse('<span style="color: #16a34a;">Saved!</span>')
+
+
 @app.post("/api/settings/models", response_class=HTMLResponse)
 async def api_settings_models_update(
     request: Request,

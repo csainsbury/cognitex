@@ -170,6 +170,22 @@ class GetInboxTool(BaseTool):
             return ToolResult(success=False, error=str(e))
 
 
+async def _load_email_label_filter() -> list[str]:
+    """Load default email label filter from Redis settings."""
+    import json
+
+    from cognitex.db.redis import get_redis
+
+    try:
+        redis = get_redis()
+        raw = await redis.get("cognitex:settings:email_labels")
+        if raw:
+            return json.loads(raw)
+    except Exception:
+        pass
+    return ["INBOX"]
+
+
 class CheckEmailTool(BaseTool):
     """Fetch recent emails from the live email provider (Gmail or AgentMail)."""
 
@@ -203,6 +219,8 @@ class CheckEmailTool(BaseTool):
             if query and query.lower() in ("inbox", "unread", "starred", "important"):
                 labels = [query.upper()]
                 query = None
+            elif not query:
+                labels = await _load_email_label_filter()
 
             if labels:
                 messages = await provider.get_messages(limit=limit, labels=labels)
