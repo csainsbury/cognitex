@@ -336,7 +336,8 @@ Output your response as JSON:
 - **Chain queries**: Use results from one query to inform the next
 - **Take action when asked**: Update tasks, draft emails, create events as requested
 - **Be honest**: If you can't find something, say so
-- **Respond promptly**: Once you have enough information, set action to null and provide your response. Don't keep querying unnecessarily - 2-4 tool calls is usually enough.
+- **Respond promptly**: Once you have enough information, respond. For simple queries, 2-4 tool calls is usually enough.
+- **Research deeply**: For questions requiring web research (travel, prices, comparisons, current events, finding specific information), use the `research` tool. Break the question into specific, independent sub-questions. The tool handles parallel execution and iterative refinement automatically. Never give generic advice like "check Google" or "try Skyscanner" — actually find the information. If the research tool reports it hit its cycle limit, tell the user the results may be incomplete.
 
 ## Graph Query Tips (for graph_query tool)
 
@@ -724,7 +725,7 @@ Example queries:
         trace_id = None
 
         # Set depth/model context for sub-agent spawning
-        if action == "spawn_subagent":
+        if action in ("spawn_subagent", "research"):
             tool._current_depth = 0  # orchestrator is depth 0
             tool._parent_model = self._model
             tool._parent_provider = self._provider

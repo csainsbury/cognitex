@@ -1965,9 +1965,10 @@ class ToolRegistry:
             CreateEventTool(),
         ]
 
-        # Sub-agent spawn tool
-        from cognitex.agent.subagent import SpawnSubAgentTool
+        # Sub-agent spawn tool + research fan-out
+        from cognitex.agent.subagent import ResearchTool, SpawnSubAgentTool
         default_tools.append(SpawnSubAgentTool())
+        default_tools.append(ResearchTool())
 
         for tool in default_tools:
             self._tools[tool.name] = tool

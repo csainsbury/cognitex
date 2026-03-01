@@ -114,6 +114,21 @@ BUILTIN_SUBAGENTS: dict[str, SubAgentConfig] = {
         ],
         max_iterations=3,
     ),
+    "researcher": SubAgentConfig(
+        name="researcher",
+        purpose="Web research worker. Search the web, fetch pages, and extract specific information.",
+        is_builtin=True,
+        allowed_tools=["web_search", "web_fetch", "graph_query", "recall_memory"],
+        max_iterations=6,
+        system_prompt_extra=(
+            "You are a focused research worker. Your job:\n"
+            "1. Search the web for the specific information requested\n"
+            "2. Fetch and read the most relevant pages\n"
+            "3. Extract concrete facts, prices, dates, names — not generic advice\n"
+            "4. If the first search doesn't find what you need, try different queries\n"
+            "Return your findings in a structured format with sources."
+        ),
+    ),
 }
 
 
@@ -523,3 +538,168 @@ class SpawnSubAgentTool(BaseTool):
             success=False,
             error=f"Sub-agent '{result.agent_name}' failed: {result.error}",
         )
+
+
+# ---------------------------------------------------------------------------
+# ResearchTool — parallel fan-out with evaluate-refine loop
+# ---------------------------------------------------------------------------
+
+# Redis key for max research cycles setting
+RESEARCH_MAX_CYCLES_KEY = "cognitex:settings:research_max_cycles"
+DEFAULT_MAX_CYCLES = 3
+
+
+async def _load_max_research_cycles() -> int:
+    """Load max research cycles from Redis settings."""
+    from cognitex.db.redis import get_redis
+
+    try:
+        redis = get_redis()
+        raw = await redis.get(RESEARCH_MAX_CYCLES_KEY)
+        if raw:
+            return int(raw)
+    except Exception:
+        pass
+    return DEFAULT_MAX_CYCLES
+
+
+class ResearchTool(BaseTool):
+    """Fan out parallel web research with iterative refinement."""
+
+    name = "research"
+    description = (
+        "Launch parallel web research on multiple sub-questions. Each query is "
+        "handled by a separate research agent with web access. After gathering "
+        "results, automatically evaluates whether the findings answer the original "
+        "question and runs additional research cycles if gaps remain. Use for "
+        "travel planning, comparisons, fact-finding, or any question requiring "
+        "multiple web searches."
+    )
+    risk = ToolRisk.READONLY
+    category = ToolCategory.READONLY  # Available in ALL modes
+    parameters = {
+        "tasks": {
+            "type": "array",
+            "description": (
+                "List of specific research sub-tasks (1-5 items). "
+                "Each should be a clear, focused question."
+            ),
+        },
+        "context": {
+            "type": "string",
+            "description": "Shared context all researchers should know",
+            "optional": True,
+        },
+    }
+
+    _parent_model: str = ""
+    _parent_provider: str = ""
+
+    async def execute(self, tasks: list[str], context: str = "") -> ToolResult:
+        import asyncio
+
+        from cognitex.services.llm import get_llm_service
+
+        if not tasks:
+            return ToolResult(success=False, error="No research tasks provided.")
+        if len(tasks) > 5:
+            tasks = tasks[:5]
+
+        max_cycles = await _load_max_research_cycles()
+        registry = get_subagent_registry()
+        config = await registry.get("researcher")
+        llm = get_llm_service()
+        model, provider = self._parent_model, self._parent_provider
+
+        all_results: list[dict] = []
+        cycle = 0
+        hit_limit = False
+        pending_tasks = list(tasks)
+        original_question = context or "; ".join(tasks)
+
+        while pending_tasks and cycle < max_cycles:
+            cycle += 1
+
+            async def _run_one(task_text: str) -> dict:
+                agent = SubAgent(
+                    config=config, parent_model=model, parent_provider=provider
+                )
+                result = await agent.run(task=task_text, context=context)
+                return {
+                    "task": task_text,
+                    "success": result.success,
+                    "findings": result.response,
+                    "steps": result.steps_taken,
+                }
+
+            logger.info(
+                "Research cycle starting",
+                cycle=cycle,
+                max_cycles=max_cycles,
+                num_tasks=len(pending_tasks),
+            )
+
+            batch = await asyncio.gather(*[_run_one(t) for t in pending_tasks])
+            all_results.extend(batch)
+
+            # Evaluate whether findings are sufficient
+            if cycle >= max_cycles:
+                hit_limit = True
+                break
+
+            findings_summary = "\n\n".join(
+                f"[{r['task']}]\n{r['findings']}" for r in all_results
+            )
+            eval_prompt = (
+                f"Original question: {original_question}\n\n"
+                f"Research findings so far:\n{findings_summary}\n\n"
+                "Do these findings adequately answer the original question? "
+                "If YES, respond with exactly: COMPLETE\n"
+                "If NO, respond with a JSON list of specific follow-up queries "
+                "that would fill the gaps, e.g.: "
+                '["query 1", "query 2"]'
+            )
+            eval_response = await llm.complete_messages(
+                messages=[{"role": "user", "content": eval_prompt}],
+                model=model,
+                provider=provider,
+                max_tokens=512,
+                temperature=0.1,
+            )
+
+            if "COMPLETE" in eval_response.upper():
+                logger.info("Research complete after evaluation", cycle=cycle)
+                break
+
+            # Parse follow-up tasks
+            try:
+                follow_ups = json.loads(
+                    eval_response[eval_response.index("[") : eval_response.rindex("]") + 1]
+                )
+                pending_tasks = follow_ups[:5]
+                logger.info(
+                    "Research evaluation found gaps",
+                    cycle=cycle,
+                    follow_ups=len(pending_tasks),
+                )
+            except (ValueError, json.JSONDecodeError):
+                logger.warning(
+                    "Could not parse research follow-ups, stopping",
+                    cycle=cycle,
+                    raw=eval_response[:200],
+                )
+                break
+
+        data: dict = {
+            "cycles": cycle,
+            "hit_limit": hit_limit,
+            "total_researchers": len(all_results),
+            "results": all_results,
+        }
+        if hit_limit:
+            data["note"] = (
+                f"Reached max research cycles ({max_cycles}). "
+                "Results may be incomplete. Adjust in Settings > Agent."
+            )
+
+        return ToolResult(success=True, data=data)

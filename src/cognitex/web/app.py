@@ -8526,6 +8526,52 @@ async def api_save_email_labels(request: Request):
     return HTMLResponse('<span style="color: #16a34a;">Saved!</span>')
 
 
+@app.get("/api/settings/research", response_class=HTMLResponse)
+async def api_get_research_settings():
+    """Return current research max cycles setting as an input field."""
+    import redis.asyncio as aioredis
+    from cognitex.config import get_settings
+
+    settings = get_settings()
+    redis_client = aioredis.from_url(settings.redis_url)
+    try:
+        raw = await redis_client.get("cognitex:settings:research_max_cycles")
+        max_cycles = int(raw) if raw else 3
+    except Exception:
+        max_cycles = 3
+    finally:
+        await redis_client.close()
+
+    return HTMLResponse(
+        f'<input type="number" name="max_cycles" value="{max_cycles}" '
+        f'min="1" max="10" style="width: 60px; padding: 0.4rem; '
+        f'border: 1px solid #ddd; border-radius: 4px;">'
+    )
+
+
+@app.post("/api/settings/research", response_class=HTMLResponse)
+async def api_save_research_settings(request: Request):
+    """Save research max cycles setting to Redis."""
+    import redis.asyncio as aioredis
+    from cognitex.config import get_settings
+
+    form = await request.form()
+    try:
+        max_cycles = int(form.get("max_cycles", 3))
+        max_cycles = max(1, min(10, max_cycles))
+    except (TypeError, ValueError):
+        max_cycles = 3
+
+    settings = get_settings()
+    redis_client = aioredis.from_url(settings.redis_url)
+    try:
+        await redis_client.set("cognitex:settings:research_max_cycles", str(max_cycles))
+    finally:
+        await redis_client.close()
+
+    return HTMLResponse('<span style="color: #16a34a;">Saved!</span>')
+
+
 @app.post("/api/settings/models", response_class=HTMLResponse)
 async def api_settings_models_update(
     request: Request,
