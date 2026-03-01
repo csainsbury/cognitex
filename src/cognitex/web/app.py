@@ -5343,7 +5343,14 @@ async def notification_stream(_request: Request):
                 try:
                     # Wait for notifications with timeout for keepalive
                     data = await asyncio.wait_for(client_queue.get(), timeout=30.0)
-                    yield f"event: notification\ndata: {data}\n\n"
+                    try:
+                        parsed = json.loads(data)
+                        if parsed.get("type") == "research_progress":
+                            yield f"event: research_progress\ndata: {data}\n\n"
+                        else:
+                            yield f"event: notification\ndata: {data}\n\n"
+                    except (json.JSONDecodeError, TypeError):
+                        yield f"event: notification\ndata: {data}\n\n"
                 except TimeoutError:
                     # Send keepalive ping
                     yield "event: ping\ndata: {}\n\n"

@@ -6,6 +6,7 @@ Each sub-agent has its own model, tool access, and iteration limit.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -563,6 +564,24 @@ async def _load_max_research_cycles() -> int:
     return DEFAULT_MAX_CYCLES
 
 
+async def _broadcast_research_event(event_type: str, data: dict) -> None:
+    """Broadcast a research progress event to connected SSE clients."""
+    try:
+        from cognitex.web.app import _notification_clients
+
+        payload = json.dumps({"type": "research_progress", "event": event_type, **data})
+        disconnected: set = set()
+        for client_queue in _notification_clients:
+            try:
+                client_queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                disconnected.add(client_queue)
+        for q in disconnected:
+            _notification_clients.discard(q)
+    except Exception:
+        pass  # Best-effort — don't break research if broadcast fails
+
+
 class ResearchTool(BaseTool):
     """Fan out parallel web research with iterative refinement."""
 
@@ -596,8 +615,6 @@ class ResearchTool(BaseTool):
     _parent_provider: str = ""
 
     async def execute(self, tasks: list[str], context: str = "") -> ToolResult:
-        import asyncio
-
         from cognitex.services.llm import get_llm_service
 
         if not tasks:
@@ -620,23 +637,34 @@ class ResearchTool(BaseTool):
         while pending_tasks and cycle < max_cycles:
             cycle += 1
 
-            async def _run_one(task_text: str) -> dict:
+            async def _run_one(task_text: str, _cycle: int = cycle) -> dict:
                 agent = SubAgent(
                     config=config, parent_model=model, parent_provider=provider
                 )
                 result = await agent.run(task=task_text, context=context)
-                return {
+                r = {
                     "task": task_text,
                     "success": result.success,
                     "findings": result.response,
                     "steps": result.steps_taken,
                 }
+                await _broadcast_research_event(
+                    "researcher_done",
+                    {"cycle": _cycle, "task": task_text,
+                     "success": result.success, "steps": result.steps_taken},
+                )
+                return r
 
             logger.info(
                 "Research cycle starting",
                 cycle=cycle,
                 max_cycles=max_cycles,
                 num_tasks=len(pending_tasks),
+            )
+
+            await _broadcast_research_event(
+                "cycle_start",
+                {"cycle": cycle, "max_cycles": max_cycles, "tasks": pending_tasks},
             )
 
             batch = await asyncio.gather(*[_run_one(t) for t in pending_tasks])
@@ -646,6 +674,8 @@ class ResearchTool(BaseTool):
             if cycle >= max_cycles:
                 hit_limit = True
                 break
+
+            await _broadcast_research_event("evaluating", {"cycle": cycle})
 
             findings_summary = "\n\n".join(
                 f"[{r['task']}]\n{r['findings']}" for r in all_results
@@ -682,6 +712,10 @@ class ResearchTool(BaseTool):
                     cycle=cycle,
                     follow_ups=len(pending_tasks),
                 )
+                await _broadcast_research_event(
+                    "gaps_found",
+                    {"cycle": cycle, "follow_ups": pending_tasks},
+                )
             except (ValueError, json.JSONDecodeError):
                 logger.warning(
                     "Could not parse research follow-ups, stopping",
@@ -689,6 +723,11 @@ class ResearchTool(BaseTool):
                     raw=eval_response[:200],
                 )
                 break
+
+        await _broadcast_research_event(
+            "complete",
+            {"cycles": cycle, "total_researchers": len(all_results)},
+        )
 
         data: dict = {
             "cycles": cycle,

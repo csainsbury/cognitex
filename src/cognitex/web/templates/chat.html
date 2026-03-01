@@ -191,6 +191,22 @@
         font-size: 0.75rem;
         margin-left: 0.25rem;
     }
+    .research-progress {
+        padding: 0.5rem 1rem;
+        margin-bottom: 0.5rem;
+        background: #f0f4ff;
+        border-left: 3px solid #2563eb;
+        border-radius: 0 6px 6px 0;
+        font-size: 0.8rem;
+        color: #475569;
+        max-height: 200px;
+        overflow-y: auto;
+    }
+    .research-progress-header { font-weight: 600; margin-bottom: 0.25rem; color: #1e40af; }
+    .research-progress-item { padding: 0.15rem 0; border-bottom: 1px solid #e2e8f0; }
+    .research-progress-item:last-child { border-bottom: none; }
+    .rp-done { color: #16a34a; }
+    .rp-eval { color: #d97706; font-style: italic; }
 </style>
 
 <div class="chat-header">
@@ -217,6 +233,11 @@
 
     <div class="typing-indicator" id="typing-indicator">
         Agent is thinking...
+    </div>
+
+    <div class="research-progress" id="research-progress" style="display: none;">
+        <div class="research-progress-header" id="research-progress-header">Researching...</div>
+        <div class="research-progress-items" id="research-progress-items"></div>
     </div>
 
     <div class="chat-input-area">
@@ -300,6 +321,10 @@ async function sendMessage() {
     addMessage(message, true);
     inputEl.value = '';
     inputEl.style.height = 'auto';
+
+    // Reset research progress panel
+    document.getElementById('research-progress').style.display = 'none';
+    document.getElementById('research-progress-items').innerHTML = '';
 
     // Show typing indicator
     typingEl.classList.add('show');
@@ -396,5 +421,63 @@ function insertCommand(name) {
     inputEl.focus();
     document.getElementById('command-panel').style.display = 'none';
 }
+
+// Research progress streaming
+function initResearchProgress() {
+    const check = setInterval(() => {
+        if (typeof notificationSource !== 'undefined' && notificationSource) {
+            clearInterval(check);
+            notificationSource.addEventListener('research_progress', handleResearchProgress);
+        }
+    }, 200);
+}
+
+function handleResearchProgress(e) {
+    const data = JSON.parse(e.data);
+    const ev = data.event;
+    const container = document.getElementById('research-progress');
+    const items = document.getElementById('research-progress-items');
+    const header = document.getElementById('research-progress-header');
+    container.style.display = 'block';
+
+    if (ev === 'cycle_start') {
+        header.textContent = 'Research cycle ' + data.cycle + '/' + data.max_cycles;
+        for (const task of data.tasks) {
+            const div = document.createElement('div');
+            div.className = 'research-progress-item';
+            div.id = 'rp-' + hashTask(task);
+            div.textContent = '\u23f3 ' + task;
+            items.appendChild(div);
+        }
+    } else if (ev === 'researcher_done') {
+        const el = document.getElementById('rp-' + hashTask(data.task));
+        if (el) {
+            el.className = 'research-progress-item rp-done';
+            el.textContent = (data.success ? '\u2713 ' : '\u2717 ' ) + data.task + ' (' + data.steps + ' steps)';
+        }
+    } else if (ev === 'evaluating') {
+        const div = document.createElement('div');
+        div.className = 'research-progress-item rp-eval';
+        div.textContent = 'Evaluating findings...';
+        items.appendChild(div);
+    } else if (ev === 'gaps_found') {
+        const div = document.createElement('div');
+        div.className = 'research-progress-item rp-eval';
+        div.textContent = 'Gaps found \u2014 ' + data.follow_ups.length + ' follow-up queries';
+        items.appendChild(div);
+    } else if (ev === 'complete') {
+        header.textContent = 'Research complete (' + data.cycles + ' cycle(s), ' + data.total_researchers + ' queries)';
+        setTimeout(() => { container.style.display = 'none'; items.innerHTML = ''; }, 3000);
+    }
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function hashTask(s) {
+    let h = 0;
+    for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+    return Math.abs(h).toString(36);
+}
+
+initResearchProgress();
 </script>
 {% endblock %}
