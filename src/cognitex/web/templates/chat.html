@@ -330,6 +330,44 @@ async function sendMessage() {
     typingEl.classList.add('show');
     sendBtn.disabled = true;
 
+    // Start polling for progress — updates typing indicator + progress panel
+    let lastStepCount = 0;
+    const progressContainer = document.getElementById('research-progress');
+    const progressItems = document.getElementById('research-progress-items');
+    const progressHeader = document.getElementById('research-progress-header');
+
+    const progressInterval = setInterval(async () => {
+        try {
+            const pr = await fetch('/api/chat/progress');
+            if (!pr.ok) return;
+            const pg = await pr.json();
+            if (pg.active && pg.steps && pg.steps.length > lastStepCount) {
+                // Update typing indicator with current tool
+                const latest = pg.steps[pg.steps.length - 1];
+                if (latest.action) {
+                    typingEl.textContent = 'Step ' + (latest.i + 1) + ': ' + latest.action + '...';
+                } else {
+                    typingEl.textContent = 'Composing response...';
+                }
+                // Also show in progress panel
+                progressContainer.style.display = 'block';
+                for (let i = lastStepCount; i < pg.steps.length; i++) {
+                    const s = pg.steps[i];
+                    if (s.action) {
+                        progressHeader.textContent = 'Agent working... (step ' + (s.i + 1) + ')';
+                        const div = document.createElement('div');
+                        div.className = 'research-progress-item';
+                        div.textContent = '\u2192 ' + s.action + ': ' + s.thought.substring(0, 120);
+                        progressItems.appendChild(div);
+                    }
+                }
+                lastStepCount = pg.steps.length;
+                while (progressItems.children.length > 10) progressItems.removeChild(progressItems.firstChild);
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+            }
+        } catch (_e) { /* ignore polling errors */ }
+    }, 1500);
+
     try {
         const response = await fetch('/api/chat', {
             method: 'POST',
@@ -340,9 +378,18 @@ async function sendMessage() {
         const data = await response.json();
 
         if (data.error) {
+            finalizeStreaming();
             addMessage('Error: ' + data.error, false);
         } else {
-            addMessage(data.response, false);
+            if (_streamingDiv) {
+                // Response was already streamed — finalize it
+                _streamingDiv.dataset.rawText = data.response;
+                _streamingDiv.innerHTML = formatMessage(data.response);
+                finalizeStreaming();
+            } else {
+                // No streaming occurred — add normally
+                addMessage(data.response, false);
+            }
 
             // If there are pending approvals, show a notice
             if (data.approvals && data.approvals.length > 0) {
@@ -350,11 +397,18 @@ async function sendMessage() {
             }
         }
     } catch (err) {
+        finalizeStreaming();
         addMessage('Error: Failed to connect to agent. ' + err.message, false);
     } finally {
+        clearInterval(progressInterval);
+        typingEl.textContent = 'Agent is thinking...';
         typingEl.classList.remove('show');
         sendBtn.disabled = false;
         inputEl.focus();
+        setTimeout(() => {
+            progressContainer.style.display = 'none';
+            progressItems.innerHTML = '';
+        }, 2000);
     }
 }
 
@@ -479,5 +533,80 @@ function hashTask(s) {
 }
 
 initResearchProgress();
+
+// ReAct step streaming — show agent's tool calls in real time
+function initReactSteps() {
+    const check = setInterval(() => {
+        if (typeof notificationSource !== 'undefined' && notificationSource) {
+            clearInterval(check);
+            notificationSource.addEventListener('react_step', handleReactStep);
+        }
+    }, 200);
+}
+
+function handleReactStep(e) {
+    const data = JSON.parse(e.data);
+    const container = document.getElementById('research-progress');
+    const items = document.getElementById('research-progress-items');
+    const header = document.getElementById('research-progress-header');
+    container.style.display = 'block';
+
+    if (data.action) {
+        header.textContent = 'Agent working... (step ' + (data.iteration + 1) + ')';
+        const div = document.createElement('div');
+        div.className = 'research-progress-item';
+        div.textContent = '\u2192 ' + data.action + ': ' + data.thought.substring(0, 120);
+        items.appendChild(div);
+        // Keep only last 8 items
+        while (items.children.length > 8) items.removeChild(items.firstChild);
+    } else {
+        header.textContent = 'Composing response...';
+    }
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+initReactSteps();
+
+// Streaming text chunks — show agent's response as it arrives
+let _streamingDiv = null;
+
+function initTextChunks() {
+    const check = setInterval(() => {
+        if (typeof notificationSource !== 'undefined' && notificationSource) {
+            clearInterval(check);
+            notificationSource.addEventListener('text_chunk', handleTextChunk);
+        }
+    }, 200);
+}
+
+function handleTextChunk(e) {
+    const data = JSON.parse(e.data);
+    if (!data.content) return;
+
+    // Create a new message div for streaming if one doesn't exist
+    if (!_streamingDiv) {
+        _streamingDiv = document.createElement('div');
+        _streamingDiv.className = 'message message-agent';
+        _streamingDiv.dataset.streaming = 'true';
+        messagesEl.appendChild(_streamingDiv);
+    }
+
+    // Append the chunk (re-render full content for markdown)
+    const current = _streamingDiv.dataset.rawText || '';
+    const updated = current + data.content;
+    _streamingDiv.dataset.rawText = updated;
+    _streamingDiv.innerHTML = formatMessage(updated);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+// Finalize streaming: called when the full response arrives via POST
+function finalizeStreaming() {
+    if (_streamingDiv) {
+        _streamingDiv.removeAttribute('data-streaming');
+        _streamingDiv = null;
+    }
+}
+
+initTextChunks();
 </script>
 {% endblock %}

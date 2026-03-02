@@ -10,12 +10,74 @@ import structlog
 
 logger = structlog.get_logger()
 
+# Keywords that Gemini's function calling API silently rejects.
+# Based on OpenClaw's cleanSchemaForGemini() — covers all JSON Schema
+# keywords not in Gemini's supported subset.
+GEMINI_REJECTED_KEYS: frozenset[str] = frozenset(
+    {
+        "additionalProperties",
+        "$schema",
+        "default",
+        "title",
+        "format",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "minLength",
+        "maxLength",
+        "pattern",
+        "minItems",
+        "maxItems",
+        "uniqueItems",
+        "minProperties",
+        "maxProperties",
+        "multipleOf",
+        "$ref",
+        "$defs",
+        "$id",
+        "definitions",
+        "examples",
+        "patternProperties",
+        "const",
+        "deprecated",
+    }
+)
+
+
+def _clean_for_gemini(obj: dict[str, Any]) -> dict[str, Any]:
+    """Recursively strip keys that Gemini rejects from a JSON-Schema-like dict.
+
+    Also converts ``const`` values to ``enum: [value]`` (Gemini supports enum
+    but not const).  Returns a new dict — the original is never mutated.
+    """
+    cleaned: dict[str, Any] = {}
+
+    # Convert const → enum before stripping
+    if "const" in obj:
+        cleaned["enum"] = [obj["const"]]
+
+    for key, value in obj.items():
+        if key in GEMINI_REJECTED_KEYS:
+            continue
+        if isinstance(value, dict):
+            cleaned[key] = _clean_for_gemini(value)
+        elif isinstance(value, list):
+            cleaned[key] = [
+                _clean_for_gemini(item) if isinstance(item, dict) else item for item in value
+            ]
+        else:
+            cleaned[key] = value
+
+    return cleaned
+
 
 class ToolRisk(Enum):
     """Risk level for tool execution."""
-    READONLY = "readonly"      # Always allowed, no side effects
-    AUTO = "auto"              # Auto-execute, low risk side effects
-    APPROVAL = "approval"      # Requires user approval before execution
+
+    READONLY = "readonly"  # Always allowed, no side effects
+    AUTO = "auto"  # Auto-execute, low risk side effects
+    APPROVAL = "approval"  # Requires user approval before execution
 
 
 class ToolCategory(Enum):
@@ -24,19 +86,21 @@ class ToolCategory(Enum):
     Used by the state-aware tool filter to determine which tools
     are appropriate for the user's current operating mode.
     """
-    READONLY = "readonly"           # Graph queries, searches, data retrieval
-    NOTIFICATION = "notification"   # Sending notifications to user
-    EMAIL = "email"                 # Email drafting and management
-    TASK_MUTATION = "task_mutation" # Creating or updating tasks
+
+    READONLY = "readonly"  # Graph queries, searches, data retrieval
+    NOTIFICATION = "notification"  # Sending notifications to user
+    EMAIL = "email"  # Email drafting and management
+    TASK_MUTATION = "task_mutation"  # Creating or updating tasks
     PROJECT_MUTATION = "project_mutation"  # Creating or updating projects/goals
-    EVENT = "event"                 # Calendar event creation
-    MEMORY = "memory"               # Memory storage and retrieval
-    WEB = "web"                     # External web searches and fetches
+    EVENT = "event"  # Calendar event creation
+    MEMORY = "memory"  # Memory storage and retrieval
+    WEB = "web"  # External web searches and fetches
 
 
 @dataclass
 class ToolResult:
     """Result from executing a tool."""
+
     success: bool
     data: Any = None
     error: str | None = None
@@ -47,6 +111,7 @@ class ToolResult:
 @dataclass
 class ToolDefinition:
     """Definition of a tool available to the agent."""
+
     name: str
     description: str
     risk: ToolRisk
@@ -79,10 +144,93 @@ class BaseTool(ABC):
             parameters=self.parameters,
         )
 
+    def _build_properties_and_required(self) -> tuple[dict, list[str]]:
+        """Build JSON Schema properties dict and required list from self.parameters."""
+        properties: dict[str, Any] = {}
+        required: list[str] = []
+        for param_name, param_def in self.parameters.items():
+            prop: dict[str, Any] = {"type": param_def.get("type", "string")}
+            if "description" in param_def:
+                prop["description"] = param_def["description"]
+            if param_def.get("type") == "array":
+                prop["items"] = param_def.get("items", {"type": "string"})
+            if "enum" in param_def:
+                prop["enum"] = param_def["enum"]
+            properties[param_name] = prop
+            if not param_def.get("optional") and "default" not in param_def:
+                required.append(param_name)
+        return properties, required
+
+    def to_anthropic_schema(self) -> dict:
+        """Convert to Anthropic native tool schema for the tools API parameter."""
+        properties, required = self._build_properties_and_required()
+        schema: dict[str, Any] = {
+            "name": self.name,
+            "description": self.description,
+            "input_schema": {
+                "type": "object",
+                "properties": properties,
+            },
+        }
+        if required:
+            schema["input_schema"]["required"] = required
+        return schema
+
+    def to_openai_schema(self) -> dict:
+        """Convert to OpenAI function-calling format."""
+        properties, required = self._build_properties_and_required()
+        schema: dict[str, Any] = {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": properties,
+                },
+            },
+        }
+        if required:
+            schema["function"]["parameters"]["required"] = required
+        return schema
+
+    def to_gemini_schema(self) -> dict:
+        """Convert to Gemini function-calling format.
+
+        Strips JSON Schema keywords that Gemini rejects (e.g. additionalProperties,
+        $schema, default) following OpenClaw's cleanSchemaForGemini() approach.
+        Uses the recursive ``_clean_for_gemini()`` helper which handles nested
+        dicts, arrays, and const→enum conversion.
+        """
+        properties, required = self._build_properties_and_required()
+        cleaned_props = {k: _clean_for_gemini(v) for k, v in properties.items()}
+        schema: dict[str, Any] = {
+            "name": self.name,
+            "description": self.description,
+            "parameters": {
+                "type": "object",
+                "properties": cleaned_props,
+            },
+        }
+        if required:
+            schema["parameters"]["required"] = required
+        return schema
+
+    def to_provider_schema(self, provider: str) -> dict:
+        """Return tool schema in the format expected by the given provider."""
+        if provider == "anthropic":
+            return self.to_anthropic_schema()
+        elif provider == "google":
+            return self.to_gemini_schema()
+        else:
+            # OpenAI, Together, OpenRouter all use OpenAI format
+            return self.to_openai_schema()
+
 
 # =============================================================================
 # READ-ONLY TOOLS (always allowed)
 # =============================================================================
+
 
 class GraphQueryTool(BaseTool):
     """Execute Cypher queries against Neo4j."""
@@ -241,15 +389,17 @@ class CheckEmailTool(BaseTool):
 
             summary = []
             for msg in messages:
-                summary.append({
-                    "id": msg.get("gmail_id", msg.get("id", "")),
-                    "from": msg.get("sender_name") or msg.get("sender_email", "unknown"),
-                    "from_email": msg.get("sender_email", ""),
-                    "subject": msg.get("subject", "(no subject)"),
-                    "date": msg.get("date", ""),
-                    "snippet": msg.get("snippet", "")[:150],
-                    "labels": msg.get("labels", []),
-                })
+                summary.append(
+                    {
+                        "id": msg.get("gmail_id", msg.get("id", "")),
+                        "from": msg.get("sender_name") or msg.get("sender_email", "unknown"),
+                        "from_email": msg.get("sender_email", ""),
+                        "subject": msg.get("subject", "(no subject)"),
+                        "date": msg.get("date", ""),
+                        "snippet": msg.get("snippet", "")[:150],
+                        "labels": msg.get("labels", []),
+                    }
+                )
 
             return ToolResult(
                 success=True,
@@ -268,7 +418,9 @@ class SearchDocumentsTool(BaseTool):
     """Semantic search over indexed documents."""
 
     name = "search_documents"
-    description = "Search documents using semantic similarity. Returns matching docs with relevance scores."
+    description = (
+        "Search documents using semantic similarity. Returns matching docs with relevance scores."
+    )
     risk = ToolRisk.READONLY
     category = ToolCategory.READONLY
     parameters = {
@@ -321,7 +473,13 @@ class GetCalendarTool(BaseTool):
             start_str = start_date.strftime("%Y-%m-%dT%H:%M:%SZ")
             end_str = end_date.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-            logger.info("Calendar query", start=start_str, end=end_str, days_back=days_back, days_ahead=days_ahead)
+            logger.info(
+                "Calendar query",
+                start=start_str,
+                end=end_str,
+                days_back=days_back,
+                days_ahead=days_ahead,
+            )
 
             # Neo4j datetime comparison needs datetime() function
             query = """
@@ -336,10 +494,13 @@ class GetCalendarTool(BaseTool):
             """
 
             async for session in get_neo4j_session():
-                result = await session.run(query, {
-                    "start": start_str,
-                    "end": end_str,
-                })
+                result = await session.run(
+                    query,
+                    {
+                        "start": start_str,
+                        "end": end_str,
+                    },
+                )
                 events = await result.data()
                 # Flatten the result
                 flattened = [e["event"] for e in events]
@@ -358,9 +519,17 @@ class GetTasksTool(BaseTool):
     risk = ToolRisk.READONLY
     category = ToolCategory.READONLY
     parameters = {
-        "status": {"type": "string", "description": "Filter by status: pending, in_progress, done", "optional": True},
+        "status": {
+            "type": "string",
+            "description": "Filter by status: pending, in_progress, done",
+            "optional": True,
+        },
         "limit": {"type": "integer", "description": "Max results", "default": 20},
-        "include_overdue": {"type": "boolean", "description": "Only show overdue tasks", "default": False},
+        "include_overdue": {
+            "type": "boolean",
+            "description": "Only show overdue tasks",
+            "default": False,
+        },
     }
 
     async def execute(
@@ -382,6 +551,7 @@ class GetTasksTool(BaseTool):
 
                 if include_overdue:
                     from datetime import datetime
+
                     now = datetime.now()
                     tasks = [t for t in tasks if t.get("due") and t["due"] < now]
 
@@ -439,6 +609,7 @@ class GetContactTool(BaseTool):
             # Enhance with learned communication patterns
             try:
                 from cognitex.agent.decision_memory import get_decision_memory
+
                 decision_memory = get_decision_memory()
                 comm_pattern = await decision_memory.patterns.get_pattern(email)
 
@@ -465,12 +636,18 @@ class RecallMemoryTool(BaseTool):
     """Search the agent's episodic memory."""
 
     name = "recall_memory"
-    description = "Search past interactions, decisions, and observations. Use for context about past events."
+    description = (
+        "Search past interactions, decisions, and observations. Use for context about past events."
+    )
     risk = ToolRisk.READONLY
     category = ToolCategory.MEMORY
     parameters = {
         "query": {"type": "string", "description": "What to search for in memory"},
-        "memory_type": {"type": "string", "description": "Type: interaction, decision, observation", "optional": True},
+        "memory_type": {
+            "type": "string",
+            "description": "Type: interaction, decision, observation",
+            "optional": True,
+        },
         "limit": {"type": "integer", "description": "Max results", "default": 5},
     }
 
@@ -499,6 +676,7 @@ class RecallMemoryTool(BaseTool):
 # AUTO-EXECUTE TOOLS (low risk, executed automatically)
 # =============================================================================
 
+
 class CreateTaskTool(BaseTool):
     """Create a new task in the graph."""
 
@@ -509,14 +687,30 @@ class CreateTaskTool(BaseTool):
     parameters = {
         "title": {"type": "string", "description": "Task title"},
         "description": {"type": "string", "description": "Task description", "optional": True},
-        "priority": {"type": "string", "description": "Priority: low, medium, high, critical", "default": "medium"},
+        "priority": {
+            "type": "string",
+            "description": "Priority: low, medium, high, critical",
+            "default": "medium",
+        },
         "due_date": {"type": "string", "description": "ISO date string", "optional": True},
         "effort_estimate": {"type": "number", "description": "Estimated hours", "optional": True},
-        "energy_cost": {"type": "string", "description": "Energy: low, medium, high", "optional": True},
+        "energy_cost": {
+            "type": "string",
+            "description": "Energy: low, medium, high",
+            "optional": True,
+        },
         "project_id": {"type": "string", "description": "Project ID to link to", "optional": True},
         "goal_id": {"type": "string", "description": "Goal ID to link to", "optional": True},
-        "source_email_id": {"type": "string", "description": "Gmail ID if from email", "optional": True},
-        "source_event_id": {"type": "string", "description": "GCal ID if from event", "optional": True},
+        "source_email_id": {
+            "type": "string",
+            "description": "Gmail ID if from email",
+            "optional": True,
+        },
+        "source_event_id": {
+            "type": "string",
+            "description": "GCal ID if from event",
+            "optional": True,
+        },
     }
 
     async def execute(
@@ -568,7 +762,11 @@ class FindTaskTool(BaseTool):
     category = ToolCategory.READONLY
     parameters = {
         "title_search": {"type": "string", "description": "Title or keywords to search for"},
-        "status": {"type": "string", "description": "Filter by status: pending, in_progress, done, all", "optional": True},
+        "status": {
+            "type": "string",
+            "description": "Filter by status: pending, in_progress, done, all",
+            "optional": True,
+        },
     }
 
     async def execute(
@@ -607,9 +805,7 @@ class FindTaskTool(BaseTool):
                     logger.info("Found tasks", search=title_search[:30], count=len(tasks))
                     return ToolResult(success=True, data=tasks)
                 return ToolResult(
-                    success=True,
-                    data=[],
-                    error=f"No tasks found matching '{title_search}'"
+                    success=True, data=[], error=f"No tasks found matching '{title_search}'"
                 )
         except Exception as e:
             logger.warning("Task search failed", search=title_search[:30], error=str(e))
@@ -624,13 +820,32 @@ class UpdateTaskTool(BaseTool):
     risk = ToolRisk.AUTO
     category = ToolCategory.TASK_MUTATION
     parameters = {
-        "task_id": {"type": "string", "description": "Task ID to update (use find_task to get this from title)"},
+        "task_id": {
+            "type": "string",
+            "description": "Task ID to update (use find_task to get this from title)",
+        },
         "title": {"type": "string", "description": "New title", "optional": True},
-        "status": {"type": "string", "description": "New status: pending, in_progress, done", "optional": True},
-        "priority": {"type": "string", "description": "New priority: low, medium, high, critical", "optional": True},
+        "status": {
+            "type": "string",
+            "description": "New status: pending, in_progress, done",
+            "optional": True,
+        },
+        "priority": {
+            "type": "string",
+            "description": "New priority: low, medium, high, critical",
+            "optional": True,
+        },
         "due_date": {"type": "string", "description": "New due date (ISO)", "optional": True},
-        "effort_estimate": {"type": "number", "description": "Updated effort estimate in hours", "optional": True},
-        "energy_cost": {"type": "string", "description": "Updated energy cost: low, medium, high", "optional": True},
+        "effort_estimate": {
+            "type": "number",
+            "description": "Updated effort estimate in hours",
+            "optional": True,
+        },
+        "energy_cost": {
+            "type": "string",
+            "description": "Updated energy cost: low, medium, high",
+            "optional": True,
+        },
     }
 
     async def execute(
@@ -655,7 +870,9 @@ class UpdateTaskTool(BaseTool):
             # Get original task for learning system comparisons
             original_task = await task_service.get(task_id)
             original_status = original_task.get("status") if original_task else None
-            original_due = original_task.get("due") or original_task.get("due_date") if original_task else None
+            original_due = (
+                original_task.get("due") or original_task.get("due_date") if original_task else None
+            )
 
             task = await task_service.update(
                 task_id=task_id,
@@ -705,11 +922,14 @@ class UpdateTaskTool(BaseTool):
             # 1. Record start time when status changes to in_progress
             if new_status == "in_progress" and original_status != "in_progress":
                 async for session in get_session():
-                    await session.execute(text("""
+                    await session.execute(
+                        text("""
                         UPDATE tasks
                         SET started_at = NOW()
                         WHERE id = :task_id AND started_at IS NULL
-                    """), {"task_id": task_id})
+                    """),
+                        {"task_id": task_id},
+                    )
                     await session.commit()
                     break
                 logger.debug("Recorded task start time", task_id=task_id)
@@ -725,7 +945,9 @@ class UpdateTaskTool(BaseTool):
 
                         # Parse started_at
                         if isinstance(started_at_str, str):
-                            started_at = datetime.fromisoformat(started_at_str.replace("Z", "+00:00"))
+                            started_at = datetime.fromisoformat(
+                                started_at_str.replace("Z", "+00:00")
+                            )
                         else:
                             started_at = started_at_str
 
@@ -746,7 +968,9 @@ class UpdateTaskTool(BaseTool):
 
                     from cognitex.agent.state_model import record_deferral
 
-                    original_dt = parse_date(original_due) if isinstance(original_due, str) else original_due
+                    original_dt = (
+                        parse_date(original_due) if isinstance(original_due, str) else original_due
+                    )
                     new_dt = parse_date(new_due) if isinstance(new_due, str) else new_due
 
                     if new_dt > original_dt:
@@ -766,7 +990,9 @@ class SendNotificationTool(BaseTool):
     """Send a notification to the user via Discord."""
 
     name = "send_notification"
-    description = "Send a message to the user's Discord channel. Use for updates, alerts, questions."
+    description = (
+        "Send a message to the user's Discord channel. Use for updates, alerts, questions."
+    )
     risk = ToolRisk.AUTO
     category = ToolCategory.NOTIFICATION
     parameters = {
@@ -805,8 +1031,15 @@ class AddMemoryTool(BaseTool):
     category = ToolCategory.MEMORY
     parameters = {
         "content": {"type": "string", "description": "What to remember"},
-        "memory_type": {"type": "string", "description": "Type: observation, decision, interaction"},
-        "entities": {"type": "array", "description": "Related entity IDs (emails, people)", "optional": True},
+        "memory_type": {
+            "type": "string",
+            "description": "Type: observation, decision, interaction",
+        },
+        "entities": {
+            "type": "array",
+            "description": "Related entity IDs (emails, people)",
+            "optional": True,
+        },
         "importance": {"type": "integer", "description": "Importance 1-5", "default": 3},
     }
 
@@ -839,6 +1072,7 @@ class AddMemoryTool(BaseTool):
 # APPROVAL-REQUIRED TOOLS (staged for user approval)
 # =============================================================================
 
+
 class DraftEmailTool(BaseTool):
     """Draft an email for user review.
 
@@ -855,7 +1089,11 @@ class DraftEmailTool(BaseTool):
         "to": {"type": "string", "description": "Recipient email address"},
         "subject": {"type": "string", "description": "Email subject"},
         "body": {"type": "string", "description": "Email body content"},
-        "reply_to_id": {"type": "string", "description": "Gmail ID if this is a reply", "optional": True},
+        "reply_to_id": {
+            "type": "string",
+            "description": "Gmail ID if this is a reply",
+            "optional": True,
+        },
         "reasoning": {"type": "string", "description": "Why this email is needed"},
     }
 
@@ -897,14 +1135,17 @@ class DraftEmailTool(BaseTool):
                     )
                     RETURN draft.id
                     """
-                    await session.run(query, {
-                        "draft_id": draft_id,
-                        "to": to,
-                        "subject": subject,
-                        "body": body,
-                        "reason": reasoning,
-                        "reply_to_id": reply_to_id or ""
-                    })
+                    await session.run(
+                        query,
+                        {
+                            "draft_id": draft_id,
+                            "to": to,
+                            "subject": subject,
+                            "body": body,
+                            "reason": reasoning,
+                            "reply_to_id": reply_to_id or "",
+                        },
+                    )
                     break
             except Exception as e:
                 logger.warning("Failed to create Neo4j draft node", error=str(e))
@@ -928,6 +1169,7 @@ class DraftEmailTool(BaseTool):
             # 3. Send notification with approval buttons (uses debouncing service)
             try:
                 from cognitex.services.notifications import publish_notification
+
                 reasoning_line = f"\n_{reasoning}_" if reasoning else ""
                 await publish_notification(
                     message=(
@@ -948,6 +1190,7 @@ class DraftEmailTool(BaseTool):
             # 4. Create inbox item for unified view
             try:
                 from cognitex.services.inbox import get_inbox_service
+
                 inbox = get_inbox_service()
                 await inbox.create_item(
                     item_type="email_draft",
@@ -972,6 +1215,7 @@ class DraftEmailTool(BaseTool):
             # 5. Track draft for edit learning
             try:
                 from cognitex.services.email_style import track_draft_created
+
                 await track_draft_created(
                     draft_id=draft_id,
                     recipient_email=to,
@@ -1057,6 +1301,7 @@ class CreateEventTool(BaseTool):
 # PROJECT AND GOAL TOOLS
 # =============================================================================
 
+
 class GetProjectsTool(BaseTool):
     """List projects with optional filters."""
 
@@ -1065,8 +1310,16 @@ class GetProjectsTool(BaseTool):
     risk = ToolRisk.READONLY
     category = ToolCategory.READONLY
     parameters = {
-        "status": {"type": "string", "description": "Filter by status: planning, active, paused, completed, archived", "optional": True},
-        "include_archived": {"type": "boolean", "description": "Include archived projects", "default": False},
+        "status": {
+            "type": "string",
+            "description": "Filter by status: planning, active, paused, completed, archived",
+            "optional": True,
+        },
+        "include_archived": {
+            "type": "boolean",
+            "description": "Include archived projects",
+            "default": False,
+        },
         "limit": {"type": "integer", "description": "Max results", "default": 20},
     }
 
@@ -1127,11 +1380,27 @@ class CreateProjectTool(BaseTool):
     parameters = {
         "title": {"type": "string", "description": "Project title"},
         "description": {"type": "string", "description": "Project description", "optional": True},
-        "status": {"type": "string", "description": "Status: planning, active, paused", "default": "active"},
-        "target_date": {"type": "string", "description": "Target completion date (ISO)", "optional": True},
+        "status": {
+            "type": "string",
+            "description": "Status: planning, active, paused",
+            "default": "active",
+        },
+        "target_date": {
+            "type": "string",
+            "description": "Target completion date (ISO)",
+            "optional": True,
+        },
         "goal_id": {"type": "string", "description": "Goal ID to link to", "optional": True},
-        "owner_email": {"type": "string", "description": "Email of project owner", "optional": True},
-        "stakeholder_emails": {"type": "array", "description": "List of stakeholder emails", "optional": True},
+        "owner_email": {
+            "type": "string",
+            "description": "Email of project owner",
+            "optional": True,
+        },
+        "stakeholder_emails": {
+            "type": "array",
+            "description": "List of stakeholder emails",
+            "optional": True,
+        },
     }
 
     async def execute(
@@ -1164,7 +1433,9 @@ class CreateProjectTool(BaseTool):
                     await link_project_to_person(session, project["id"], owner_email, role="owner")
                 if stakeholder_emails:
                     for email in stakeholder_emails:
-                        await link_project_to_person(session, project["id"], email, role="stakeholder")
+                        await link_project_to_person(
+                            session, project["id"], email, role="stakeholder"
+                        )
                 break
 
             logger.info("Created project", project_id=project["id"], title=title[:50])
@@ -1184,7 +1455,11 @@ class LinkProjectToPersonTool(BaseTool):
     parameters = {
         "project_id": {"type": "string", "description": "Project ID"},
         "person_email": {"type": "string", "description": "Person's email address"},
-        "role": {"type": "string", "description": "Role: owner or stakeholder", "default": "stakeholder"},
+        "role": {
+            "type": "string",
+            "description": "Role: owner or stakeholder",
+            "default": "stakeholder",
+        },
     }
 
     async def execute(
@@ -1201,7 +1476,9 @@ class LinkProjectToPersonTool(BaseTool):
                 await link_project_to_person(session, project_id, person_email, role=role)
                 break
 
-            logger.info("Linked project to person", project_id=project_id, person=person_email, role=role)
+            logger.info(
+                "Linked project to person", project_id=project_id, person=person_email, role=role
+            )
             return ToolResult(success=True, data={"linked": True, "role": role})
         except Exception as e:
             logger.warning("Project-person link failed", error=str(e))
@@ -1219,7 +1496,11 @@ class UpdateProjectTool(BaseTool):
         "project_id": {"type": "string", "description": "Project ID to update"},
         "title": {"type": "string", "description": "New title", "optional": True},
         "description": {"type": "string", "description": "New description", "optional": True},
-        "status": {"type": "string", "description": "New status: planning, active, paused, completed, archived", "optional": True},
+        "status": {
+            "type": "string",
+            "description": "New status: planning, active, paused, completed, archived",
+            "optional": True,
+        },
         "target_date": {"type": "string", "description": "New target date (ISO)", "optional": True},
     }
 
@@ -1263,9 +1544,21 @@ class GetGoalsTool(BaseTool):
     risk = ToolRisk.READONLY
     category = ToolCategory.READONLY
     parameters = {
-        "status": {"type": "string", "description": "Filter by status: active, achieved, abandoned", "optional": True},
-        "timeframe": {"type": "string", "description": "Filter by timeframe: quarterly, yearly, multi_year", "optional": True},
-        "include_achieved": {"type": "boolean", "description": "Include achieved goals", "default": False},
+        "status": {
+            "type": "string",
+            "description": "Filter by status: active, achieved, abandoned",
+            "optional": True,
+        },
+        "timeframe": {
+            "type": "string",
+            "description": "Filter by timeframe: quarterly, yearly, multi_year",
+            "optional": True,
+        },
+        "include_achieved": {
+            "type": "boolean",
+            "description": "Include achieved goals",
+            "default": False,
+        },
         "limit": {"type": "integer", "description": "Max results", "default": 20},
     }
 
@@ -1328,8 +1621,16 @@ class CreateGoalTool(BaseTool):
     parameters = {
         "title": {"type": "string", "description": "Goal title"},
         "description": {"type": "string", "description": "Goal description", "optional": True},
-        "timeframe": {"type": "string", "description": "Timeframe: quarterly, yearly, multi_year", "optional": True},
-        "parent_goal_id": {"type": "string", "description": "Parent goal ID for hierarchy", "optional": True},
+        "timeframe": {
+            "type": "string",
+            "description": "Timeframe: quarterly, yearly, multi_year",
+            "optional": True,
+        },
+        "parent_goal_id": {
+            "type": "string",
+            "description": "Parent goal ID for hierarchy",
+            "optional": True,
+        },
     }
 
     async def execute(
@@ -1375,8 +1676,18 @@ class ParseGoalTool(BaseTool):
     category = ToolCategory.PROJECT_MUTATION
     parameters = {
         "description": {"type": "string", "description": "Natural language goal description"},
-        "create_projects": {"type": "boolean", "description": "Create extracted projects", "default": True, "optional": True},
-        "create_tasks": {"type": "boolean", "description": "Create extracted tasks", "default": True, "optional": True},
+        "create_projects": {
+            "type": "boolean",
+            "description": "Create extracted projects",
+            "default": True,
+            "optional": True,
+        },
+        "create_tasks": {
+            "type": "boolean",
+            "description": "Create extracted tasks",
+            "default": True,
+            "optional": True,
+        },
     }
 
     async def execute(
@@ -1428,7 +1739,11 @@ class UpdateGoalTool(BaseTool):
         "goal_id": {"type": "string", "description": "Goal ID to update"},
         "title": {"type": "string", "description": "New title", "optional": True},
         "description": {"type": "string", "description": "New description", "optional": True},
-        "status": {"type": "string", "description": "New status: active, achieved, abandoned", "optional": True},
+        "status": {
+            "type": "string",
+            "description": "New status: active, achieved, abandoned",
+            "optional": True,
+        },
         "timeframe": {"type": "string", "description": "New timeframe", "optional": True},
     }
 
@@ -1475,8 +1790,16 @@ class LinkTaskTool(BaseTool):
         "task_id": {"type": "string", "description": "Task ID to link"},
         "project_id": {"type": "string", "description": "Project ID to link to", "optional": True},
         "goal_id": {"type": "string", "description": "Goal ID to link to", "optional": True},
-        "document_id": {"type": "string", "description": "Drive document ID to link", "optional": True},
-        "blocked_by_task_id": {"type": "string", "description": "Task ID that blocks this task", "optional": True},
+        "document_id": {
+            "type": "string",
+            "description": "Drive document ID to link",
+            "optional": True,
+        },
+        "blocked_by_task_id": {
+            "type": "string",
+            "description": "Task ID that blocks this task",
+            "optional": True,
+        },
     }
 
     async def execute(
@@ -1505,7 +1828,9 @@ class LinkTaskTool(BaseTool):
             if document_id and await task_service.link_to_document(task_id, document_id):
                 linked.append(f"document:{document_id}")
 
-            if blocked_by_task_id and await task_service.set_blocked_by(task_id, blocked_by_task_id):
+            if blocked_by_task_id and await task_service.set_blocked_by(
+                task_id, blocked_by_task_id
+            ):
                 linked.append(f"blocked_by:{blocked_by_task_id}")
 
             if linked:
@@ -1521,6 +1846,7 @@ class LinkTaskTool(BaseTool):
 # TOOL REGISTRY
 # =============================================================================
 
+
 class SearchCodeTool(BaseTool):
     """Search indexed code files using semantic similarity."""
 
@@ -1529,8 +1855,14 @@ class SearchCodeTool(BaseTool):
     risk = ToolRisk.READONLY
     category = ToolCategory.READONLY
     parameters = {
-        "query": {"type": "string", "description": "Search query describing what code you're looking for"},
-        "repo": {"type": "string", "description": "Optional: limit search to specific repository (owner/repo format)"},
+        "query": {
+            "type": "string",
+            "description": "Search query describing what code you're looking for",
+        },
+        "repo": {
+            "type": "string",
+            "description": "Optional: limit search to specific repository (owner/repo format)",
+        },
         "limit": {"type": "integer", "description": "Maximum results to return", "default": 5},
     }
 
@@ -1544,14 +1876,16 @@ class SearchCodeTool(BaseTool):
                 break
 
             if not results:
-                return ToolResult(success=True, data={"results": [], "message": "No matching code found"})
+                return ToolResult(
+                    success=True, data={"results": [], "message": "No matching code found"}
+                )
 
             return ToolResult(
                 success=True,
                 data={
                     "results": results,
                     "count": len(results),
-                }
+                },
             )
 
         except Exception as e:
@@ -1568,7 +1902,11 @@ class ReadCodeFileTool(BaseTool):
     category = ToolCategory.READONLY
     parameters = {
         "file_id": {"type": "string", "description": "Code file ID (from search_code results)"},
-        "max_length": {"type": "integer", "description": "Maximum content length to return", "default": 15000},
+        "max_length": {
+            "type": "integer",
+            "description": "Maximum content length to return",
+            "default": 15000,
+        },
     }
 
     async def execute(self, file_id: str, max_length: int = 15000) -> ToolResult:
@@ -1579,8 +1917,10 @@ class ReadCodeFileTool(BaseTool):
         try:
             async for session in get_session():
                 result = await session.execute(
-                    text("SELECT repo_name, path, content, char_count FROM code_content WHERE file_id = :file_id"),
-                    {"file_id": file_id}
+                    text(
+                        "SELECT repo_name, path, content, char_count FROM code_content WHERE file_id = :file_id"
+                    ),
+                    {"file_id": file_id},
                 )
                 row = result.fetchone()
 
@@ -1597,7 +1937,7 @@ class ReadCodeFileTool(BaseTool):
                             "content": content[:max_length],
                             "char_count": row.char_count,
                             "truncated": truncated,
-                        }
+                        },
                     )
 
                 return ToolResult(success=False, error=f"Code file not found: {file_id}")
@@ -1630,7 +1970,7 @@ class GetRepositoriesTool(BaseTool):
                 data={
                     "repositories": repos,
                     "count": len(repos),
-                }
+                },
             )
 
         except Exception as e:
@@ -1653,49 +1993,66 @@ class WebSearchTool(BaseTool):
     category = ToolCategory.WEB
     parameters = {
         "query": {"type": "string", "description": "Search query"},
-        "num_results": {"type": "integer", "description": "Number of results to return", "default": 5},
+        "num_results": {
+            "type": "integer",
+            "description": "Number of results to return",
+            "default": 5,
+        },
+        "recency": {
+            "type": "string",
+            "description": "Time filter: 'd' (day), 'w' (week), 'm' (month), 'y' (year), or '' (any time)",
+            "optional": True,
+        },
     }
 
-    async def execute(self, query: str, num_results: int = 5) -> ToolResult:
+    async def execute(self, query: str, num_results: int = 5, recency: str = "") -> ToolResult:
         import asyncio
 
         try:
             # Use the duckduckgo-search library which provides reliable results
             search_results = await asyncio.to_thread(
-                self._search_duckduckgo_sync, query, num_results
+                self._search_duckduckgo_sync, query, num_results, recency
             )
 
             if search_results:
                 logger.info("Web search completed", query=query[:50], results=len(search_results))
-                return ToolResult(success=True, data={
-                    "query": query,
-                    "results": search_results,
-                    "count": len(search_results),
-                })
+                return ToolResult(
+                    success=True,
+                    data={
+                        "query": query,
+                        "results": search_results,
+                        "count": len(search_results),
+                    },
+                )
 
-            return ToolResult(success=True, data={
-                "query": query,
-                "results": [],
-                "message": "No results found"
-            })
+            return ToolResult(
+                success=True, data={"query": query, "results": [], "message": "No results found"}
+            )
 
         except Exception as e:
             logger.warning("Web search failed", query=query[:50], error=str(e))
             return ToolResult(success=False, error=str(e))
 
-    def _search_duckduckgo_sync(self, query: str, num_results: int) -> list[dict]:
+    def _search_duckduckgo_sync(
+        self, query: str, num_results: int, recency: str = ""
+    ) -> list[dict]:
         """Search using ddgs library (sync, run in thread)."""
         from ddgs import DDGS
 
         results = []
+        kwargs: dict = {"max_results": num_results}
+        if recency in ("d", "w", "m", "y"):
+            kwargs["timelimit"] = recency
 
         with DDGS() as ddgs:
-            for r in ddgs.text(query, max_results=num_results):
-                results.append({
-                    "title": r.get("title", ""),
-                    "snippet": r.get("body", ""),
-                    "url": r.get("href", ""),
-                })
+            for r in ddgs.text(query, **kwargs):
+                results.append(
+                    {
+                        "title": r.get("title", ""),
+                        "snippet": r.get("body", ""),
+                        "url": r.get("href", ""),
+                    }
+                )
 
         return results
 
@@ -1724,53 +2081,179 @@ class WebFetchTool(BaseTool):
                     headers={
                         "User-Agent": "Mozilla/5.0 (compatible; Cognitex/1.0)",
                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    }
+                    },
                 )
 
                 if response.status_code != 200:
                     return ToolResult(
-                        success=False,
-                        error=f"HTTP {response.status_code} fetching {url}"
+                        success=False, error=f"HTTP {response.status_code} fetching {url}"
                     )
 
                 html = response.text
 
                 # Extract title
-                title_match = re.search(r'<title[^>]*>([^<]+)</title>', html, re.IGNORECASE)
+                title_match = re.search(r"<title[^>]*>([^<]+)</title>", html, re.IGNORECASE)
                 title = title_match.group(1).strip() if title_match else ""
 
                 # Remove script and style elements
-                html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
-                html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
-                html = re.sub(r'<nav[^>]*>.*?</nav>', '', html, flags=re.DOTALL | re.IGNORECASE)
-                html = re.sub(r'<footer[^>]*>.*?</footer>', '', html, flags=re.DOTALL | re.IGNORECASE)
-                html = re.sub(r'<header[^>]*>.*?</header>', '', html, flags=re.DOTALL | re.IGNORECASE)
+                html = re.sub(
+                    r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE
+                )
+                html = re.sub(r"<style[^>]*>.*?</style>", "", html, flags=re.DOTALL | re.IGNORECASE)
+                html = re.sub(r"<nav[^>]*>.*?</nav>", "", html, flags=re.DOTALL | re.IGNORECASE)
+                html = re.sub(
+                    r"<footer[^>]*>.*?</footer>", "", html, flags=re.DOTALL | re.IGNORECASE
+                )
+                html = re.sub(
+                    r"<header[^>]*>.*?</header>", "", html, flags=re.DOTALL | re.IGNORECASE
+                )
 
                 # Remove all HTML tags
-                text = re.sub(r'<[^>]+>', ' ', html)
+                text = re.sub(r"<[^>]+>", " ", html)
 
                 # Clean up whitespace
-                text = re.sub(r'\s+', ' ', text).strip()
+                text = re.sub(r"\s+", " ", text).strip()
 
                 # Decode HTML entities
                 import html as html_module
+
                 text = html_module.unescape(text)
 
                 content = text[:max_length]
                 truncated = len(text) > max_length
 
                 logger.info("Web fetch completed", url=url[:50], chars=len(content))
-                return ToolResult(success=True, data={
-                    "url": url,
-                    "title": title,
-                    "content": content,
-                    "truncated": truncated,
-                    "original_length": len(text),
-                })
+                return ToolResult(
+                    success=True,
+                    data={
+                        "url": url,
+                        "title": title,
+                        "content": content,
+                        "truncated": truncated,
+                        "original_length": len(text),
+                    },
+                )
 
         except Exception as e:
             logger.warning("Web fetch failed", url=url[:50], error=str(e))
             return ToolResult(success=False, error=str(e))
+
+
+class WebBrowseTool(BaseTool):
+    """Open a browser and interact with a website using browser-use."""
+
+    name = "web_browse"
+    description = (
+        "Open a browser and interact with a website — click, type, scroll, "
+        "extract dynamic content. Use for booking sites, SPAs, or any page "
+        "that requires JavaScript or multi-step interaction to show data. "
+        "Prefer web_fetch for simple static pages."
+    )
+    risk = ToolRisk.READONLY
+    category = ToolCategory.WEB
+    parameters = {
+        "task": {
+            "type": "string",
+            "description": (
+                "What to do in the browser, e.g. 'Go to booking.com, "
+                "search for hotels in Boston March 8-13, extract the top 5 with prices'"
+            ),
+        },
+        "url": {
+            "type": "string",
+            "description": "Starting URL (optional — the agent can navigate itself)",
+            "optional": True,
+        },
+        "max_steps": {
+            "type": "integer",
+            "description": "Maximum browser interaction steps (default 25)",
+            "optional": True,
+        },
+    }
+
+    async def execute(self, task: str, url: str = "", max_steps: int = 25) -> ToolResult:
+        try:
+            from browser_use import Agent as BrowserAgent
+            from browser_use import Browser, BrowserProfile
+        except ImportError:
+            return ToolResult(
+                success=False,
+                error=(
+                    "browser-use not installed. "
+                    "Run: pip install browser-use && playwright install chromium"
+                ),
+            )
+
+        from cognitex.config import get_settings
+
+        settings = get_settings()
+        llm = self._build_llm(settings)
+
+        full_task = task
+        if url:
+            full_task = f"Go to {url} and then: {task}"
+
+        profile = BrowserProfile(headless=True, chromium_sandbox=False)
+        browser = Browser(browser_profile=profile)
+        try:
+            agent = BrowserAgent(
+                task=full_task,
+                llm=llm,
+                browser=browser,
+                llm_timeout=60,
+                step_timeout=90,
+                max_failures=3,
+            )
+            history = await agent.run(max_steps=max_steps)
+            result_text = history.final_result()
+            return ToolResult(
+                success=True,
+                data={
+                    "result": (result_text or "Browser task completed but no content extracted."),
+                    "steps": history.number_of_steps(),
+                    "urls": [u for u in history.urls() if u],
+                    "success": history.is_successful(),
+                },
+            )
+        except Exception as e:
+            logger.warning("Web browse failed", task=task[:80], error=str(e))
+            return ToolResult(success=False, error=f"Browser automation failed: {e}")
+        finally:
+            await browser.stop()
+
+    @staticmethod
+    def _build_llm(settings):
+        """Map Cognitex provider/model settings to browser-use LLM classes."""
+        model_name = settings.browser_use_model
+
+        if "claude" in model_name or "anthropic" in model_name:
+            from browser_use import ChatAnthropic
+
+            return ChatAnthropic(
+                model=model_name,
+                api_key=settings.anthropic_api_key.get_secret_value(),
+            )
+        elif "gpt" in model_name or "o1" in model_name or "o3" in model_name:
+            from browser_use import ChatOpenAI
+
+            return ChatOpenAI(
+                model=model_name,
+                api_key=settings.openai_api_key.get_secret_value(),
+            )
+        elif "gemini" in model_name:
+            from browser_use import ChatGoogle
+
+            return ChatGoogle(
+                model=model_name,
+                api_key=settings.google_ai_api_key.get_secret_value(),
+            )
+        else:
+            from browser_use import ChatAnthropic
+
+            return ChatAnthropic(
+                model="claude-sonnet-4-6",
+                api_key=settings.anthropic_api_key.get_secret_value(),
+            )
 
 
 class ReadDocumentTool(BaseTool):
@@ -1782,7 +2265,11 @@ class ReadDocumentTool(BaseTool):
     category = ToolCategory.READONLY
     parameters = {
         "drive_id": {"type": "string", "description": "Google Drive ID of the file"},
-        "max_length": {"type": "integer", "description": "Maximum content length to return", "default": 10000},
+        "max_length": {
+            "type": "integer",
+            "description": "Maximum content length to return",
+            "default": 10000,
+        },
     }
 
     async def execute(self, drive_id: str, max_length: int = 10000) -> ToolResult:
@@ -1793,8 +2280,10 @@ class ReadDocumentTool(BaseTool):
         try:
             async for session in get_session():
                 result = await session.execute(
-                    text("SELECT content, char_count FROM document_content WHERE drive_id = :drive_id"),
-                    {"drive_id": drive_id}
+                    text(
+                        "SELECT content, char_count FROM document_content WHERE drive_id = :drive_id"
+                    ),
+                    {"drive_id": drive_id},
                 )
                 row = result.fetchone()
 
@@ -1810,10 +2299,12 @@ class ReadDocumentTool(BaseTool):
                             "content": content[:max_length],
                             "char_count": char_count,
                             "truncated": truncated,
-                        }
+                        },
                     )
 
-                return ToolResult(success=False, error=f"Document content not found for ID: {drive_id}")
+                return ToolResult(
+                    success=False, error=f"Document content not found for ID: {drive_id}"
+                )
 
         except Exception as e:
             logger.warning("Read document failed", drive_id=drive_id, error=str(e))
@@ -1838,7 +2329,11 @@ class AnalyzeDocumentTool(BaseTool):
     category = ToolCategory.READONLY
     parameters = {
         "drive_id": {"type": "string", "description": "Google Drive ID of the file to analyze"},
-        "context": {"type": "string", "description": "Context for the analysis (e.g., 'sent for review')", "optional": True},
+        "context": {
+            "type": "string",
+            "description": "Context for the analysis (e.g., 'sent for review')",
+            "optional": True,
+        },
     }
 
     async def execute(
@@ -1864,8 +2359,7 @@ class AnalyzeDocumentTool(BaseTool):
             # Check if document type is supported
             if not analyzer.is_supported(filename, mime_type):
                 return ToolResult(
-                    success=False,
-                    error=f"Document type not supported for analysis: {mime_type}"
+                    success=False, error=f"Document type not supported for analysis: {mime_type}"
                 )
 
             # Get raw file bytes
@@ -1877,7 +2371,7 @@ class AnalyzeDocumentTool(BaseTool):
             if len(content) > 10 * 1024 * 1024:
                 return ToolResult(
                     success=False,
-                    error=f"File too large for analysis ({len(content) / 1024 / 1024:.1f}MB). Max is 10MB."
+                    error=f"File too large for analysis ({len(content) / 1024 / 1024:.1f}MB). Max is 10MB.",
                 )
 
             # Determine filename with proper extension
@@ -1951,6 +2445,7 @@ class ToolRegistry:
             GetGoalTool(),
             WebSearchTool(),
             WebFetchTool(),
+            WebBrowseTool(),
             AnalyzeDocumentTool(),
             # Auto-execute
             CreateTaskTool(),
@@ -1971,6 +2466,7 @@ class ToolRegistry:
 
         # Sub-agent spawn tool + research fan-out
         from cognitex.agent.subagent import ResearchTool, SpawnSubAgentTool
+
         default_tools.append(SpawnSubAgentTool())
         default_tools.append(ResearchTool())
 

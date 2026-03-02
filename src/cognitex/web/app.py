@@ -96,7 +96,8 @@ async def _record_task_outcome(
 
         # Store observation
         async for session in get_session():
-            await session.execute(text("""
+            await session.execute(
+                text("""
                 INSERT INTO state_observations (
                     task_id, task_title, outcome, mode, fatigue_level,
                     focus_score, hour_of_day, day_of_week, post_clinical,
@@ -106,25 +107,28 @@ async def _record_task_outcome(
                     :focus, :hour, :dow, :post_clinical,
                     :minutes_since, :energy_cost, NOW()
                 )
-            """), {
-                "task_id": task_id,
-                "task_title": task_title[:100],
-                "outcome": outcome,
-                "mode": state.mode.value,
-                "fatigue": state.signals.fatigue_level,
-                "focus": state.signals.focus_score,
-                "hour": hour,
-                "dow": day_of_week,
-                "post_clinical": post_clinical,
-                "minutes_since": minutes_since,
-                "energy_cost": energy_cost,
-            })
+            """),
+                {
+                    "task_id": task_id,
+                    "task_title": task_title[:100],
+                    "outcome": outcome,
+                    "mode": state.mode.value,
+                    "fatigue": state.signals.fatigue_level,
+                    "focus": state.signals.focus_score,
+                    "hour": hour,
+                    "dow": day_of_week,
+                    "post_clinical": post_clinical,
+                    "minutes_since": minutes_since,
+                    "energy_cost": energy_cost,
+                },
+            )
             await session.commit()
             break
 
         # Update temporal model with observation
         try:
             from cognitex.agent.state_model import get_temporal_model
+
             temporal = get_temporal_model()
             await temporal.update_from_observation(
                 hour=hour,
@@ -222,6 +226,7 @@ async def lifespan(_app: FastAPI):
     # Sync LEDGER.yaml -> graph on boot (WP5)
     try:
         from cognitex.services.ledger_sync import get_ledger_sync_service
+
         ledger = get_ledger_sync_service()
         await ledger.initialize()
         changes = await ledger.sync_file_to_graph()
@@ -261,9 +266,28 @@ async def lifespan(_app: FastAPI):
     _notification_subscriber_task = asyncio.create_task(_notification_subscriber())
     logger.info("Real-time notification subscriber started for web UI")
 
+    # Register agent lifecycle hooks for SSE broadcasting
+    from cognitex.agent.hooks import register_hook
+
+    async def _sse_broadcast(data: dict) -> None:
+        payload = json.dumps(data)
+        for q in _notification_clients:
+            with contextlib.suppress(asyncio.QueueFull):
+                q.put_nowait(payload)
+
+    register_hook("react_step", _sse_broadcast)
+    register_hook("research_progress", _sse_broadcast)
+    register_hook("text_chunk", _sse_broadcast)
+    logger.info("Registered agent lifecycle hooks for SSE")
+
     yield
 
     # Cleanup
+    # Clear agent hooks
+    from cognitex.agent.hooks import clear_hooks
+
+    clear_hooks()
+
     # Cancel notification subscriber
     if _notification_subscriber_task:
         _notification_subscriber_task.cancel()
@@ -359,7 +383,7 @@ async def _notification_subscriber():
                     logger.debug(
                         "Notification broadcast",
                         clients=len(_notification_clients),
-                        data_preview=data[:100] if data else None
+                        data_preview=data[:100] if data else None,
                     )
                 except Exception as e:
                     logger.warning("Failed to broadcast notification", error=str(e))
@@ -380,16 +404,12 @@ async def get_current_user(request: Request) -> dict:
         next_url = request.url.path
         if request.url.query:
             next_url += f"?{request.url.query}"
-        raise HTTPException(
-            status_code=303,
-            headers={"Location": f"/auth/login?next={next_url}"}
-        )
+        raise HTTPException(status_code=303, headers={"Location": f"/auth/login?next={next_url}"})
 
     user = await verify_session(session_cookie)
     if not user:
         raise HTTPException(
-            status_code=303,
-            headers={"Location": f"/auth/login?next={request.url.path}"}
+            status_code=303, headers={"Location": f"/auth/login?next={request.url.path}"}
         )
 
     return user
@@ -412,8 +432,7 @@ async def login_page(request: Request, error: str | None = None, next: str = "/"
         return RedirectResponse(url="/", status_code=303)
 
     return templates.TemplateResponse(
-        "login.html",
-        {"request": request, "error": error, "next": next, "user": None}
+        "login.html", {"request": request, "error": error, "next": next, "user": None}
     )
 
 
@@ -449,10 +468,7 @@ async def google_login(request: Request, next: str = "/"):
 
 @app.get("/auth/callback")
 async def google_callback(
-    request: Request,
-    code: str | None = None,
-    state: str | None = None,
-    error: str | None = None
+    request: Request, code: str | None = None, state: str | None = None, error: str | None = None
 ):
     """Handle Google OAuth callback."""
     if error:
@@ -491,7 +507,9 @@ async def google_callback(
 
             if token_response.status_code != 200:
                 auth_logger.error("Token exchange failed", status=token_response.status_code)
-                return RedirectResponse(url="/auth/login?error=Token+exchange+failed", status_code=303)
+                return RedirectResponse(
+                    url="/auth/login?error=Token+exchange+failed", status_code=303
+                )
 
             tokens = token_response.json()
 
@@ -503,7 +521,9 @@ async def google_callback(
 
             if userinfo_response.status_code != 200:
                 auth_logger.error("Userinfo fetch failed", status=userinfo_response.status_code)
-                return RedirectResponse(url="/auth/login?error=Failed+to+get+user+info", status_code=303)
+                return RedirectResponse(
+                    url="/auth/login?error=Failed+to+get+user+info", status_code=303
+                )
 
             userinfo = userinfo_response.json()
 
@@ -519,8 +539,7 @@ async def google_callback(
     if allowed_emails and user_email not in allowed_emails:
         auth_logger.warning("Unauthorized login attempt", email=user_email)
         return RedirectResponse(
-            url="/auth/login?error=Access+not+authorized.+Contact+administrator.",
-            status_code=303
+            url="/auth/login?error=Access+not+authorized.+Contact+administrator.", status_code=303
         )
 
     # Create session
@@ -608,8 +627,7 @@ async def auth_middleware(request: Request, call_next):
     # For API endpoints, return 401 instead of redirecting
     if path.startswith("/api/"):
         return JSONResponse(
-            status_code=401,
-            content={"error": "Not authenticated", "redirect": "/auth/login"}
+            status_code=401, content={"error": "Not authenticated", "redirect": "/auth/login"}
         )
 
     # For regular pages, redirect to login
@@ -617,10 +635,7 @@ async def auth_middleware(request: Request, call_next):
     if request.url.query:
         next_url += f"?{request.url.query}"
 
-    return RedirectResponse(
-        url=f"/auth/login?next={next_url}",
-        status_code=303
-    )
+    return RedirectResponse(url=f"/auth/login?next={next_url}", status_code=303)
 
 
 # -------------------------------------------------------------------
@@ -707,15 +722,11 @@ async def dashboard(request: Request):
         recent_actions = []
 
     # Get upcoming deadlines (tasks due within 7 days)
-    upcoming_deadlines = [
-        t for t in tasks
-        if t.get("due") and t.get("status") != "done"
-    ][:5]
+    upcoming_deadlines = [t for t in tasks if t.get("due") and t.get("status") != "done"][:5]
 
     # High priority tasks
     high_priority_tasks = [
-        t for t in tasks
-        if t.get("priority") in ("high", "urgent") and t.get("status") != "done"
+        t for t in tasks if t.get("priority") in ("high", "urgent") and t.get("status") != "done"
     ][:5]
 
     return templates.TemplateResponse(
@@ -777,10 +788,9 @@ async def api_repositories():
     """List all repositories for dropdowns."""
     repo_service = get_repository_service()
     repos = await repo_service.list(limit=100)
-    return JSONResponse([
-        {"id": r["id"], "full_name": r["full_name"], "name": r["name"]}
-        for r in repos
-    ])
+    return JSONResponse(
+        [{"id": r["id"], "full_name": r["full_name"], "name": r["name"]} for r in repos]
+    )
 
 
 # -------------------------------------------------------------------
@@ -909,7 +919,7 @@ async def task_update(
         # Remove old people relationships
         await session.run(
             "MATCH (t:Task {id: $task_id})-[r:INVOLVES|ASSIGNED_TO]->(:Person) DELETE r",
-            {"task_id": task_id}
+            {"task_id": task_id},
         )
         # Add new people relationships
         if people:
@@ -919,8 +929,7 @@ async def task_update(
 
         # Update project link (remove old, add new if specified)
         await session.run(
-            "MATCH (t:Task {id: $task_id})-[r:PART_OF]->(:Project) DELETE r",
-            {"task_id": task_id}
+            "MATCH (t:Task {id: $task_id})-[r:PART_OF]->(:Project) DELETE r", {"task_id": task_id}
         )
         if project_id:
             await link_task_to_project(session, task_id, project_id)
@@ -928,7 +937,7 @@ async def task_update(
         # Update goal link (remove old, add new if specified)
         await session.run(
             "MATCH (t:Task {id: $task_id})-[r:CONTRIBUTES_TO]->(:Goal) DELETE r",
-            {"task_id": task_id}
+            {"task_id": task_id},
         )
         if goal_id:
             await link_task_to_goal(session, task_id, goal_id)
@@ -975,6 +984,7 @@ async def task_complete(_request: Request, task_id: str):
         if task_before:
             try:
                 from cognitex.agent.expertise import get_expertise_manager
+
                 em = get_expertise_manager()
 
                 # Determine domain from project or general task completion
@@ -1040,7 +1050,8 @@ async def task_reject_and_learn(
 
     async for session in get_neo4j_session():
         # Get task details
-        result = await session.run("""
+        result = await session.run(
+            """
             MATCH (t:Task {id: $task_id})
             OPTIONAL MATCH (t)-[:DERIVED_FROM]->(e:Email)
             OPTIONAL MATCH (e)-[:SENT_BY]->(sender:Person)
@@ -1051,7 +1062,9 @@ async def task_reject_and_learn(
                    e.subject as email_subject,
                    e.snippet as email_snippet,
                    sender.email as sender_email
-        """, {"task_id": task_id})
+        """,
+            {"task_id": task_id},
+        )
         record = await result.single()
 
         if record:
@@ -1095,7 +1108,7 @@ async def task_reject_and_learn(
                 "email_sender": email_info["sender"],
                 "email_subject": email_info["subject"],
                 "task_title": task_info["title"],
-            }
+            },
         )
 
     # Log the rejection action
@@ -1108,12 +1121,13 @@ async def task_reject_and_learn(
             "reason": reason,
             "had_source_email": email_info is not None,
             **pattern_data,
-        }
+        },
     )
 
     # Route to skill feedback
     try:
         from cognitex.agent.skill_feedback_router import route_rejection_to_skill
+
         await route_rejection_to_skill(
             proposal_type="create_task",
             reason=reason,
@@ -1152,18 +1166,24 @@ async def task_unlink_project(request: Request, task_id: str, project_id: str):
     # Get info about the link before removing
     link_info = None
     async for session in get_neo4j_session():
-        result = await session.run("""
+        result = await session.run(
+            """
             MATCH (t:Task {id: $task_id})-[r:BELONGS_TO|PART_OF]->(p:Project {id: $project_id})
             RETURN t.title as task_title, p.title as project_title, r.created_by as created_by
-        """, {"task_id": task_id, "project_id": project_id})
+        """,
+            {"task_id": task_id, "project_id": project_id},
+        )
         link_info = await result.single()
 
         if link_info:
             # Remove the relationship
-            await session.run("""
+            await session.run(
+                """
                 MATCH (t:Task {id: $task_id})-[r:BELONGS_TO|PART_OF]->(p:Project {id: $project_id})
                 DELETE r
-            """, {"task_id": task_id, "project_id": project_id})
+            """,
+                {"task_id": task_id, "project_id": project_id},
+            )
 
         break
 
@@ -1179,7 +1199,7 @@ async def task_unlink_project(request: Request, task_id: str, project_id: str):
                 "task_title": link_info["task_title"],
                 "project_title": link_info["project_title"],
                 "original_created_by": link_info["created_by"],
-            }
+            },
         )
 
         # Record as negative learning signal if autonomous agent created this link
@@ -1193,7 +1213,8 @@ async def task_unlink_project(request: Request, task_id: str, project_id: str):
 
                 async for session in get_postgres_session():
                     # Record as a learned pattern (negative feedback on link suggestion)
-                    await session.execute(text("""
+                    await session.execute(
+                        text("""
                         INSERT INTO learned_patterns (id, pattern_type, pattern_data, confidence, sample_count)
                         VALUES (:id, 'rejected_link', :pattern_data, 0.0, 1)
                         ON CONFLICT (pattern_type, (pattern_data->>'task_keywords'), (pattern_data->>'project_id'))
@@ -1201,15 +1222,17 @@ async def task_unlink_project(request: Request, task_id: str, project_id: str):
                             sample_count = learned_patterns.sample_count + 1,
                             confidence = LEAST(learned_patterns.confidence - 0.1, 0),
                             updated_at = NOW()
-                    """), {
-                        "id": f"pattern_{uuid.uuid4().hex[:12]}",
-                        "pattern_data": {
-                            "task_keywords": link_info["task_title"].lower().split()[:3],
-                            "project_id": project_id,
-                            "project_title": link_info["project_title"],
-                            "feedback": "user_removed_link",
+                    """),
+                        {
+                            "id": f"pattern_{uuid.uuid4().hex[:12]}",
+                            "pattern_data": {
+                                "task_keywords": link_info["task_title"].lower().split()[:3],
+                                "project_id": project_id,
+                                "project_title": link_info["project_title"],
+                                "feedback": "user_removed_link",
+                            },
                         },
-                    })
+                    )
                     await session.commit()
                     break
 
@@ -1246,13 +1269,16 @@ async def get_subtasks(request: Request, task_id: str):
     subtasks = []
     async for session in get_neo4j_session():
         result = await session.run(
-            "MATCH (t:Task {id: $task_id}) RETURN t.subtasks as subtasks",
-            {"task_id": task_id}
+            "MATCH (t:Task {id: $task_id}) RETURN t.subtasks as subtasks", {"task_id": task_id}
         )
         record = await result.single()
         if record and record["subtasks"]:
             try:
-                subtasks = json.loads(record["subtasks"]) if isinstance(record["subtasks"], str) else record["subtasks"]
+                subtasks = (
+                    json.loads(record["subtasks"])
+                    if isinstance(record["subtasks"], str)
+                    else record["subtasks"]
+                )
             except (json.JSONDecodeError, TypeError):
                 subtasks = []
         break
@@ -1277,15 +1303,18 @@ async def add_subtask(request: Request, task_id: str, text: Annotated[str, Form(
     async for session in get_neo4j_session():
         # Get existing subtasks
         result = await session.run(
-            "MATCH (t:Task {id: $task_id}) RETURN t.subtasks as subtasks",
-            {"task_id": task_id}
+            "MATCH (t:Task {id: $task_id}) RETURN t.subtasks as subtasks", {"task_id": task_id}
         )
         record = await result.single()
 
         subtasks = []
         if record and record["subtasks"]:
             try:
-                subtasks = json.loads(record["subtasks"]) if isinstance(record["subtasks"], str) else record["subtasks"]
+                subtasks = (
+                    json.loads(record["subtasks"])
+                    if isinstance(record["subtasks"], str)
+                    else record["subtasks"]
+                )
             except (json.JSONDecodeError, TypeError):
                 subtasks = []
 
@@ -1301,7 +1330,7 @@ async def add_subtask(request: Request, task_id: str, text: Annotated[str, Form(
         # Save back to Neo4j
         await session.run(
             "MATCH (t:Task {id: $task_id}) SET t.subtasks = $subtasks",
-            {"task_id": task_id, "subtasks": json.dumps(subtasks)}
+            {"task_id": task_id, "subtasks": json.dumps(subtasks)},
         )
         break
 
@@ -1317,15 +1346,18 @@ async def toggle_subtask(request: Request, task_id: str, subtask_id: str):
 
     async for session in get_neo4j_session():
         result = await session.run(
-            "MATCH (t:Task {id: $task_id}) RETURN t.subtasks as subtasks",
-            {"task_id": task_id}
+            "MATCH (t:Task {id: $task_id}) RETURN t.subtasks as subtasks", {"task_id": task_id}
         )
         record = await result.single()
 
         subtasks = []
         if record and record["subtasks"]:
             try:
-                subtasks = json.loads(record["subtasks"]) if isinstance(record["subtasks"], str) else record["subtasks"]
+                subtasks = (
+                    json.loads(record["subtasks"])
+                    if isinstance(record["subtasks"], str)
+                    else record["subtasks"]
+                )
             except (json.JSONDecodeError, TypeError):
                 subtasks = []
 
@@ -1338,7 +1370,7 @@ async def toggle_subtask(request: Request, task_id: str, subtask_id: str):
         # Save back
         await session.run(
             "MATCH (t:Task {id: $task_id}) SET t.subtasks = $subtasks",
-            {"task_id": task_id, "subtasks": json.dumps(subtasks)}
+            {"task_id": task_id, "subtasks": json.dumps(subtasks)},
         )
         break
 
@@ -1354,15 +1386,18 @@ async def delete_subtask(request: Request, task_id: str, subtask_id: str):
 
     async for session in get_neo4j_session():
         result = await session.run(
-            "MATCH (t:Task {id: $task_id}) RETURN t.subtasks as subtasks",
-            {"task_id": task_id}
+            "MATCH (t:Task {id: $task_id}) RETURN t.subtasks as subtasks", {"task_id": task_id}
         )
         record = await result.single()
 
         subtasks = []
         if record and record["subtasks"]:
             try:
-                subtasks = json.loads(record["subtasks"]) if isinstance(record["subtasks"], str) else record["subtasks"]
+                subtasks = (
+                    json.loads(record["subtasks"])
+                    if isinstance(record["subtasks"], str)
+                    else record["subtasks"]
+                )
             except (json.JSONDecodeError, TypeError):
                 subtasks = []
 
@@ -1376,7 +1411,7 @@ async def delete_subtask(request: Request, task_id: str, subtask_id: str):
         # Save back
         await session.run(
             "MATCH (t:Task {id: $task_id}) SET t.subtasks = $subtasks",
-            {"task_id": task_id, "subtasks": json.dumps(subtasks)}
+            {"task_id": task_id, "subtasks": json.dumps(subtasks)},
         )
         break
 
@@ -1395,15 +1430,18 @@ async def reorder_subtasks(request: Request, task_id: str):
 
     async for session in get_neo4j_session():
         result = await session.run(
-            "MATCH (t:Task {id: $task_id}) RETURN t.subtasks as subtasks",
-            {"task_id": task_id}
+            "MATCH (t:Task {id: $task_id}) RETURN t.subtasks as subtasks", {"task_id": task_id}
         )
         record = await result.single()
 
         subtasks = []
         if record and record["subtasks"]:
             try:
-                subtasks = json.loads(record["subtasks"]) if isinstance(record["subtasks"], str) else record["subtasks"]
+                subtasks = (
+                    json.loads(record["subtasks"])
+                    if isinstance(record["subtasks"], str)
+                    else record["subtasks"]
+                )
             except (json.JSONDecodeError, TypeError):
                 subtasks = []
 
@@ -1426,7 +1464,7 @@ async def reorder_subtasks(request: Request, task_id: str):
         # Save back
         await session.run(
             "MATCH (t:Task {id: $task_id}) SET t.subtasks = $subtasks",
-            {"task_id": task_id, "subtasks": json.dumps(reordered)}
+            {"task_id": task_id, "subtasks": json.dumps(reordered)},
         )
         break
 
@@ -1589,11 +1627,11 @@ async def project_update(
         # Remove old people relationships (both directions)
         await session.run(
             "MATCH (p:Project {id: $project_id})-[r:OWNED_BY]->(:Person) DELETE r",
-            {"project_id": project_id}
+            {"project_id": project_id},
         )
         await session.run(
             "MATCH (p:Project {id: $project_id})<-[r:STAKEHOLDER]-(:Person) DELETE r",
-            {"project_id": project_id}
+            {"project_id": project_id},
         )
         # Add new people relationships
         if people:
@@ -1604,7 +1642,7 @@ async def project_update(
         # Update repository link (remove old, add new if specified)
         await session.run(
             "MATCH (p:Project {id: $project_id})-[r:USES_REPO]->(:Repository) DELETE r",
-            {"project_id": project_id}
+            {"project_id": project_id},
         )
         if repository_id:
             await link_project_to_repository(session, project_id, repository_id)
@@ -1817,7 +1855,7 @@ async def goal_update(
         # Remove old relationships first
         await session.run(
             "MATCH (g:Goal {id: $goal_id})-[r:OWNED_BY|STAKEHOLDER]->(:Person) DELETE r",
-            {"goal_id": goal_id}
+            {"goal_id": goal_id},
         )
         # Add new relationships
         if people:
@@ -1959,17 +1997,19 @@ async def commitments_page(request: Request):
 
     # Sort: overdue first, then approaching, then active, then completed
     status_order = {
-        "overdue": 0, "approaching": 1, "in_progress": 2,
-        "accepted": 3, "blocked": 4, "waiting_on": 5, "completed": 6,
+        "overdue": 0,
+        "approaching": 1,
+        "in_progress": 2,
+        "accepted": 3,
+        "blocked": 4,
+        "waiting_on": 5,
+        "completed": 6,
     }
-    all_commitments.sort(
-        key=lambda c: status_order.get(c.get("status", ""), 4)
-    )
+    all_commitments.sort(key=lambda c: status_order.get(c.get("status", ""), 4))
 
     # Count active (non-completed, non-overdue)
     active_count = sum(
-        1 for c in all_commitments
-        if c.get("status") not in ("completed", "overdue", "approaching")
+        1 for c in all_commitments if c.get("status") not in ("completed", "overdue", "approaching")
     )
     completed_count = sum(1 for c in all_commitments if c.get("status") == "completed")
 
@@ -2036,10 +2076,13 @@ async def get_today_events() -> list[dict]:
                e.end as end_time, e.description as description, attendees
         ORDER BY e.start
         """
-        result = await session.run(query, {
-            "start": today_start.isoformat(),
-            "end": today_end.isoformat(),
-        })
+        result = await session.run(
+            query,
+            {
+                "start": today_start.isoformat(),
+                "end": today_end.isoformat(),
+            },
+        )
         data = await result.data()
 
         for event in data:
@@ -2094,7 +2137,9 @@ async def today_page(request: Request):
 
     # Get priority tasks
     tasks = await task_service.list(status="pending", limit=10)
-    tasks = sorted(tasks, key=lambda t: {"high": 0, "medium": 1, "low": 2}.get(t.get("priority", "medium"), 1))[:5]
+    tasks = sorted(
+        tasks, key=lambda t: {"high": 0, "medium": 1, "low": 2}.get(t.get("priority", "medium"), 1)
+    )[:5]
 
     # Get upcoming deadlines (list query returns 'due' as alias for due_date)
     all_tasks = await task_service.list(include_done=False, limit=50)
@@ -2134,7 +2179,8 @@ async def view_briefing(request: Request):
         # Convert markdown to HTML using markdown library if available
         try:
             import markdown
-            html_content = markdown.markdown(content, extensions=['tables', 'fenced_code'])
+
+            html_content = markdown.markdown(content, extensions=["tables", "fenced_code"])
         except ImportError:
             # Fallback: wrap in pre tag if markdown not available
             html_content = f"<pre style='white-space: pre-wrap;'>{content}</pre>"
@@ -2229,7 +2275,8 @@ async def get_recent_documents(limit: int = 10) -> list[dict]:
 
     async for session in get_neo4j_session():
         # Get documents that have been analyzed (have summary)
-        result = await session.run("""
+        result = await session.run(
+            """
             MATCH (d:Document)
             WHERE d.summary IS NOT NULL
             RETURN d.drive_id as id, d.drive_id as drive_id, d.name as name,
@@ -2237,7 +2284,9 @@ async def get_recent_documents(limit: int = 10) -> list[dict]:
                    d.summary as summary
             ORDER BY d.analyzed_at DESC
             LIMIT $limit
-        """, {"limit": limit})
+        """,
+            {"limit": limit},
+        )
         return await result.data()
     return []
 
@@ -2256,7 +2305,8 @@ async def search_documents(query: str, limit: int = 20) -> list[dict]:
     # Search in Neo4j: document names, summaries, topics, concepts
     async for session in get_neo4j_session():
         # Search documents by name or summary
-        doc_result = await session.run("""
+        doc_result = await session.run(
+            """
             MATCH (d:Document)
             WHERE d.summary IS NOT NULL
               AND (toLower(d.name) CONTAINS $query
@@ -2265,56 +2315,75 @@ async def search_documents(query: str, limit: int = 20) -> list[dict]:
                    d.summary as snippet
             ORDER BY d.analyzed_at DESC
             LIMIT $limit
-        """, {"query": query_lower, "limit": limit})
+        """,
+            {"query": query_lower, "limit": limit},
+        )
 
         for doc in await doc_result.data():
             if doc["drive_id"] not in seen_drive_ids:
                 seen_drive_ids.add(doc["drive_id"])
-                results.append({
-                    "drive_id": doc["drive_id"],
-                    "name": doc["name"],
-                    "folder_path": doc["folder_path"],
-                    "snippet": doc["snippet"][:200] + "..." if doc["snippet"] and len(doc["snippet"]) > 200 else doc["snippet"],
-                    "topics": [],
-                    "concepts": []
-                })
+                results.append(
+                    {
+                        "drive_id": doc["drive_id"],
+                        "name": doc["name"],
+                        "folder_path": doc["folder_path"],
+                        "snippet": doc["snippet"][:200] + "..."
+                        if doc["snippet"] and len(doc["snippet"]) > 200
+                        else doc["snippet"],
+                        "topics": [],
+                        "concepts": [],
+                    }
+                )
 
         # Also search by topic/concept names
         if len(results) < limit:
             remaining = limit - len(results)
-            topic_result = await session.run("""
+            topic_result = await session.run(
+                """
                 MATCH (d:Document)-[:COVERS]->(t:Topic)
                 WHERE toLower(t.name) CONTAINS $query
                   AND d.summary IS NOT NULL
                 RETURN DISTINCT d.drive_id as drive_id, d.name as name,
                        d.folder_path as folder_path, d.summary as snippet
                 LIMIT $limit
-            """, {"query": query_lower, "limit": remaining})
+            """,
+                {"query": query_lower, "limit": remaining},
+            )
 
             for doc in await topic_result.data():
                 if doc["drive_id"] not in seen_drive_ids:
                     seen_drive_ids.add(doc["drive_id"])
-                    results.append({
-                        "drive_id": doc["drive_id"],
-                        "name": doc["name"],
-                        "folder_path": doc["folder_path"],
-                        "snippet": doc["snippet"][:200] + "..." if doc["snippet"] and len(doc["snippet"]) > 200 else doc["snippet"],
-                        "topics": [],
-                        "concepts": []
-                    })
+                    results.append(
+                        {
+                            "drive_id": doc["drive_id"],
+                            "name": doc["name"],
+                            "folder_path": doc["folder_path"],
+                            "snippet": doc["snippet"][:200] + "..."
+                            if doc["snippet"] and len(doc["snippet"]) > 200
+                            else doc["snippet"],
+                            "topics": [],
+                            "concepts": [],
+                        }
+                    )
 
         # Get topics and concepts for results
         for doc in results:
-            topic_result = await session.run("""
+            topic_result = await session.run(
+                """
                 MATCH (d:Document {drive_id: $drive_id})-[:COVERS]->(t:Topic)
                 RETURN DISTINCT t.name as name LIMIT 5
-            """, {"drive_id": doc["drive_id"]})
+            """,
+                {"drive_id": doc["drive_id"]},
+            )
             doc["topics"] = [r["name"] for r in await topic_result.data()]
 
-            concept_result = await session.run("""
+            concept_result = await session.run(
+                """
                 MATCH (d:Document {drive_id: $drive_id})-[:ABOUT]->(c:Concept)
                 RETURN DISTINCT c.name as name LIMIT 5
-            """, {"drive_id": doc["drive_id"]})
+            """,
+                {"drive_id": doc["drive_id"]},
+            )
             doc["concepts"] = [r["name"] for r in await concept_result.data()]
 
         return results
@@ -2326,22 +2395,28 @@ async def get_documents_by_topic(topic_name: str, limit: int = 20) -> list[dict]
     from cognitex.db.neo4j import get_neo4j_session
 
     async for session in get_neo4j_session():
-        result = await session.run("""
+        result = await session.run(
+            """
             MATCH (d:Document)-[:COVERS]->(t:Topic {name: $topic_name})
             RETURN d.drive_id as drive_id, d.name as name, d.folder_path as folder_path,
                    d.summary as snippet
             ORDER BY d.analyzed_at DESC
             LIMIT $limit
-        """, {"topic_name": topic_name, "limit": limit})
+        """,
+            {"topic_name": topic_name, "limit": limit},
+        )
         docs = await result.data()
 
         # Get topics and concepts for each doc
         for doc in docs:
             doc["topics"] = [topic_name]
-            concept_result = await session.run("""
+            concept_result = await session.run(
+                """
                 MATCH (d:Document {drive_id: $drive_id})-[:ABOUT]->(c:Concept)
                 RETURN c.name as name LIMIT 5
-            """, {"drive_id": doc["drive_id"]})
+            """,
+                {"drive_id": doc["drive_id"]},
+            )
             doc["concepts"] = [r["name"] for r in await concept_result.data()]
         return docs
     return []
@@ -2352,22 +2427,28 @@ async def get_documents_by_concept(concept_name: str, limit: int = 20) -> list[d
     from cognitex.db.neo4j import get_neo4j_session
 
     async for session in get_neo4j_session():
-        result = await session.run("""
+        result = await session.run(
+            """
             MATCH (d:Document)-[:ABOUT]->(c:Concept {name: $concept_name})
             RETURN d.drive_id as drive_id, d.name as name, d.folder_path as folder_path,
                    d.summary as snippet
             ORDER BY d.analyzed_at DESC
             LIMIT $limit
-        """, {"concept_name": concept_name, "limit": limit})
+        """,
+            {"concept_name": concept_name, "limit": limit},
+        )
         docs = await result.data()
 
         # Get topics and concepts for each doc
         for doc in docs:
             doc["concepts"] = [concept_name]
-            topic_result = await session.run("""
+            topic_result = await session.run(
+                """
                 MATCH (d:Document {drive_id: $drive_id})-[:COVERS]->(t:Topic)
                 RETURN t.name as name LIMIT 5
-            """, {"drive_id": doc["drive_id"]})
+            """,
+                {"drive_id": doc["drive_id"]},
+            )
             doc["topics"] = [r["name"] for r in await topic_result.data()]
         return docs
     return []
@@ -2421,14 +2502,22 @@ async def documents_search(_request: Request, q: str = ""):
 
     html = ""
     for doc in results:
-        topics_html = "".join(f'<span class="topic-tag">{t}</span>' for t in doc.get("topics", [])[:5])
-        concepts_html = "".join(f'<span class="concept-tag">{c}</span>' for c in doc.get("concepts", [])[:5])
-        snippet_html = f'<div class="doc-result-snippet">{doc.get("snippet", "")}</div>' if doc.get("snippet") else ""
+        topics_html = "".join(
+            f'<span class="topic-tag">{t}</span>' for t in doc.get("topics", [])[:5]
+        )
+        concepts_html = "".join(
+            f'<span class="concept-tag">{c}</span>' for c in doc.get("concepts", [])[:5]
+        )
+        snippet_html = (
+            f'<div class="doc-result-snippet">{doc.get("snippet", "")}</div>'
+            if doc.get("snippet")
+            else ""
+        )
 
         html += f"""
         <div class="doc-result">
-            <div class="doc-result-title">{doc['name']}</div>
-            <div class="doc-result-path">{doc.get('folder_path', 'Drive')}</div>
+            <div class="doc-result-title">{doc["name"]}</div>
+            <div class="doc-result-path">{doc.get("folder_path", "Drive")}</div>
             {snippet_html}
             <div class="doc-result-topics">
                 {topics_html}
@@ -2461,7 +2550,8 @@ async def agent_log_page(request: Request):
         async for session in get_session():
             # Ensure the agent_actions table exists
             try:
-                await session.execute(text("""
+                await session.execute(
+                    text("""
                     CREATE TABLE IF NOT EXISTS agent_actions (
                         id TEXT PRIMARY KEY,
                         timestamp TIMESTAMP DEFAULT NOW(),
@@ -2472,31 +2562,38 @@ async def agent_log_page(request: Request):
                         status TEXT DEFAULT 'completed',
                         error TEXT
                     )
-                """))
+                """)
+                )
                 await session.commit()
             except Exception:
                 pass  # Table may already exist
 
             # Get recent actions
-            result = await session.execute(text("""
+            result = await session.execute(
+                text("""
                 SELECT id, timestamp, action_type, source, summary, details, status, error
                 FROM agent_actions
                 ORDER BY timestamp DESC
                 LIMIT 100
-            """))
-            actions = [{
-                "id": row.id,
-                "timestamp": row.timestamp.isoformat() if row.timestamp else None,
-                "action_type": row.action_type,
-                "source": row.source,
-                "summary": row.summary,
-                "details": row.details,
-                "status": row.status,
-                "error": row.error,
-            } for row in result.fetchall()]
+            """)
+            )
+            actions = [
+                {
+                    "id": row.id,
+                    "timestamp": row.timestamp.isoformat() if row.timestamp else None,
+                    "action_type": row.action_type,
+                    "source": row.source,
+                    "summary": row.summary,
+                    "details": row.details,
+                    "status": row.status,
+                    "error": row.error,
+                }
+                for row in result.fetchall()
+            ]
 
             # Get stats
-            stat_result = await session.execute(text("""
+            stat_result = await session.execute(
+                text("""
                 SELECT
                     COUNT(*) as total,
                     COUNT(*) FILTER (WHERE timestamp > NOW() - INTERVAL '24 hours') as last_24h,
@@ -2504,7 +2601,8 @@ async def agent_log_page(request: Request):
                     COUNT(DISTINCT action_type) as action_types,
                     COUNT(DISTINCT source) as sources
                 FROM agent_actions
-            """))
+            """)
+            )
             stat_row = stat_result.fetchone()
             if stat_row:
                 stats = {
@@ -2516,24 +2614,31 @@ async def agent_log_page(request: Request):
                 }
 
             # Action type counts
-            action_result = await session.execute(text("""
+            action_result = await session.execute(
+                text("""
                 SELECT action_type, COUNT(*) as count
                 FROM agent_actions
                 GROUP BY action_type
                 ORDER BY count DESC
-            """))
-            action_counts = [{"action_type": row.action_type, "count": row.count}
-                             for row in action_result.fetchall()]
+            """)
+            )
+            action_counts = [
+                {"action_type": row.action_type, "count": row.count}
+                for row in action_result.fetchall()
+            ]
 
             # Source counts
-            source_result = await session.execute(text("""
+            source_result = await session.execute(
+                text("""
                 SELECT source, COUNT(*) as count
                 FROM agent_actions
                 GROUP BY source
                 ORDER BY count DESC
-            """))
-            source_counts = [{"source": row.source, "count": row.count}
-                              for row in source_result.fetchall()]
+            """)
+            )
+            source_counts = [
+                {"source": row.source, "count": row.count} for row in source_result.fetchall()
+            ]
             break
     except Exception as e:
         logger.warning("Failed to load agent actions", error=str(e))
@@ -2560,9 +2665,12 @@ async def agent_log_detail(action_id: str):
     from cognitex.db.postgres import get_session
 
     async for session in get_session():
-        result = await session.execute(text("""
+        result = await session.execute(
+            text("""
             SELECT * FROM agent_actions WHERE id = :action_id
-        """), {"action_id": action_id})
+        """),
+            {"action_id": action_id},
+        )
         row = result.fetchone()
 
         if not row:
@@ -2614,7 +2722,7 @@ async def agent_log_detail(action_id: str):
 
         html += f"""
             <div style="font-size: 0.85rem; color: #666;">
-                Timestamp: {row.timestamp.isoformat() if row.timestamp else '-'}
+                Timestamp: {row.timestamp.isoformat() if row.timestamp else "-"}
             </div>
         </div>
         """
@@ -2634,6 +2742,7 @@ async def run_autonomous_cycle():
     """Manually trigger an autonomous agent cycle."""
     try:
         from cognitex.agent.autonomous import get_autonomous_agent
+
         agent = await get_autonomous_agent()
         result = await agent.run_once()
         return JSONResponse({"status": "success", "result": result})
@@ -2646,20 +2755,24 @@ async def run_autonomous_cycle():
 async def get_autonomous_status():
     """Get autonomous agent status."""
     from cognitex.config import get_settings
+
     settings = get_settings()
 
     try:
         from cognitex.agent.autonomous import get_autonomous_agent
+
         agent = await get_autonomous_agent()
         running = agent._running
     except Exception:
         running = False
 
-    return JSONResponse({
-        "enabled": settings.autonomous_agent_enabled,
-        "running": running,
-        "interval_minutes": settings.autonomous_agent_interval_minutes,
-    })
+    return JSONResponse(
+        {
+            "enabled": settings.autonomous_agent_enabled,
+            "running": running,
+            "interval_minutes": settings.autonomous_agent_interval_minutes,
+        }
+    )
 
 
 @app.post("/api/agent/test-notification")
@@ -2671,7 +2784,7 @@ async def test_agent_notification():
         tool = SendNotificationTool()
         result = await tool.execute(
             message="**Test Notification**\n\nThis is a test from the autonomous agent notification system.",
-            urgency="normal"
+            urgency="normal",
         )
 
         if result.success:
@@ -2747,8 +2860,8 @@ async def get_context_packs() -> list[dict]:
         data = await result.data()
         # Filter out null entries in documents/tasks
         for pack in data:
-            pack['documents'] = [d for d in pack.get('documents', []) if d.get('id')]
-            pack['tasks'] = [t for t in pack.get('tasks', []) if t.get('id')]
+            pack["documents"] = [d for d in pack.get("documents", []) if d.get("id")]
+            pack["tasks"] = [t for t in pack.get("tasks", []) if t.get("id")]
         return data
     return []
 
@@ -2813,6 +2926,7 @@ async def get_suggested_blocks() -> list[dict]:
 async def twin_redirect():
     """Redirect to settings Agent tab."""
     from fastapi.responses import RedirectResponse
+
     return RedirectResponse(url="/settings?tab=agent", status_code=302)
 
 
@@ -2834,25 +2948,31 @@ async def twin_page_deprecated(request: Request):
     async for session in get_session():
         try:
             # Count approved emails from inbox feedback
-            result = await session.execute(text("""
+            result = await session.execute(
+                text("""
                 SELECT COUNT(*) FROM inbox_feedback
                 WHERE item_type = 'email_draft' AND action = 'approved'
-            """))
+            """)
+            )
             row = result.fetchone()
             approved_drafts = row[0] if row else 0
 
             # Count approved tasks
-            result = await session.execute(text("""
+            result = await session.execute(
+                text("""
                 SELECT COUNT(*) FROM inbox_feedback
                 WHERE item_type = 'task_proposal' AND action = 'approved'
-            """))
+            """)
+            )
             row = result.fetchone()
             approved_tasks = row[0] if row else 0
 
             # Count total learning samples
-            result = await session.execute(text("""
+            result = await session.execute(
+                text("""
                 SELECT COUNT(*) FROM inbox_feedback
-            """))
+            """)
+            )
             row = result.fetchone()
             learning_samples = row[0] if row else 0
         except Exception as e:
@@ -2863,14 +2983,17 @@ async def twin_page_deprecated(request: Request):
     settings = {}
     async for session in get_session():
         try:
-            result = await session.execute(text("""
+            result = await session.execute(
+                text("""
                 SELECT preference FROM preference_rules
                 WHERE rule_type = 'twin_settings'
                 LIMIT 1
-            """))
+            """)
+            )
             row = result.fetchone()
             if row and row[0]:
                 import json
+
                 settings = row[0] if isinstance(row[0], dict) else json.loads(row[0])
         except Exception:
             pass
@@ -2934,13 +3057,18 @@ async def save_twin_settings(
     async for session in get_session():
         try:
             # Delete existing then insert (simple approach)
-            await session.execute(text("""
+            await session.execute(
+                text("""
                 DELETE FROM preference_rules WHERE rule_type = 'twin_settings'
-            """))
-            await session.execute(text("""
+            """)
+            )
+            await session.execute(
+                text("""
                 INSERT INTO preference_rules (id, rule_type, rule_name, condition, preference, source_trace_ids, created_at)
                 VALUES (:id, 'twin_settings', 'Voice & Tone Settings', '{}'::jsonb, :pref, ARRAY['user'], NOW())
-            """), {"id": f"pref_{uuid.uuid4().hex[:12]}", "pref": json.dumps(settings)})
+            """),
+                {"id": f"pref_{uuid.uuid4().hex[:12]}", "pref": json.dumps(settings)},
+            )
             await session.commit()
             logger.info("Twin settings saved", settings=settings)
         except Exception as e:
@@ -2978,6 +3106,7 @@ async def approve_draft(draft_id: str):
                 # Self-improve expertise based on successful email draft
                 try:
                     from cognitex.agent.expertise import get_expertise_manager
+
                     em = get_expertise_manager()
 
                     # Determine domain from sender/project context
@@ -2999,12 +3128,12 @@ async def approve_draft(draft_id: str):
                 except Exception as e:
                     logger.debug("Expertise self-improve skipped", error=str(e))
 
-                action_text = html.escape(str(result.get('action', 'Email queued for sending')))
-                return HTMLResponse(f'''
+                action_text = html.escape(str(result.get("action", "Email queued for sending")))
+                return HTMLResponse(f"""
                     <div class="draft-card" style="background: #d1fae5; border-color: #065f46;">
                         <p><strong>Approved!</strong> {action_text}</p>
                     </div>
-                ''')
+                """)
             else:
                 logger.warning("Agent approval failed", error=result.get("error"))
     except Exception as e:
@@ -3034,12 +3163,12 @@ async def approve_draft(draft_id: str):
 
         logger.info("Email draft approved (direct)", draft_id=draft_id)
 
-        return HTMLResponse(f'''
+        return HTMLResponse(f"""
             <div class="draft-card" style="background: #d1fae5; border-color: #065f46;">
                 <p><strong>Approved!</strong> Email will be sent to {html.escape(str(draft["to"]))}</p>
                 <p style="font-size: 0.8rem; color: #666;">(Direct approval - learning skipped)</p>
             </div>
-        ''')
+        """)
 
     raise HTTPException(status_code=500, detail="Failed to approve draft")
 
@@ -3062,9 +3191,9 @@ async def edit_draft_form(_request: Request, draft_id: str):
             raise HTTPException(status_code=404, detail="Draft not found")
 
         # Escape all user-provided values for HTML safety
-        safe_to = html.escape(str(draft['to'] or ''))
-        safe_subject = html.escape(str(draft['subject'] or ''))
-        safe_body = html.escape(str(draft['body'] or ''))
+        safe_to = html.escape(str(draft["to"] or ""))
+        safe_subject = html.escape(str(draft["subject"] or ""))
+        safe_body = html.escape(str(draft["body"] or ""))
 
         return HTMLResponse(f'''
             <form class="draft-edit-form" hx-put="/api/twin/drafts/{draft_id}" hx-target="#draft-{draft_id}" hx-swap="outerHTML">
@@ -3100,22 +3229,25 @@ async def update_draft(
             d.status = 'approved', d.approved_at = datetime()
         RETURN d.id as id
         """
-        result = await session.run(query, {
-            "draft_id": draft_id,
-            "to": to,
-            "subject": subject,
-            "body": body,
-        })
+        result = await session.run(
+            query,
+            {
+                "draft_id": draft_id,
+                "to": to,
+                "subject": subject,
+                "body": body,
+            },
+        )
         data = await result.single()
 
         if not data:
             raise HTTPException(status_code=404, detail="Draft not found")
 
-        return HTMLResponse(f'''
+        return HTMLResponse(f"""
             <div class="draft-card" style="background: #d1fae5; border-color: #065f46;">
                 <p><strong>Updated & Approved!</strong> Email will be sent to {html.escape(to)}</p>
             </div>
-        ''')
+        """)
 
     raise HTTPException(status_code=500, detail="Failed to update draft")
 
@@ -3149,18 +3281,20 @@ async def get_draft_reject_form(draft_id: str):
         ("other", "Other reason"),
     ]
 
-    reason_buttons = "\n".join([
-        f'''<button type="button" class="btn btn-outline-secondary btn-sm rejection-reason"
+    reason_buttons = "\n".join(
+        [
+            f'''<button type="button" class="btn btn-outline-secondary btn-sm rejection-reason"
             data-reason="{code}"
             hx-post="/api/twin/drafts/{draft_id}/reject"
             hx-vals='{{"reason": "{code}", "reason_text": "{label}"}}'
             hx-target="#draft-{draft_id}"
             hx-swap="outerHTML"
             style="margin: 0.25rem;">{html.escape(label)}</button>'''
-        for code, label in reasons
-    ])
+            for code, label in reasons
+        ]
+    )
 
-    return HTMLResponse(f'''
+    return HTMLResponse(f"""
         <div class="rejection-form" style="background: #fef2f2; padding: 1rem; border-radius: 5px; margin-top: 0.5rem;">
             <p style="margin-bottom: 0.5rem;"><strong>Why are you rejecting this draft?</strong></p>
             <div class="rejection-reasons" style="display: flex; flex-wrap: wrap;">
@@ -3172,7 +3306,7 @@ async def get_draft_reject_form(draft_id: str):
                 hx-swap="outerHTML"
                 style="margin-top: 0.5rem;">Cancel</button>
         </div>
-    ''')
+    """)
 
 
 @app.post("/api/twin/drafts/{draft_id}/reject")
@@ -3199,11 +3333,14 @@ async def reject_draft_with_feedback(
         RETURN d.id as id, d.reasoning as reasoning, d.to as recipient,
                e.from as email_sender, e.subject as email_subject, e.gmail_id as email_id
         """
-        result = await session.run(query, {
-            "draft_id": draft_id,
-            "reason": reason,
-            "reason_text": reason_text,
-        })
+        result = await session.run(
+            query,
+            {
+                "draft_id": draft_id,
+                "reason": reason,
+                "reason_text": reason_text,
+            },
+        )
         data = await result.single()
 
         if not data:
@@ -3245,7 +3382,7 @@ async def reject_draft_with_feedback(
                     "email_subject": email_subject,
                     "email_id": data.get("email_id"),
                     "draft_id": draft_id,
-                }
+                },
             )
 
             # Map rejection reasons to human-readable text for logging
@@ -3269,7 +3406,7 @@ async def reject_draft_with_feedback(
                     "reason_label": reason_labels.get(reason, reason),
                     "email_sender": email_sender,
                     "email_subject": email_subject[:100],
-                }
+                },
             )
         except Exception as e:
             logger.warning("Failed to record draft rejection in unified learning", error=str(e))
@@ -3277,6 +3414,7 @@ async def reject_draft_with_feedback(
         # Route to skill feedback
         try:
             from cognitex.agent.skill_feedback_router import route_rejection_to_skill
+
             await route_rejection_to_skill(
                 proposal_type="draft_email",
                 reason=reason,
@@ -3285,12 +3423,12 @@ async def reject_draft_with_feedback(
         except Exception:
             pass
 
-        return HTMLResponse(f'''
+        return HTMLResponse(f"""
             <div id="draft-{draft_id}" class="draft-card" style="background: #fef2f2; border-color: #b91c1c; opacity: 0.7;">
                 <p><strong>Draft rejected</strong> - {html.escape(reason_text or reason)}</p>
                 <p class="text-muted" style="font-size: 0.85rem;">This feedback helps improve future suggestions.</p>
             </div>
-        ''')
+        """)
 
     raise HTTPException(status_code=500, detail="Failed to reject draft")
 
@@ -3298,6 +3436,7 @@ async def reject_draft_with_feedback(
 # ========================================================================
 # Generic User Feedback API
 # ========================================================================
+
 
 @app.post("/api/feedback")
 async def record_user_feedback_api(
@@ -3345,19 +3484,22 @@ async def record_user_feedback_api(
             action_taken=action_taken,
         )
 
-        return HTMLResponse('''
+        return HTMLResponse("""
             <div class="alert alert-success" style="padding: 0.5rem; font-size: 0.85rem;">
                 <strong>Feedback recorded</strong> - This helps improve future suggestions.
             </div>
-        ''')
+        """)
 
     except Exception as e:
         logger.error("Failed to record feedback", error=str(e))
-        return HTMLResponse('''
+        return HTMLResponse(
+            """
             <div class="alert alert-warning" style="padding: 0.5rem; font-size: 0.85rem;">
                 <strong>Note:</strong> Feedback could not be saved, but action was completed.
             </div>
-        ''', status_code=200)  # Still return 200 so the UI flow isn't broken
+        """,
+            status_code=200,
+        )  # Still return 200 so the UI flow isn't broken
 
 
 @app.get("/api/feedback/stats")
@@ -3377,6 +3519,7 @@ async def get_feedback_stats_api():
 # Phase 5.1: Multi-turn Email Drafting
 # ========================================================================
 
+
 @app.get("/api/twin/drafts/{draft_id}/refine-form")
 async def get_draft_refine_form(draft_id: str):
     """Get the refinement form for iterating on a draft."""
@@ -3390,15 +3533,17 @@ async def get_draft_refine_form(draft_id: str):
         ("custom", "Custom request..."),
     ]
 
-    refinement_buttons = "\n".join([
-        f'''<button type="button" class="btn btn-outline-primary btn-sm refinement-option"
+    refinement_buttons = "\n".join(
+        [
+            f'''<button type="button" class="btn btn-outline-primary btn-sm refinement-option"
             data-refinement="{code}"
             onclick="selectRefinement('{draft_id}', '{code}', '{label}')"
             style="margin: 0.25rem;">{html.escape(label)}</button>'''
-        for code, label in refinements
-    ])
+            for code, label in refinements
+        ]
+    )
 
-    return HTMLResponse(f'''
+    return HTMLResponse(f"""
         <div class="refinement-form" style="background: #f0f9ff; padding: 1rem; border-radius: 5px; margin-top: 0.5rem;">
             <p style="margin-bottom: 0.5rem;"><strong>How would you like to refine this draft?</strong></p>
             <div class="refinement-options" style="display: flex; flex-wrap: wrap; margin-bottom: 0.5rem;">
@@ -3438,7 +3583,7 @@ async def get_draft_refine_form(draft_id: str):
             event.target.classList.remove('btn-outline-primary');
         }}
         </script>
-    ''')
+    """)
 
 
 @app.post("/api/twin/drafts/{draft_id}/refine")
@@ -3490,8 +3635,8 @@ async def refine_draft(
         refine_prompt = f"""You are refining an email draft based on user feedback.
 
 CURRENT DRAFT:
-To: {draft['to']}
-Subject: {draft['subject']}
+To: {draft["to"]}
+Subject: {draft["subject"]}
 
 {current_body}
 
@@ -3514,21 +3659,28 @@ Keep the same general message but apply the requested changes.
             RETURN d.id as id, d.to as to, d.subject as subject, d.body as body,
                    d.revision_count as revision_count
             """
-            update_result = await session.run(update_query, {
-                "draft_id": draft_id,
-                "new_body": refined_body,
-                "revision_count": revision_count,
-                "refinement": f"[{refinement_type}] {refinement_instruction[:100]}",
-            })
+            update_result = await session.run(
+                update_query,
+                {
+                    "draft_id": draft_id,
+                    "new_body": refined_body,
+                    "revision_count": revision_count,
+                    "refinement": f"[{refinement_type}] {refinement_instruction[:100]}",
+                },
+            )
             updated = await update_result.single()
 
             # Return updated draft card
-            safe_to = html.escape(str(updated['to'] or ''))
-            safe_subject = html.escape(str(updated['subject'] or ''))
-            safe_body = html.escape(str(updated['body'] or ''))
-            revision_badge = f'<span class="badge bg-info" style="margin-left: 0.5rem;">v{revision_count}</span>' if revision_count > 1 else ''
+            safe_to = html.escape(str(updated["to"] or ""))
+            safe_subject = html.escape(str(updated["subject"] or ""))
+            safe_body = html.escape(str(updated["body"] or ""))
+            revision_badge = (
+                f'<span class="badge bg-info" style="margin-left: 0.5rem;">v{revision_count}</span>'
+                if revision_count > 1
+                else ""
+            )
 
-            return HTMLResponse(f'''
+            return HTMLResponse(f"""
                 <div id="draft-{draft_id}" class="draft-card" style="border: 2px solid #0ea5e9;">
                     <div class="draft-meta">
                         <strong>To:</strong> {safe_to} {revision_badge}<br>
@@ -3567,16 +3719,16 @@ Keep the same general message but apply the requested changes.
                         Draft refined! ({refinement_type})
                     </p>
                 </div>
-            ''')
+            """)
 
         except Exception as e:
             logger.error("Draft refinement failed", error=str(e), draft_id=draft_id)
-            return HTMLResponse(f'''
+            return HTMLResponse(f"""
                 <div id="draft-{draft_id}" class="draft-card" style="border: 2px solid #ef4444;">
                     <p class="text-danger"><strong>Refinement failed:</strong> {html.escape(str(e))}</p>
                     <button class="btn btn-link btn-sm" hx-get="/twin" hx-target="body">Reload</button>
                 </div>
-            ''')
+            """)
 
     raise HTTPException(status_code=500, detail="Failed to refine draft")
 
@@ -3702,11 +3854,13 @@ Return ONLY valid JSON, no other text."""
                         doc_result = await session.run(doc_query, {"drive_id": drive_id})
                         doc_data = await doc_result.single()
                         if doc_data:
-                            related_docs.append({
-                                **dict(doc_data),
-                                "relevance": chunk.get("similarity", 0.5),
-                                "matched_content": chunk.get("content", "")[:200],
-                            })
+                            related_docs.append(
+                                {
+                                    **dict(doc_data),
+                                    "relevance": chunk.get("similarity", 0.5),
+                                    "matched_content": chunk.get("content", "")[:200],
+                                }
+                            )
             except Exception as e:
                 logger.warning("Document search failed", error=str(e))
 
@@ -3723,9 +3877,11 @@ Return ONLY valid JSON, no other text."""
 
         # Summary
         if analysis.get("summary"):
-            html_parts.append('<div class="context-section" style="margin-bottom: 1rem; background: #dbeafe; padding: 0.75rem; border-radius: 4px;">')
-            html_parts.append(f'<strong>Summary:</strong> {escape_html(analysis["summary"])}')
-            html_parts.append('</div>')
+            html_parts.append(
+                '<div class="context-section" style="margin-bottom: 1rem; background: #dbeafe; padding: 0.75rem; border-radius: 4px;">'
+            )
+            html_parts.append(f"<strong>Summary:</strong> {escape_html(analysis['summary'])}")
+            html_parts.append("</div>")
 
         # Deliverables - what's being asked for
         if analysis.get("deliverables"):
@@ -3733,8 +3889,10 @@ Return ONLY valid JSON, no other text."""
             html_parts.append('<strong style="color: #1e40af;">Deliverables Requested:</strong>')
             html_parts.append('<ul style="margin: 0.25rem 0; padding-left: 1.25rem;">')
             for item in analysis["deliverables"]:
-                html_parts.append(f'<li style="font-size: 0.9rem; margin-bottom: 0.25rem;">{escape_html(item)}</li>')
-            html_parts.append('</ul></div>')
+                html_parts.append(
+                    f'<li style="font-size: 0.9rem; margin-bottom: 0.25rem;">{escape_html(item)}</li>'
+                )
+            html_parts.append("</ul></div>")
 
         # Key requirements/instructions
         if analysis.get("key_requirements"):
@@ -3742,8 +3900,10 @@ Return ONLY valid JSON, no other text."""
             html_parts.append('<strong style="color: #1e40af;">Key Requirements:</strong>')
             html_parts.append('<ul style="margin: 0.25rem 0; padding-left: 1.25rem;">')
             for item in analysis["key_requirements"]:
-                html_parts.append(f'<li style="font-size: 0.9rem; margin-bottom: 0.25rem;">{escape_html(item)}</li>')
-            html_parts.append('</ul></div>')
+                html_parts.append(
+                    f'<li style="font-size: 0.9rem; margin-bottom: 0.25rem;">{escape_html(item)}</li>'
+                )
+            html_parts.append("</ul></div>")
 
         # Questions to answer
         if analysis.get("questions_to_answer"):
@@ -3751,15 +3911,19 @@ Return ONLY valid JSON, no other text."""
             html_parts.append('<strong style="color: #1e40af;">Questions to Answer:</strong>')
             html_parts.append('<ul style="margin: 0.25rem 0; padding-left: 1.25rem;">')
             for item in analysis["questions_to_answer"]:
-                html_parts.append(f'<li style="font-size: 0.9rem; margin-bottom: 0.25rem;">{escape_html(item)}</li>')
-            html_parts.append('</ul></div>')
+                html_parts.append(
+                    f'<li style="font-size: 0.9rem; margin-bottom: 0.25rem;">{escape_html(item)}</li>'
+                )
+            html_parts.append("</ul></div>")
 
         # Deadlines
         if analysis.get("deadlines"):
-            html_parts.append('<div class="context-section" style="margin-bottom: 1rem; background: #fef3c7; padding: 0.5rem; border-radius: 4px;">')
+            html_parts.append(
+                '<div class="context-section" style="margin-bottom: 1rem; background: #fef3c7; padding: 0.5rem; border-radius: 4px;">'
+            )
             html_parts.append('<strong style="color: #92400e;">Deadlines:</strong> ')
             html_parts.append(escape_html(", ".join(analysis["deadlines"])))
-            html_parts.append('</div>')
+            html_parts.append("</div>")
 
         # Suggested response points
         if analysis.get("suggested_response_points"):
@@ -3767,62 +3931,92 @@ Return ONLY valid JSON, no other text."""
             html_parts.append('<strong style="color: #047857;">Suggested Response Points:</strong>')
             html_parts.append('<ul style="margin: 0.25rem 0; padding-left: 1.25rem;">')
             for item in analysis["suggested_response_points"]:
-                html_parts.append(f'<li style="font-size: 0.9rem; margin-bottom: 0.25rem;">{escape_html(item)}</li>')
-            html_parts.append('</ul></div>')
+                html_parts.append(
+                    f'<li style="font-size: 0.9rem; margin-bottom: 0.25rem;">{escape_html(item)}</li>'
+                )
+            html_parts.append("</ul></div>")
 
         # Related documents found
         if related_docs:
-            html_parts.append('<div class="context-section" style="margin-bottom: 1rem; border-top: 1px solid #bfdbfe; padding-top: 0.75rem;">')
-            html_parts.append(f'<strong>Related Documents ({len(related_docs)}):</strong>')
+            html_parts.append(
+                '<div class="context-section" style="margin-bottom: 1rem; border-top: 1px solid #bfdbfe; padding-top: 0.75rem;">'
+            )
+            html_parts.append(f"<strong>Related Documents ({len(related_docs)}):</strong>")
             html_parts.append('<ul style="margin: 0.25rem 0; padding-left: 1.25rem;">')
             for doc in related_docs[:5]:
                 name = escape_html(doc.get("name", "Document"))
                 drive_id = doc.get("drive_id", "")
                 relevance = doc.get("relevance", 0)
-                summary = escape_html((doc.get("summary") or doc.get("matched_content") or "")[:100])
+                summary = escape_html(
+                    (doc.get("summary") or doc.get("matched_content") or "")[:100]
+                )
                 html_parts.append('<li style="font-size: 0.9rem; margin-bottom: 0.5rem;">')
-                html_parts.append(f'<a href="https://drive.google.com/file/d/{drive_id}/view" target="_blank">{name}</a>')
+                html_parts.append(
+                    f'<a href="https://drive.google.com/file/d/{drive_id}/view" target="_blank">{name}</a>'
+                )
                 html_parts.append(f' <span style="color: #6b7280;">({relevance:.0%})</span>')
                 if summary:
-                    html_parts.append(f'<br><span style="font-size: 0.8rem; color: #6b7280;">{summary}...</span>')
-                html_parts.append('</li>')
-            html_parts.append('</ul></div>')
+                    html_parts.append(
+                        f'<br><span style="font-size: 0.8rem; color: #6b7280;">{summary}...</span>'
+                    )
+                html_parts.append("</li>")
+            html_parts.append("</ul></div>")
 
         # Related tasks from graph
         if context.get("related_tasks"):
             html_parts.append('<div class="context-section" style="margin-bottom: 1rem;">')
-            html_parts.append(f'<strong>Related Tasks ({len(context["related_tasks"])}):</strong>')
+            html_parts.append(f"<strong>Related Tasks ({len(context['related_tasks'])}):</strong>")
             html_parts.append('<ul style="margin: 0.25rem 0; padding-left: 1.25rem;">')
             for task in context["related_tasks"]:
                 title = escape_html(task.get("title", "Task"))
                 status = task.get("status", "unknown")
                 project = task.get("project_title", "")
-                status_color = "#047857" if status == "done" else "#d97706" if status == "in_progress" else "#6b7280"
-                html_parts.append(f'<li style="font-size: 0.9rem;">{title} <span style="color: {status_color};">[{status}]</span>{" - " + escape_html(project) if project else ""}</li>')
-            html_parts.append('</ul></div>')
+                status_color = (
+                    "#047857"
+                    if status == "done"
+                    else "#d97706"
+                    if status == "in_progress"
+                    else "#6b7280"
+                )
+                html_parts.append(
+                    f'<li style="font-size: 0.9rem;">{title} <span style="color: {status_color};">[{status}]</span>{" - " + escape_html(project) if project else ""}</li>'
+                )
+            html_parts.append("</ul></div>")
 
         # Sender context
         if context.get("sender_context"):
             sc = context["sender_context"]
-            html_parts.append('<div class="context-section" style="margin-bottom: 0.5rem; font-size: 0.85rem; color: #6b7280;">')
-            html_parts.append(f'<strong>Sender:</strong> {escape_html(sc.get("name") or "Unknown")} ({escape_html(sc.get("org") or "Unknown org")})')
-            html_parts.append(f' - {sc.get("email_count", 0)} prior emails, {sc.get("shared_task_count", 0)} shared tasks')
-            html_parts.append('</div>')
+            html_parts.append(
+                '<div class="context-section" style="margin-bottom: 0.5rem; font-size: 0.85rem; color: #6b7280;">'
+            )
+            html_parts.append(
+                f"<strong>Sender:</strong> {escape_html(sc.get('name') or 'Unknown')} ({escape_html(sc.get('org') or 'Unknown org')})"
+            )
+            html_parts.append(
+                f" - {sc.get('email_count', 0)} prior emails, {sc.get('shared_task_count', 0)} shared tasks"
+            )
+            html_parts.append("</div>")
 
         # Action buttons - Research and Close
-        html_parts.append('<div style="margin-top: 1rem; display: flex; gap: 0.5rem; align-items: center;">')
-        html_parts.append(f'''<button class="btn btn-primary btn-sm" id="research-btn-{draft_id}"
+        html_parts.append(
+            '<div style="margin-top: 1rem; display: flex; gap: 0.5rem; align-items: center;">'
+        )
+        html_parts.append(f"""<button class="btn btn-primary btn-sm" id="research-btn-{draft_id}"
             onclick="startResearch('{draft_id}')"
             title="Search internal docs and web for information to address requirements">
             🔍 Research (Internal + Web)
-        </button>''')
-        html_parts.append('<button class="btn btn-secondary btn-sm" onclick="this.parentElement.parentElement.remove()">Close</button>')
-        html_parts.append('</div>')
-        html_parts.append(f'<div id="research-status-{draft_id}" style="margin-top: 0.5rem;"></div>')
+        </button>""")
+        html_parts.append(
+            '<button class="btn btn-secondary btn-sm" onclick="this.parentElement.parentElement.remove()">Close</button>'
+        )
+        html_parts.append("</div>")
+        html_parts.append(
+            f'<div id="research-status-{draft_id}" style="margin-top: 0.5rem;"></div>'
+        )
         html_parts.append(f'<div id="research-results-{draft_id}" style="margin-top: 1rem;"></div>')
 
         # Add the SSE JavaScript for this draft
-        html_parts.append('''
+        html_parts.append("""
         <script>
         function startResearch(draftId) {
             const btn = document.getElementById('research-btn-' + draftId);
@@ -3875,8 +4069,8 @@ Return ONLY valid JSON, no other text."""
             };
         }
         </script>
-        ''')
-        html_parts.append('</div>')
+        """)
+        html_parts.append("</div>")
 
         return HTMLResponse("".join(html_parts))
 
@@ -3906,7 +4100,7 @@ async def research_for_draft_stream(draft_id: str):
     def sse_event(event_type: str, data: str) -> str:
         """Format as SSE event."""
         # SSE data lines can't have newlines - replace with escaped version
-        safe_data = data.replace('\n', '\\n').replace('\r', '')
+        safe_data = data.replace("\n", "\\n").replace("\r", "")
         return f"event: {event_type}\ndata: {safe_data}\n\n"
 
     def status_html(message: str, progress: int = 0, icon: str = "🔄") -> str:
@@ -3951,7 +4145,9 @@ async def research_for_draft_stream(draft_id: str):
                 return
 
             if not email_body:
-                yield sse_event("error", '<div class="alert alert-warning">No email content to research</div>')
+                yield sse_event(
+                    "error", '<div class="alert alert-warning">No email content to research</div>'
+                )
                 yield sse_event("done", "error")
                 return
 
@@ -4003,14 +4199,21 @@ Return ONLY valid JSON."""
                     "internal_queries": [{"query": subject, "purpose": "General search"}],
                     "web_queries": [{"query": subject, "purpose": "Background info"}],
                     "key_questions": [],
-                    "context_needed": "General background"
+                    "context_needed": "General background",
                 }
                 yield sse_event("status", status_html("Using fallback plan", 25, "⚠️"))
 
-            internal_queries = research_plan.get("internal_queries", [])[:3]  # Reduced to 3 for speed
+            internal_queries = research_plan.get("internal_queries", [])[
+                :3
+            ]  # Reduced to 3 for speed
             web_queries = research_plan.get("web_queries", [])[:3]
 
-            yield sse_event("status", status_html(f"{len(internal_queries)} internal + {len(web_queries)} web queries", 30, "📋"))
+            yield sse_event(
+                "status",
+                status_html(
+                    f"{len(internal_queries)} internal + {len(web_queries)} web queries", 30, "📋"
+                ),
+            )
 
             # Define search functions that don't hold connections
             async def search_internal_docs(query_item: dict) -> list[dict]:
@@ -4023,13 +4226,15 @@ Return ONLY valid JSON."""
                     async for pg_session in get_session():
                         chunks = await search_chunks_semantic(pg_session, query_text, limit=3)
                         for chunk in chunks:
-                            results.append({
-                                "query": query_text,
-                                "purpose": query_item.get("purpose", ""),
-                                "content": chunk.get("content", "")[:500],
-                                "drive_id": chunk.get("drive_id"),
-                                "similarity": chunk.get("similarity", 0),
-                            })
+                            results.append(
+                                {
+                                    "query": query_text,
+                                    "purpose": query_item.get("purpose", ""),
+                                    "content": chunk.get("content", "")[:500],
+                                    "drive_id": chunk.get("drive_id"),
+                                    "similarity": chunk.get("similarity", 0),
+                                }
+                            )
                         break
                 except Exception as e:
                     logger.warning("Internal search failed", query=query_text, error=str(e))
@@ -4050,7 +4255,7 @@ Give 3-5 bullet points of key facts. Be concise."""
                     return {
                         "query": query_text,
                         "purpose": query_item.get("purpose", ""),
-                        "findings": web_response.strip()
+                        "findings": web_response.strip(),
                     }
                 except Exception as e:
                     logger.warning("Web research failed", query=query_text, error=str(e))
@@ -4064,7 +4269,12 @@ Give 3-5 bullet points of key facts. Be concise."""
                 try:
                     results = await asyncio.wait_for(search_internal_docs(q), timeout=10.0)
                     internal_results.extend(results)
-                    yield sse_event("status", status_html(f"Internal {i+1}/{len(internal_queries)}", 35 + (i+1)*5, "📁"))
+                    yield sse_event(
+                        "status",
+                        status_html(
+                            f"Internal {i + 1}/{len(internal_queries)}", 35 + (i + 1) * 5, "📁"
+                        ),
+                    )
                 except TimeoutError:
                     logger.warning("Internal search timeout", query=q.get("query"))
 
@@ -4074,7 +4284,9 @@ Give 3-5 bullet points of key facts. Be concise."""
             web_results = []
             for i, q in enumerate(web_queries):
                 query_text = q.get("query", "")[:30]
-                yield sse_event("status", status_html(f"Researching: {query_text}...", 50 + i*10, "🌐"))
+                yield sse_event(
+                    "status", status_html(f"Researching: {query_text}...", 50 + i * 10, "🌐")
+                )
 
                 # Run with heartbeat
                 web_task = asyncio.create_task(research_web(q))
@@ -4090,19 +4302,31 @@ Give 3-5 bullet points of key facts. Be concise."""
                             break
 
                 try:
-                    result = web_task.result() if web_task.done() and not web_task.cancelled() else None
+                    result = (
+                        web_task.result() if web_task.done() and not web_task.cancelled() else None
+                    )
                     if result:
                         web_results.append(result)
                 except Exception:
                     pass
 
-                yield sse_event("status", status_html(f"Web {i+1}/{len(web_queries)} done", 55 + (i+1)*10, "🌐"))
+                yield sse_event(
+                    "status",
+                    status_html(f"Web {i + 1}/{len(web_queries)} done", 55 + (i + 1) * 10, "🌐"),
+                )
 
-            yield sse_event("status", status_html(f"Found {len(internal_results)} docs, {len(web_results)} web results", 85, "✅"))
+            yield sse_event(
+                "status",
+                status_html(
+                    f"Found {len(internal_results)} docs, {len(web_results)} web results", 85, "✅"
+                ),
+            )
 
-            logger.info("Research complete",
-                       internal_results=len(internal_results),
-                       web_results=len(web_results))
+            logger.info(
+                "Research complete",
+                internal_results=len(internal_results),
+                web_results=len(web_results),
+            )
 
             # Step 4: Compile research into a summary with heartbeat to keep connection alive
             yield sse_event("status", status_html("Compiling briefing...", 90, "📝"))
@@ -4113,10 +4337,10 @@ Give 3-5 bullet points of key facts. Be concise."""
 EMAIL: {subject}
 
 INTERNAL DOCS: {len(internal_results)} found
-{json.dumps([r.get('content', '')[:200] for r in internal_results[:5]], indent=1) if internal_results else "None"}
+{json.dumps([r.get("content", "")[:200] for r in internal_results[:5]], indent=1) if internal_results else "None"}
 
 EXTERNAL INFO: {len(web_results)} queries
-{json.dumps([{'q': r.get('query', ''), 'findings': r.get('findings', '')[:300]} for r in web_results[:3]], indent=1) if web_results else "None"}
+{json.dumps([{"q": r.get("query", ""), "findings": r.get("findings", "")[:300]} for r in web_results[:3]], indent=1) if web_results else "None"}
 
 Provide a brief summary (2-3 paragraphs) with:
 - Key findings relevant to the email
@@ -4139,7 +4363,10 @@ Be concise."""
                     # Send heartbeat to keep connection alive
                     heartbeat_count += 1
                     yield f": heartbeat {heartbeat_count}\n\n"
-                    yield sse_event("status", status_html(f"Compiling briefing... ({heartbeat_count * 5}s)", 90, "📝"))
+                    yield sse_event(
+                        "status",
+                        status_html(f"Compiling briefing... ({heartbeat_count * 5}s)", 90, "📝"),
+                    )
 
             try:
                 compiled_brief = compile_task.result().strip()
@@ -4151,22 +4378,24 @@ Be concise."""
 
             # Convert markdown to basic HTML
             brief_html = compiled_brief
-            brief_html = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', brief_html)
-            brief_html = re.sub(r'^# (.+)$', r'<h3>\1</h3>', brief_html, flags=re.MULTILINE)
-            brief_html = re.sub(r'^## (.+)$', r'<h4>\1</h4>', brief_html, flags=re.MULTILINE)
-            brief_html = re.sub(r'^- (.+)$', r'<li>\1</li>', brief_html, flags=re.MULTILINE)
-            brief_html = re.sub(r'^(\d+)\. (.+)$', r'<li>\2</li>', brief_html, flags=re.MULTILINE)
-            brief_html = brief_html.replace('\n\n', '</p><p>').replace('\n', '<br>')
-            brief_html = f'<p>{brief_html}</p>'
+            brief_html = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", brief_html)
+            brief_html = re.sub(r"^# (.+)$", r"<h3>\1</h3>", brief_html, flags=re.MULTILINE)
+            brief_html = re.sub(r"^## (.+)$", r"<h4>\1</h4>", brief_html, flags=re.MULTILINE)
+            brief_html = re.sub(r"^- (.+)$", r"<li>\1</li>", brief_html, flags=re.MULTILINE)
+            brief_html = re.sub(r"^(\d+)\. (.+)$", r"<li>\2</li>", brief_html, flags=re.MULTILINE)
+            brief_html = brief_html.replace("\n\n", "</p><p>").replace("\n", "<br>")
+            brief_html = f"<p>{brief_html}</p>"
 
-            final_html = f'''<div class="research-results" style="background: #f0fdf4; padding: 1rem; border-radius: 5px; border: 1px solid #86efac;"><h4 style="margin-top: 0; color: #166534; border-bottom: 1px solid #86efac; padding-bottom: 0.5rem;">📚 Research Complete</h4><div style="margin-bottom: 1rem;"><strong>Queries Executed:</strong> <span style="color: #6b7280;">{len(internal_results)} internal, {len(web_results)} web</span></div><div class="research-brief" style="background: white; padding: 1rem; border-radius: 4px; font-size: 0.9rem; line-height: 1.6;">{brief_html}</div><div style="margin-top: 1rem; display: flex; gap: 0.5rem;"><button class="btn btn-success btn-sm" onclick="navigator.clipboard.writeText(this.parentElement.previousElementSibling.innerText); this.innerText=\\'Copied!\\';">📋 Copy</button><button class="btn btn-secondary btn-sm" onclick="this.parentElement.parentElement.remove();">Dismiss</button></div></div>'''
+            final_html = f"""<div class="research-results" style="background: #f0fdf4; padding: 1rem; border-radius: 5px; border: 1px solid #86efac;"><h4 style="margin-top: 0; color: #166534; border-bottom: 1px solid #86efac; padding-bottom: 0.5rem;">📚 Research Complete</h4><div style="margin-bottom: 1rem;"><strong>Queries Executed:</strong> <span style="color: #6b7280;">{len(internal_results)} internal, {len(web_results)} web</span></div><div class="research-brief" style="background: white; padding: 1rem; border-radius: 4px; font-size: 0.9rem; line-height: 1.6;">{brief_html}</div><div style="margin-top: 1rem; display: flex; gap: 0.5rem;"><button class="btn btn-success btn-sm" onclick="navigator.clipboard.writeText(this.parentElement.previousElementSibling.innerText); this.innerText=\\'Copied!\\';">📋 Copy</button><button class="btn btn-secondary btn-sm" onclick="this.parentElement.parentElement.remove();">Dismiss</button></div></div>"""
 
             yield sse_event("result", final_html)
             yield sse_event("done", "success")
 
         except Exception as e:
             logger.error("Research stream error", error=str(e), exc_info=True)
-            yield sse_event("error", f'<div class="alert alert-error">Research failed: {str(e)}</div>')
+            yield sse_event(
+                "error", f'<div class="alert alert-error">Research failed: {str(e)}</div>'
+            )
             yield sse_event("done", "error")
 
     return StreamingResponse(
@@ -4176,7 +4405,7 @@ Be concise."""
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
-        }
+        },
     )
 
 
@@ -4233,25 +4462,25 @@ async def trigger_research_pack(
             research_topics = email.get("research_topics") or []
 
         if not research_topics:
-            return HTMLResponse('''
+            return HTMLResponse("""
                 <div class="alert alert-warning" style="padding: 0.5rem; margin-top: 0.5rem;">
                     No research topics identified. Please specify topics or classify the email first.
                 </div>
-            ''')
+            """)
 
         # Compile research pack
         compiler = get_context_pack_compiler()
         pack = await compiler.compile_research_pack(email, research_topics)
 
         # Return success message
-        return HTMLResponse(f'''
+        return HTMLResponse(f"""
             <div class="alert alert-success" style="padding: 0.5rem; margin-top: 0.5rem; background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 4px;">
                 <strong>Research pack created!</strong>
                 <br>Researched {len(research_topics)} topic(s): {", ".join(research_topics[:3])}
                 <br>Found {len(pack.artifact_links)} related documents.
                 <br><a href="/twin" style="color: #047857;">View in Digital Twin &rarr;</a>
             </div>
-        ''')
+        """)
 
     raise HTTPException(status_code=500, detail="Failed to create research pack")
 
@@ -4259,6 +4488,7 @@ async def trigger_research_pack(
 # ========================================================================
 # Phase 5.2: Intelligent Calendar Blocking
 # ========================================================================
+
 
 @app.post("/api/twin/blocks/generate")
 async def generate_focus_blocks():
@@ -4281,11 +4511,11 @@ async def generate_focus_blocks():
             suggestions = await observer.get_focus_block_suggestions(max_suggestions=3)
 
             if not suggestions:
-                return HTMLResponse('''
+                return HTMLResponse("""
                     <div class="alert alert-info" style="margin: 1rem 0;">
                         No focus blocks needed right now. All tasks look manageable!
                     </div>
-                ''')
+                """)
 
             # Create SuggestedBlock nodes for each suggestion
             created_blocks = []
@@ -4295,6 +4525,7 @@ async def generate_focus_blocks():
                 # Parse suggested time to determine day
                 suggested_time = suggestion.get("suggested_time", "")
                 from datetime import datetime
+
                 try:
                     dt = datetime.fromisoformat(suggested_time)
                     today = datetime.now().date()
@@ -4334,63 +4565,68 @@ async def generate_focus_blocks():
                 )
                 RETURN sb.id as id
                 """
-                await session.run(create_query, {
-                    "block_id": block_id,
-                    "title": f"Focus: {suggestion.get('task_title', 'Deep work')[:40]}",
-                    "duration_hours": suggestion.get("duration_hours", 2),
-                    "suggested_day": suggested_day,
-                    "suggested_time": suggested_time,
-                    "reason": suggestion.get("reason", "Task needs focused attention"),
-                    "project_id": suggestion.get("project_id", ""),
-                    "task_id": suggestion.get("task_id", ""),
-                })
-                created_blocks.append({
-                    "id": block_id,
-                    **suggestion,
-                    "suggested_day": suggested_day,
-                })
+                await session.run(
+                    create_query,
+                    {
+                        "block_id": block_id,
+                        "title": f"Focus: {suggestion.get('task_title', 'Deep work')[:40]}",
+                        "duration_hours": suggestion.get("duration_hours", 2),
+                        "suggested_day": suggested_day,
+                        "suggested_time": suggested_time,
+                        "reason": suggestion.get("reason", "Task needs focused attention"),
+                        "project_id": suggestion.get("project_id", ""),
+                        "task_id": suggestion.get("task_id", ""),
+                    },
+                )
+                created_blocks.append(
+                    {
+                        "id": block_id,
+                        **suggestion,
+                        "suggested_day": suggested_day,
+                    }
+                )
 
             # Return HTML for the new blocks
             blocks_html = []
             for block in created_blocks:
-                blocks_html.append(f'''
-                    <tr id="block-row-{block['id']}" style="background: #f0fdf4;">
-                        <td><strong>{html.escape(block.get('task_title', 'Focus Time')[:30])}</strong></td>
-                        <td>{block.get('duration_hours', 2)}h</td>
-                        <td>{html.escape(block.get('suggested_day', 'tomorrow'))}</td>
-                        <td>{html.escape(block.get('project_title', '-')[:25] if block.get('project_title') else '-')}</td>
-                        <td style="font-size: 0.85rem;">{html.escape(block.get('reason', '')[:50])}</td>
+                blocks_html.append(f"""
+                    <tr id="block-row-{block["id"]}" style="background: #f0fdf4;">
+                        <td><strong>{html.escape(block.get("task_title", "Focus Time")[:30])}</strong></td>
+                        <td>{block.get("duration_hours", 2)}h</td>
+                        <td>{html.escape(block.get("suggested_day", "tomorrow"))}</td>
+                        <td>{html.escape(block.get("project_title", "-")[:25] if block.get("project_title") else "-")}</td>
+                        <td style="font-size: 0.85rem;">{html.escape(block.get("reason", "")[:50])}</td>
                         <td>
                             <button class="btn btn-success btn-sm"
-                                hx-post="/api/twin/blocks/{block['id']}/approve"
-                                hx-target="#block-row-{block['id']}"
+                                hx-post="/api/twin/blocks/{block["id"]}/approve"
+                                hx-target="#block-row-{block["id"]}"
                                 hx-swap="outerHTML">
                                 Add to Calendar
                             </button>
                             <button class="btn btn-outline-danger btn-sm"
-                                hx-get="/api/twin/blocks/{block['id']}/reject-form"
-                                hx-target="#block-row-{block['id']}"
+                                hx-get="/api/twin/blocks/{block["id"]}/reject-form"
+                                hx-target="#block-row-{block["id"]}"
                                 hx-swap="outerHTML">
                                 Dismiss
                             </button>
                         </td>
                     </tr>
-                ''')
+                """)
 
-            return HTMLResponse(f'''
+            return HTMLResponse(f"""
                 <div class="alert alert-success" style="margin: 1rem 0;">
                     Generated {len(created_blocks)} focus block suggestions based on your tasks and calendar.
                 </div>
-                {''.join(blocks_html)}
-            ''')
+                {"".join(blocks_html)}
+            """)
 
     except Exception as e:
         logger.error("Failed to generate focus blocks", error=str(e))
-        return HTMLResponse(f'''
+        return HTMLResponse(f"""
             <div class="alert alert-danger" style="margin: 1rem 0;">
                 Failed to generate suggestions: {html.escape(str(e))}
             </div>
-        ''')
+        """)
 
 
 @app.post("/api/twin/blocks/{block_id}/approve")
@@ -4456,14 +4692,16 @@ async def approve_block(block_id: str):
                 send_notifications=False,
             )
             event_id = event.get("id", "unknown")
-            logger.info("Calendar event created for focus block", block_id=block_id, event_id=event_id)
+            logger.info(
+                "Calendar event created for focus block", block_id=block_id, event_id=event_id
+            )
         except Exception as e:
             logger.error("Failed to create calendar event", error=str(e), block_id=block_id)
-            return HTMLResponse(f'''
+            return HTMLResponse(f"""
                 <tr style="background: #fee2e2;">
                     <td colspan="6"><strong>Error:</strong> Failed to create calendar event: {html.escape(str(e)[:100])}</td>
                 </tr>
-            ''')
+            """)
 
         # Mark as approved and store calendar event ID
         update_query = """
@@ -4474,11 +4712,11 @@ async def approve_block(block_id: str):
 
         logger.info("Focus block approved", block_id=block_id)
 
-        return HTMLResponse(f'''
+        return HTMLResponse(f"""
             <tr style="background: #d1fae5;">
                 <td colspan="6"><strong>Added to calendar:</strong> {html.escape(block["title"])} ({duration_hours}h) on {start_date.strftime("%A %d %b at %H:%M")}</td>
             </tr>
-        ''')
+        """)
 
     raise HTTPException(status_code=500, detail="Failed to approve block")
 
@@ -4512,18 +4750,20 @@ async def get_block_reject_form(block_id: str):
         ("other", "Other reason"),
     ]
 
-    reason_buttons = "\n".join([
-        f'''<button type="button" class="btn btn-outline-secondary btn-sm rejection-reason"
+    reason_buttons = "\n".join(
+        [
+            f'''<button type="button" class="btn btn-outline-secondary btn-sm rejection-reason"
             data-reason="{code}"
             hx-post="/api/twin/blocks/{block_id}/reject"
             hx-vals='{{"reason": "{code}", "reason_text": "{label}"}}'
             hx-target="#block-row-{block_id}"
             hx-swap="outerHTML"
             style="margin: 0.25rem;">{html.escape(label)}</button>'''
-        for code, label in reasons
-    ])
+            for code, label in reasons
+        ]
+    )
 
-    return HTMLResponse(f'''
+    return HTMLResponse(f"""
         <tr id="block-row-{block_id}">
             <td colspan="6">
                 <div class="rejection-form" style="background: #fef2f2; padding: 1rem; border-radius: 5px;">
@@ -4538,7 +4778,7 @@ async def get_block_reject_form(block_id: str):
                 </div>
             </td>
         </tr>
-    ''')
+    """)
 
 
 @app.post("/api/twin/blocks/{block_id}/reject")
@@ -4561,11 +4801,14 @@ async def reject_block_with_feedback(
             sb.rejection_reason_text = $reason_text
         RETURN sb.id as id, sb.title as title, sb.reason as reasoning
         """
-        result = await session.run(query, {
-            "block_id": block_id,
-            "reason": reason,
-            "reason_text": reason_text,
-        })
+        result = await session.run(
+            query,
+            {
+                "block_id": block_id,
+                "reason": reason,
+                "reason_text": reason_text,
+            },
+        )
         data = await result.single()
 
         if not data:
@@ -4591,14 +4834,14 @@ async def reject_block_with_feedback(
         except Exception as e:
             logger.warning("Failed to record rejection for learning", error=str(e))
 
-        return HTMLResponse(f'''
+        return HTMLResponse(f"""
             <tr id="block-row-{block_id}" style="background: #fef2f2; opacity: 0.7;">
                 <td colspan="6">
                     <strong>Suggestion rejected</strong> - {html.escape(reason_text or reason)}
                     <span class="text-muted" style="font-size: 0.85rem; margin-left: 1rem;">Feedback recorded</span>
                 </td>
             </tr>
-        ''')
+        """)
 
 
 # -------------------------------------------------------------------
@@ -4610,6 +4853,7 @@ async def reject_block_with_feedback(
 async def state_redirect():
     """Redirect to settings State tab."""
     from fastapi.responses import RedirectResponse
+
     return RedirectResponse(url="/settings?tab=state", status_code=302)
 
 
@@ -4783,16 +5027,20 @@ async def focus_dashboard(request: Request):
         friction = min(5, max(1, (energy_cost or 3) // 2))  # Map 1-10 to 1-5
 
         if friction <= max_friction:
-            eligible_tasks.append({
-                **task,
-                "friction": friction,
-            })
+            eligible_tasks.append(
+                {
+                    **task,
+                    "friction": friction,
+                }
+            )
 
     # Sort by priority, then due date
-    eligible_tasks.sort(key=lambda t: (
-        {"high": 0, "medium": 1, "low": 2}.get(t.get("priority", "medium"), 1),
-        t.get("due_date") or "9999-12-31",
-    ))
+    eligible_tasks.sort(
+        key=lambda t: (
+            {"high": 0, "medium": 1, "low": 2}.get(t.get("priority", "medium"), 1),
+            t.get("due_date") or "9999-12-31",
+        )
+    )
 
     # Limit to top 5 for focus
     focus_tasks = eligible_tasks[:5]
@@ -4848,8 +5096,10 @@ async def api_generate_review():
     # Get completed tasks
     completed_tasks = await get_tasks(status="completed", limit=50)
     recent_completed = [
-        t for t in completed_tasks
-        if t.get("completed_at") and datetime.fromisoformat(str(t["completed_at"]).replace("Z", "")) > week_ago
+        t
+        for t in completed_tasks
+        if t.get("completed_at")
+        and datetime.fromisoformat(str(t["completed_at"]).replace("Z", "")) > week_ago
     ]
 
     # Get state observations summary
@@ -4865,13 +5115,13 @@ async def api_generate_review():
 {chr(10).join(f"- {t.get('title', 'Untitled')}" for t in recent_completed[:15])}
 
 ## State Patterns
-- Observations: {state_summary.get('total_observations', 0)}
-- By mode: {state_summary.get('by_mode', {})}
-- Post-clinical impact: {state_summary.get('post_clinical_impact', {})}
+- Observations: {state_summary.get("total_observations", 0)}
+- By mode: {state_summary.get("by_mode", {})}
+- Post-clinical impact: {state_summary.get("post_clinical_impact", {})}
 
 ## Actions Taken
-- Total: {action_summary.get('total_actions', 0)}
-- By type: {action_summary.get('by_type', {})}
+- Total: {action_summary.get("total_actions", 0)}
+- By type: {action_summary.get("by_type", {})}
 
 Generate a 3-paragraph review covering:
 1. What was accomplished this week
@@ -4888,13 +5138,13 @@ Keep it concise and actionable. Use markdown formatting.
 
     return HTMLResponse(f"""
         <div class="review-content">
-            <h3>Weekly Review - {datetime.now().strftime('%B %d, %Y')}</h3>
+            <h3>Weekly Review - {datetime.now().strftime("%B %d, %Y")}</h3>
             <div class="review-body">
                 {review_text}
             </div>
             <div class="review-stats">
                 <span>Tasks completed: {len(recent_completed)}</span>
-                <span>Observations: {state_summary.get('total_observations', 0)}</span>
+                <span>Observations: {state_summary.get("total_observations", 0)}</span>
             </div>
         </div>
     """)
@@ -4930,6 +5180,7 @@ async def api_voice_transcribe(request: Request):
     # Transcribe using LLM service (if supported) or placeholder
     try:
         from cognitex.services.llm import get_llm_service
+
         _llm = get_llm_service()
 
         # For now, use a simple placeholder since most LLM services
@@ -5028,10 +5279,7 @@ async def api_capture_status():
 
     return {
         "inbox_count": len(items),
-        "recent": [
-            {"subject": i.subject, "source": i.source}
-            for i in items[:3]
-        ],
+        "recent": [{"subject": i.subject, "source": i.source} for i in items[:3]],
     }
 
 
@@ -5044,10 +5292,12 @@ async def api_capture_status():
 # Proposals Management (redirects to unified inbox)
 # ========================================================================
 
+
 @app.get("/proposals")
 async def proposals_redirect():
     """Redirect to unified inbox filtered to task proposals."""
     from fastapi.responses import RedirectResponse
+
     return RedirectResponse(url="/inbox?type=task_proposal", status_code=302)
 
 
@@ -5065,7 +5315,8 @@ async def proposals_page_legacy(request: Request):
 
     async for session in get_session():
         # Get all proposals with stats
-        result = await session.execute(text("""
+        result = await session.execute(
+            text("""
             SELECT
                 id, title, description, project_id, goal_id,
                 priority, reason, status, timestamp, decision_at, decision_reason
@@ -5074,30 +5325,35 @@ async def proposals_page_legacy(request: Request):
                 CASE status WHEN 'pending' THEN 0 ELSE 1 END,
                 timestamp DESC
             LIMIT 200
-        """))
+        """)
+        )
         rows = result.fetchall()
 
         for row in rows:
-            proposals.append({
-                "id": row.id,
-                "title": row.title,
-                "description": row.description,
-                "project_id": row.project_id,
-                "goal_id": row.goal_id,
-                "priority": row.priority,
-                "reason": row.reason,
-                "status": row.status,
-                "timestamp": row.timestamp,
-                "decision_at": row.decision_at,
-                "decision_reason": row.decision_reason,
-            })
+            proposals.append(
+                {
+                    "id": row.id,
+                    "title": row.title,
+                    "description": row.description,
+                    "project_id": row.project_id,
+                    "goal_id": row.goal_id,
+                    "priority": row.priority,
+                    "reason": row.reason,
+                    "status": row.status,
+                    "timestamp": row.timestamp,
+                    "decision_at": row.decision_at,
+                    "decision_reason": row.decision_reason,
+                }
+            )
 
         # Get stats
-        stats_result = await session.execute(text("""
+        stats_result = await session.execute(
+            text("""
             SELECT status, COUNT(*) as count
             FROM task_proposals
             GROUP BY status
-        """))
+        """)
+        )
         for row in stats_result.fetchall():
             stats[row.status] = row.count
         break
@@ -5107,11 +5363,14 @@ async def proposals_page_legacy(request: Request):
     async for neo_session in get_neo4j_session():
         project_ids = list({p["project_id"] for p in proposals if p["project_id"]})
         if project_ids:
-            result = await neo_session.run("""
+            result = await neo_session.run(
+                """
                 MATCH (p:Project)
                 WHERE p.id IN $ids
                 RETURN p.id as id, p.title as title
-            """, {"ids": project_ids})
+            """,
+                {"ids": project_ids},
+            )
             records = await result.data()
             project_names = {r["id"]: r["title"] for r in records}
         break
@@ -5126,7 +5385,7 @@ async def proposals_page_legacy(request: Request):
             "request": request,
             "proposals": proposals,
             "stats": stats,
-        }
+        },
     )
 
 
@@ -5142,12 +5401,13 @@ async def approve_proposal_web(proposal_id: str):
             "proposal_approved",
             "web_ui",
             summary=f"Approved proposal: {task.get('title', '')[:50]}",
-            details={"proposal_id": proposal_id, "task_id": task.get("id")}
+            details={"proposal_id": proposal_id, "task_id": task.get("id")},
         )
 
         # Self-improve expertise based on approved task proposal
         try:
             from cognitex.agent.expertise import get_expertise_manager
+
             em = get_expertise_manager()
 
             # Use project domain if available, otherwise general task creation
@@ -5197,9 +5457,12 @@ async def reject_proposal_web(
     # Get proposal details before rejection
     proposal_title = ""
     async for session in get_session():
-        result = await session.execute(text("""
+        result = await session.execute(
+            text("""
             SELECT title, project_id, priority FROM task_proposals WHERE id = :id
-        """), {"id": proposal_id})
+        """),
+            {"id": proposal_id},
+        )
         row = result.fetchone()
         if row:
             proposal_title = row.title
@@ -5211,7 +5474,7 @@ async def reject_proposal_web(
                     "reason_category": reason,
                     "project_id": row.project_id,
                     "priority": row.priority,
-                }
+                },
             )
         break
 
@@ -5222,7 +5485,7 @@ async def reject_proposal_web(
             "proposal_rejected",
             "web_ui",
             summary=f"Rejected proposal: {proposal_title[:50]}",
-            details={"proposal_id": proposal_id, "reason": reason}
+            details={"proposal_id": proposal_id, "reason": reason},
         )
         return HTMLResponse(f"""
             <tr id="proposal-{proposal_id}" class="proposal-row rejected">
@@ -5257,9 +5520,12 @@ async def bulk_reject_proposals(
     for proposal_id in proposal_ids:
         # Get proposal details for learning
         async for session in get_session():
-            result = await session.execute(text("""
+            result = await session.execute(
+                text("""
                 SELECT title, project_id, priority FROM task_proposals WHERE id = :id
-            """), {"id": proposal_id})
+            """),
+                {"id": proposal_id},
+            )
             row = result.fetchone()
             if row:
                 await learn_from_rejection(
@@ -5269,7 +5535,7 @@ async def bulk_reject_proposals(
                         "reason_category": reason,
                         "project_id": row.project_id,
                         "priority": row.priority,
-                    }
+                    },
                 )
             break
 
@@ -5280,20 +5546,17 @@ async def bulk_reject_proposals(
         "proposals_bulk_rejected",
         "web_ui",
         summary=f"Bulk rejected {rejected_count} proposals",
-        details={"count": rejected_count, "reason": reason}
+        details={"count": rejected_count, "reason": reason},
     )
 
     # Redirect back to proposals page
-    return HTMLResponse(
-        content="",
-        status_code=303,
-        headers={"HX-Redirect": "/proposals"}
-    )
+    return HTMLResponse(content="", status_code=303, headers={"HX-Redirect": "/proposals"})
 
 
 # ========================================================================
 # Agent Inbox
 # ========================================================================
+
 
 @app.get("/inbox", response_class=HTMLResponse)
 async def inbox_page(request: Request, type: str | None = None):
@@ -5313,13 +5576,14 @@ async def inbox_page(request: Request, type: str | None = None):
             "items": items,
             "recent_decisions": recent_decisions,
             "filter_type": type,
-        }
+        },
     )
 
 
 # -------------------------------------------------------------------
 # Real-time Notifications SSE Endpoint
 # -------------------------------------------------------------------
+
 
 @app.get("/api/notifications/stream")
 async def notification_stream(_request: Request):
@@ -5337,7 +5601,7 @@ async def notification_stream(_request: Request):
     async def generate():
         try:
             # Send initial connection confirmation
-            yield "event: connected\ndata: {\"status\": \"connected\"}\n\n"
+            yield 'event: connected\ndata: {"status": "connected"}\n\n'
 
             while True:
                 try:
@@ -5347,6 +5611,10 @@ async def notification_stream(_request: Request):
                         parsed = json.loads(data)
                         if parsed.get("type") == "research_progress":
                             yield f"event: research_progress\ndata: {data}\n\n"
+                        elif parsed.get("type") == "react_step":
+                            yield f"event: react_step\ndata: {data}\n\n"
+                        elif parsed.get("type") == "text_chunk":
+                            yield f"event: text_chunk\ndata: {data}\n\n"
                         else:
                             yield f"event: notification\ndata: {data}\n\n"
                     except (json.JSONDecodeError, TypeError):
@@ -5366,7 +5634,7 @@ async def notification_stream(_request: Request):
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
-        }
+        },
     )
 
 
@@ -5383,11 +5651,13 @@ async def inbox_count():
     if total > 0:
         urgent = counts.get("urgent", 0)
         badge_style = "background: var(--danger);" if urgent > 0 else "background: var(--primary);"
-        return HTMLResponse(content=f"""
+        return HTMLResponse(
+            content=f"""
             <span style="display: inline-block; {badge_style} color: white; font-size: 0.65rem; padding: 0.1rem 0.4rem; border-radius: 10px; min-width: 16px; text-align: center;">
                 {total}
             </span>
-        """)
+        """
+        )
     else:
         return HTMLResponse(content="")
 
@@ -5496,8 +5766,7 @@ async def inbox_items_partial(request: Request, type: str | None = None):
     items = await inbox.get_pending_items(item_type=type)
 
     return templates.TemplateResponse(
-        "partials/inbox_items.html",
-        {"request": request, "items": items}
+        "partials/inbox_items.html", {"request": request, "items": items}
     )
 
 
@@ -5602,6 +5871,7 @@ async def approve_inbox_item(item_id: str):
     if item.item_type == "task_proposal":
         # Delegate to existing proposal approval
         from cognitex.agent.action_log import approve_proposal
+
         if item.source_id:
             await approve_proposal(item.source_id)
     elif item.item_type == "commitment_proposal":
@@ -5609,6 +5879,7 @@ async def approve_inbox_item(item_id: str):
         try:
             from cognitex.db.graph_schema import update_commitment
             from cognitex.db.neo4j import get_neo4j_session
+
             commitment_id = item.payload.get("commitment_id") or item.source_id
             if commitment_id:
                 async for session in get_neo4j_session():
@@ -5650,6 +5921,7 @@ async def approve_inbox_item(item_id: str):
     # Trigger expertise learning
     try:
         from cognitex.agent.expertise import get_expertise_manager
+
         em = get_expertise_manager()
         if item.item_type == "task_proposal":
             project_id = item.payload.get("project_id")
@@ -5657,19 +5929,15 @@ async def approve_inbox_item(item_id: str):
                 await em.self_improve(
                     domain=f"project:{project_id}",
                     action_type="task_approved",
-                    context={"title": item.title, "payload": item.payload}
+                    context={"title": item.title, "payload": item.payload},
                 )
         elif item.item_type == "context_pack":
             await em.self_improve(
-                domain="context_pack",
-                action_type="pack_approved",
-                context=item.payload
+                domain="context_pack", action_type="pack_approved", context=item.payload
             )
         elif item.item_type == "email_draft":
             await em.self_improve(
-                domain="email_drafting",
-                action_type="draft_approved",
-                context=item.payload
+                domain="email_drafting", action_type="draft_approved", context=item.payload
             )
     except Exception as e:
         logger.warning("Failed to trigger learning on approval", error=str(e))
@@ -5710,42 +5978,54 @@ async def approve_inbox_item(item_id: str):
                 "email_sent",
                 "web_ui",
                 summary=f"Sent email to {to}: {subject[:50]}",
-                details={"item_id": item_id, "to": to, "subject": subject, "message_id": message_id}
+                details={
+                    "item_id": item_id,
+                    "to": to,
+                    "subject": subject,
+                    "message_id": message_id,
+                },
             )
 
-            return HTMLResponse(content=f"""
+            return HTMLResponse(
+                content=f"""
                 <div class="inbox-item" style="background: #d1fae5; border-color: #a7f3d0; opacity: 0.8;">
                     <div class="inbox-item-title" style="color: #065f46;">
                         ✓ Email sent to {html.escape(to)}
                     </div>
                 </div>
-            """)
+            """
+            )
 
         except Exception as e:
             logger.error("Failed to send email", error=str(e))
-            return HTMLResponse(content=f"""
+            return HTMLResponse(
+                content=f"""
                 <div class="inbox-item" style="background: #fee2e2; border-color: #fca5a5;">
                     <div class="inbox-item-title" style="color: #991b1b;">
                         Failed to send email: {html.escape(str(e))}
                     </div>
                 </div>
-            """, status_code=500)
+            """,
+                status_code=500,
+            )
 
     await log_action(
         "inbox_item_approved",
         "web_ui",
         summary=f"Approved {item.item_type}: {item.title[:50]}",
-        details={"item_id": item_id, "item_type": item.item_type}
+        details={"item_id": item_id, "item_type": item.item_type},
     )
 
     # Return success message that fades out
-    return HTMLResponse(content=f"""
+    return HTMLResponse(
+        content=f"""
         <div class="inbox-item" style="background: #d1fae5; border-color: #a7f3d0; opacity: 0.8;">
             <div class="inbox-item-title" style="color: #065f46;">
                 ✓ Approved: {item.title}
             </div>
         </div>
-    """)
+    """
+    )
 
 
 @app.post("/api/inbox/{item_id}/edit-and-send", response_class=HTMLResponse)
@@ -5770,7 +6050,9 @@ async def edit_and_send_email(
         return HTMLResponse(content="<div class='inbox-item'>Item not found</div>", status_code=404)
 
     if item.item_type != "email_draft":
-        return HTMLResponse(content="<div class='inbox-item'>Not an email draft</div>", status_code=400)
+        return HTMLResponse(
+            content="<div class='inbox-item'>Not an email draft</div>", status_code=400
+        )
 
     # Calculate edit similarity (how much was changed)
     similarity = SequenceMatcher(None, original_body, body).ratio()
@@ -5809,6 +6091,7 @@ async def edit_and_send_email(
     # Trigger expertise learning with edit data
     try:
         from cognitex.agent.expertise import get_expertise_manager
+
         em = get_expertise_manager()
 
         # Learn from the edit patterns
@@ -5818,13 +6101,16 @@ async def edit_and_send_email(
             action_result={
                 "edit_ratio": edit_ratio,
                 "subject_changed": edit_analysis["subject_changed"],
-                "length_change_percent": (edit_analysis["length_change"] / max(1, edit_analysis["original_length"])) * 100,
+                "length_change_percent": (
+                    edit_analysis["length_change"] / max(1, edit_analysis["original_length"])
+                )
+                * 100,
             },
             context={
                 "recipient": to,
                 "original_body_preview": original_body[:200],
                 "final_body_preview": body[:200],
-            }
+            },
         )
 
         # If significant edits, store as a learning example
@@ -5865,7 +6151,8 @@ async def edit_and_send_email(
 
     except Exception as e:
         logger.error("Failed to send email", error=str(e), to=to)
-        return HTMLResponse(content=f"""
+        return HTMLResponse(
+            content=f"""
             <div class="inbox-item" style="background: #fee2e2; border-color: #fca5a5;">
                 <div class="inbox-item-title" style="color: #991b1b;">
                     Failed to send email: {html.escape(str(e))}
@@ -5874,7 +6161,9 @@ async def edit_and_send_email(
                     The email was not sent. Please try again or check your connection.
                 </div>
             </div>
-        """, status_code=500)
+        """,
+            status_code=500,
+        )
 
     # Mark item as approved
     await inbox.approve_item(item_id)
@@ -5890,12 +6179,13 @@ async def edit_and_send_email(
             "edit_ratio": edit_ratio,
             "similarity": similarity,
             "message_id": message_id,
-        }
+        },
     )
 
     # Return success message
     edit_note = f" (edited {edit_ratio:.0%})" if edit_ratio > 0.05 else ""
-    return HTMLResponse(content=f"""
+    return HTMLResponse(
+        content=f"""
         <div class="inbox-item" style="background: #d1fae5; border-color: #a7f3d0; opacity: 0.8;">
             <div class="inbox-item-title" style="color: #065f46;">
                 ✓ Email sent to {html.escape(to)}{edit_note}
@@ -5904,7 +6194,8 @@ async def edit_and_send_email(
                 Thanks for the edit - this helps improve future drafts!
             </div>
         </div>
-    """)
+    """
+    )
 
 
 @app.post("/api/inbox/{item_id}/decide", response_class=HTMLResponse)
@@ -5933,19 +6224,20 @@ async def decide_inbox_item(
         return HTMLResponse(content="<div class='inbox-item'>Item not found</div>", status_code=404)
 
     if item.item_type != "email_review":
-        return HTMLResponse(content="<div class='inbox-item'>Invalid item type for decision</div>", status_code=400)
+        return HTMLResponse(
+            content="<div class='inbox-item'>Invalid item type for decision</div>", status_code=400
+        )
 
     payload = item.payload or {}
 
     # Find the selected decision option
     decision_options = payload.get("decision_options", [])
-    selected_option = next(
-        (opt for opt in decision_options if opt.get("id") == decision),
-        None
-    )
+    selected_option = next((opt for opt in decision_options if opt.get("id") == decision), None)
 
     if not selected_option and decision != "archive":
-        return HTMLResponse(content="<div class='inbox-item'>Invalid decision option</div>", status_code=400)
+        return HTMLResponse(
+            content="<div class='inbox-item'>Invalid decision option</div>", status_code=400
+        )
 
     # Handle archive decision - just mark as decided, no draft needed
     if decision == "archive":
@@ -5955,16 +6247,18 @@ async def decide_inbox_item(
             "email_review_decided",
             "web_ui",
             summary=f"Archived email review: {item.title[:50]}",
-            details={"item_id": item_id, "decision": decision}
+            details={"item_id": item_id, "decision": decision},
         )
 
-        return HTMLResponse(content=f"""
+        return HTMLResponse(
+            content=f"""
             <div class="inbox-item" style="background: #f3f4f6; border-color: #d1d5db; opacity: 0.8;">
                 <div class="inbox-item-title" style="color: #4b5563;">
                     ✓ Archived: {item.title}
                 </div>
             </div>
-        """)
+        """
+        )
 
     # Generate a draft response based on decision + document analysis
     from cognitex.agent.core import get_agent
@@ -5992,11 +6286,11 @@ async def decide_inbox_item(
     draft_prompt = f"""Please draft an email response based on the following:
 
 **Original Email:**
-- From: {payload.get('from_name') or payload.get('from', 'Unknown')}
-- Subject: {payload.get('subject', 'No subject')}
-- Key Ask: {payload.get('key_ask', 'Unknown')}
+- From: {payload.get("from_name") or payload.get("from", "Unknown")}
+- Subject: {payload.get("subject", "No subject")}
+- Key Ask: {payload.get("key_ask", "Unknown")}
 
-**User's Decision:** {selected_option.get('label') if selected_option else decision}
+**User's Decision:** {selected_option.get("label") if selected_option else decision}
 {f"**User's Notes:** {custom_notes}" if custom_notes else ""}
 
 **Response Template to use as starting point:**
@@ -6064,23 +6358,27 @@ Return ONLY the email body text, no subject line or headers."""
                 "item_id": item_id,
                 "decision": decision,
                 "draft_id": str(draft_item.id),
-            }
+            },
         )
 
         # Return success message with link to see draft
-        return HTMLResponse(content=f"""
+        return HTMLResponse(
+            content=f"""
             <div class="inbox-item" style="background: #dbeafe; border-color: #93c5fd;">
                 <div class="inbox-item-title" style="color: #1e40af;">
-                    ✓ Draft created: Re: {payload.get('subject', '')[:50]}
+                    ✓ Draft created: Re: {payload.get("subject", "")[:50]}
                 </div>
                 <div class="inbox-item-summary" style="margin-top: 0.5rem;">
-                    Decision: <strong>{selected_option.get('label') if selected_option else decision}</strong><br>
+                    Decision: <strong>{selected_option.get("label") if selected_option else decision}</strong><br>
                     <small>Check the Emails filter to review and send the draft.</small>
                 </div>
             </div>
-        """)
+        """
+        )
 
-    return HTMLResponse(content="<div class='inbox-item'>Error creating draft</div>", status_code=500)
+    return HTMLResponse(
+        content="<div class='inbox-item'>Error creating draft</div>", status_code=500
+    )
 
 
 @app.post("/api/inbox/{item_id}/reject", response_class=HTMLResponse)
@@ -6102,12 +6400,14 @@ async def reject_inbox_item(
     # Handle type-specific rejection
     if item.item_type == "task_proposal" and item.source_id:
         from cognitex.agent.action_log import reject_proposal
+
         await reject_proposal(item.source_id, f"{reason}: {reason_text}" if reason_text else reason)
     elif item.item_type == "commitment_proposal":
         # Abandon commitment
         try:
             from cognitex.db.graph_schema import update_commitment
             from cognitex.db.neo4j import get_neo4j_session
+
             commitment_id = item.payload.get("commitment_id") or item.source_id
             if commitment_id:
                 async for session in get_neo4j_session():
@@ -6127,19 +6427,20 @@ async def reject_inbox_item(
             "reason_category": reason,
             "reason_text": reason_text,
             **item.payload,
-        }
+        },
     )
 
     await log_action(
         "inbox_item_rejected",
         "web_ui",
         summary=f"Rejected {item.item_type}: {item.title[:50]} ({reason})",
-        details={"item_id": item_id, "item_type": item.item_type, "reason": reason}
+        details={"item_id": item_id, "item_type": item.item_type, "reason": reason},
     )
 
     # Route to skill feedback
     try:
         from cognitex.agent.skill_feedback_router import route_rejection_to_skill
+
         await route_rejection_to_skill(
             proposal_type=item.item_type,
             reason=reason,
@@ -6148,13 +6449,15 @@ async def reject_inbox_item(
     except Exception:
         pass
 
-    return HTMLResponse(content=f"""
+    return HTMLResponse(
+        content=f"""
         <div class="inbox-item" style="background: #fee2e2; border-color: #fecaca; opacity: 0.8;">
             <div class="inbox-item-title" style="color: #991b1b;">
                 ✗ Rejected: {item.title}
             </div>
         </div>
-    """)
+    """
+    )
 
 
 @app.post("/api/inbox/{item_id}/dismiss", response_class=HTMLResponse)
@@ -6175,16 +6478,18 @@ async def dismiss_inbox_item(item_id: str):
         "inbox_item_dismissed",
         "web_ui",
         summary=f"Dismissed {item.item_type}: {item.title[:50]}",
-        details={"item_id": item_id, "item_type": item.item_type}
+        details={"item_id": item_id, "item_type": item.item_type},
     )
 
-    return HTMLResponse(content=f"""
+    return HTMLResponse(
+        content=f"""
         <div class="inbox-item" style="background: #f1f5f9; border-color: #e2e8f0; opacity: 0.8;">
             <div class="inbox-item-title" style="color: #64748b;">
                 Dismissed: {item.title}
             </div>
         </div>
-    """)
+    """
+    )
 
 
 @app.post("/api/inbox/{item_id}/skip", response_class=HTMLResponse)
@@ -6217,16 +6522,18 @@ async def skip_inbox_email(
         "inbox_email_skipped",
         "web_ui",
         summary=f"Skipped email: {item.title[:50]}",
-        details={"item_id": item_id, "item_type": item.item_type, "reason": reason}
+        details={"item_id": item_id, "item_type": item.item_type, "reason": reason},
     )
 
-    return HTMLResponse(content=f"""
+    return HTMLResponse(
+        content=f"""
         <div class="inbox-item" style="background: #fef3c7; border-color: #fde68a; opacity: 0.8;">
             <div class="inbox-item-title" style="color: #92400e;">
                 Skipped: {item.title}
             </div>
         </div>
-    """)
+    """
+    )
 
 
 async def _record_email_skip_decision(item, reason: str | None) -> None:
@@ -6266,6 +6573,7 @@ async def _record_email_skip_decision(item, reason: str | None) -> None:
         operating_mode = None
         try:
             from cognitex.agent.state_model import get_state_estimator
+
             state = await get_state_estimator().get_current_state()
             operating_mode = state.mode.value if state else None
         except Exception:
@@ -6331,11 +6639,12 @@ async def mark_inbox_item_helpful(item_id: str, helpful: bool = True):
     # Trigger learning
     try:
         from cognitex.agent.expertise import get_expertise_manager
+
         em = get_expertise_manager()
         await em.self_improve(
             domain="context_pack",
             action_type="pack_feedback",
-            context={"helpful": helpful, **item.payload}
+            context={"helpful": helpful, **item.payload},
         )
     except Exception as e:
         logger.warning("Failed to trigger learning on feedback", error=str(e))
@@ -6344,7 +6653,7 @@ async def mark_inbox_item_helpful(item_id: str, helpful: bool = True):
         "inbox_item_feedback",
         "web_ui",
         summary=f"Marked {item.item_type} as {'helpful' if helpful else 'not helpful'}",
-        details={"item_id": item_id, "helpful": helpful}
+        details={"item_id": item_id, "helpful": helpful},
     )
 
     return {"success": True, "helpful": helpful}
@@ -6366,14 +6675,20 @@ async def rebuild_context_pack(request: Request, item_id: str):
     item = await inbox.get_item(item_id)
 
     if not item:
-        return HTMLResponse(content="<div class='alert alert-danger'>Item not found</div>", status_code=404)
+        return HTMLResponse(
+            content="<div class='alert alert-danger'>Item not found</div>", status_code=404
+        )
 
     if item.item_type != "context_pack":
-        return HTMLResponse(content="<div class='alert alert-danger'>Not a context pack</div>", status_code=400)
+        return HTMLResponse(
+            content="<div class='alert alert-danger'>Not a context pack</div>", status_code=400
+        )
 
     event_id = item.payload.get("event_id")
     if not event_id:
-        return HTMLResponse(content="<div class='alert alert-danger'>No event ID in pack</div>", status_code=400)
+        return HTMLResponse(
+            content="<div class='alert alert-danger'>No event ID in pack</div>", status_code=400
+        )
 
     try:
         # Get the calendar event
@@ -6381,7 +6696,10 @@ async def rebuild_context_pack(request: Request, item_id: str):
         event = calendar.get_event(event_id)
 
         if not event:
-            return HTMLResponse(content="<div class='alert alert-danger'>Calendar event not found</div>", status_code=404)
+            return HTMLResponse(
+                content="<div class='alert alert-danger'>Calendar event not found</div>",
+                status_code=404,
+            )
 
         # Determine appropriate build stage based on time until event
         event_time_str = event.get("start", {}).get("dateTime", "")
@@ -6480,21 +6798,20 @@ async def rebuild_context_pack(request: Request, item_id: str):
             "context_pack_rebuilt",
             "web_ui",
             summary=f"Rebuilt context pack for: {summary}",
-            details={"event_id": event_id, "stage": stage.value, "readiness": pack.readiness_score}
+            details={"event_id": event_id, "stage": stage.value, "readiness": pack.readiness_score},
         )
 
         # Re-fetch the updated item and render it
         updated_item = await inbox.get_item(item_id)
         return templates.TemplateResponse(
-            "partials/inbox_item_single.html",
-            {"request": request, "item": updated_item}
+            "partials/inbox_item_single.html", {"request": request, "item": updated_item}
         )
 
     except Exception as e:
         logger.warning("Failed to rebuild context pack", error=str(e), item_id=item_id)
         return HTMLResponse(
             content=f"<div class='alert alert-danger'>Failed to rebuild: {html.escape(str(e))}</div>",
-            status_code=500
+            status_code=500,
         )
 
 
@@ -6529,7 +6846,7 @@ async def save_inbox_notes(item_id: str, notes: str = Form(...)):
         "inbox_item_notes",
         "web_ui",
         summary=f"User added notes to {item.item_type}: {item.title[:50]}",
-        details={"item_id": item_id, "notes": notes[:500], "item_type": item.item_type}
+        details={"item_id": item_id, "notes": notes[:500], "item_type": item.item_type},
     )
 
     return {"success": True, "message": "Notes saved - thanks for the feedback!"}
@@ -6552,7 +6869,8 @@ async def context_packs_page(request: Request):
     past_items = []
     async for session in get_session():
         try:
-            result = await session.execute(text("""
+            result = await session.execute(
+                text("""
                 SELECT id, item_type, status, priority, title, summary,
                        payload, source_id, source_type, created_at,
                        decided_at, decision_reason, expires_at
@@ -6561,8 +6879,10 @@ async def context_packs_page(request: Request):
                   AND status IN ('approved', 'dismissed')
                 ORDER BY decided_at DESC
                 LIMIT 20
-            """))
+            """)
+            )
             from cognitex.services.inbox import InboxItem
+
             for row in result.fetchall():
                 past_items.append(InboxItem.from_row(row))
         except Exception as e:
@@ -6575,7 +6895,7 @@ async def context_packs_page(request: Request):
             "request": request,
             "pending_items": pending_items,
             "past_items": past_items,
-        }
+        },
     )
 
 
@@ -6622,7 +6942,9 @@ async def learning_page(request: Request):
         calibration = {
             "samples": overall.get("total_records", 0),
             "avg_error": (overall.get("overall_pace_factor", 1.0) - 1.0),  # Convert pace to error
-            "avg_actual_minutes": overall.get("total_hours_tracked", 0) * 60 / max(overall.get("total_records", 1), 1),
+            "avg_actual_minutes": overall.get("total_hours_tracked", 0)
+            * 60
+            / max(overall.get("total_records", 1), 1),
             "by_project": raw_calibration.get("by_project", {}),
             "insights": raw_calibration.get("insights", []),
         }
@@ -6652,23 +6974,27 @@ async def learning_page(request: Request):
         from cognitex.db.postgres import get_session as get_postgres_session
 
         async for session in get_postgres_session():
-            result = await session.execute(text("""
+            result = await session.execute(
+                text("""
                 SELECT pattern_type, pattern_data, confidence, sample_size, last_updated
                 FROM learned_patterns
                 WHERE confidence >= 0.3
                 ORDER BY confidence DESC, sample_size DESC
                 LIMIT 10
-            """))
+            """)
+            )
             rows = result.fetchall()
             for row in rows:
                 pattern_data = row[1] if isinstance(row[1], dict) else {}
-                learned_patterns.append({
-                    "pattern_type": row[0],
-                    "description": pattern_data.get("description", str(pattern_data)[:100]),
-                    "confidence": row[2],
-                    "sample_count": row[3],
-                    "created_at": row[4],
-                })
+                learned_patterns.append(
+                    {
+                        "pattern_type": row[0],
+                        "description": pattern_data.get("description", str(pattern_data)[:100]),
+                        "confidence": row[2],
+                        "sample_count": row[3],
+                        "created_at": row[4],
+                    }
+                )
             break
     except Exception as e:
         logger.warning("Failed to get learned patterns", error=str(e))
@@ -6692,13 +7018,15 @@ async def learning_page(request: Request):
         from cognitex.db.postgres import get_session as get_pg_session
 
         async for session in get_pg_session():
-            result = await session.execute(text("""
+            result = await session.execute(
+                text("""
                 SELECT timestamp, details
                 FROM agent_actions
                 WHERE action_type = 'policy_update' AND status IS DISTINCT FROM 'failed'
                 ORDER BY timestamp DESC
                 LIMIT 1
-            """))
+            """)
+            )
             row = result.fetchone()
             if row:
                 details = row[1] if isinstance(row[1], dict) else {}
@@ -6716,23 +7044,28 @@ async def learning_page(request: Request):
     task_rejections = []
     try:
         from cognitex.db.postgres import get_session as get_pg_session2
+
         async for session in get_pg_session2():
-            result = await session.execute(text("""
+            result = await session.execute(
+                text("""
                 SELECT timestamp, summary, details
                 FROM agent_actions
                 WHERE action_type = 'task_rejected'
                 ORDER BY timestamp DESC
                 LIMIT 10
-            """))
+            """)
+            )
             for row in result.fetchall():
                 details = row[2] if isinstance(row[2], dict) else {}
-                task_rejections.append({
-                    "timestamp": row[0].strftime("%Y-%m-%d %H:%M") if row[0] else "",
-                    "summary": row[1],
-                    "reason": details.get("reason", ""),
-                    "email_sender": details.get("email_sender", ""),
-                    "email_subject": details.get("email_subject", ""),
-                })
+                task_rejections.append(
+                    {
+                        "timestamp": row[0].strftime("%Y-%m-%d %H:%M") if row[0] else "",
+                        "summary": row[1],
+                        "reason": details.get("reason", ""),
+                        "email_sender": details.get("email_sender", ""),
+                        "email_subject": details.get("email_subject", ""),
+                    }
+                )
             break
     except Exception as e:
         logger.warning("Failed to get task rejections", error=str(e))
@@ -6741,32 +7074,39 @@ async def learning_page(request: Request):
     decision_summary = {"total": 0, "by_action": {}, "recent": []}
     try:
         from cognitex.db.postgres import get_session as get_pg_session3
+
         async for session in get_pg_session3():
             # Total count and by action type
-            result = await session.execute(text("""
+            result = await session.execute(
+                text("""
                 SELECT action_type, COUNT(*) as count
                 FROM decision_traces
                 GROUP BY action_type
                 ORDER BY count DESC
-            """))
+            """)
+            )
             for row in result.fetchall():
                 decision_summary["by_action"][row[0]] = row[1]
                 decision_summary["total"] += row[1]
 
             # Recent decisions
-            result = await session.execute(text("""
+            result = await session.execute(
+                text("""
                 SELECT created_at, action_type, status, quality_score
                 FROM decision_traces
                 ORDER BY created_at DESC
                 LIMIT 10
-            """))
+            """)
+            )
             for row in result.fetchall():
-                decision_summary["recent"].append({
-                    "timestamp": row[0].strftime("%Y-%m-%d %H:%M") if row[0] else "",
-                    "action_type": row[1],
-                    "decision": row[2],
-                    "quality_score": row[3],
-                })
+                decision_summary["recent"].append(
+                    {
+                        "timestamp": row[0].strftime("%Y-%m-%d %H:%M") if row[0] else "",
+                        "action_type": row[1],
+                        "decision": row[2],
+                        "quality_score": row[3],
+                    }
+                )
             break
     except Exception as e:
         logger.warning("Failed to get decision traces", error=str(e))
@@ -6775,10 +7115,13 @@ async def learning_page(request: Request):
     pending_proposals_count = 0
     try:
         from cognitex.db.postgres import get_session as get_pg_session4
+
         async for session in get_pg_session4():
-            result = await session.execute(text("""
+            result = await session.execute(
+                text("""
                 SELECT COUNT(*) FROM task_proposals WHERE status = 'pending'
-            """))
+            """)
+            )
             row = result.fetchone()
             pending_proposals_count = row[0] if row else 0
             break
@@ -6857,6 +7200,7 @@ async def api_learning_run_update():
 # Agent Expertise System
 # ========================================================================
 
+
 @app.get("/expertise", response_class=HTMLResponse)
 async def expertise_page(_request: Request):
     """Agent Expertise dashboard - view and manage agent mental models."""
@@ -6903,14 +7247,14 @@ async def expertise_page(_request: Request):
 
         expertise_rows += f"""
         <tr>
-            <td><strong>{html.escape(exp.get('title', exp.get('domain', '')))}</strong></td>
+            <td><strong>{html.escape(exp.get("title", exp.get("domain", "")))}</strong></td>
             <td><span style="background: {badge_color}; color: white; padding: 2px 8px; border-radius: 3px; font-size: 0.75rem;">{domain_type}</span></td>
-            <td>{exp.get('learnings_count', 0)}</td>
-            <td>v{exp.get('version', 1)}</td>
-            <td>{last_improved or '-'}</td>
+            <td>{exp.get("learnings_count", 0)}</td>
+            <td>v{exp.get("version", 1)}</td>
+            <td>{last_improved or "-"}</td>
             <td>
                 <button class="btn btn-secondary btn-sm"
-                        hx-get="/api/expertise/{exp.get('id')}"
+                        hx-get="/api/expertise/{exp.get("id")}"
                         hx-target="#expertise-detail"
                         hx-swap="innerHTML">View</button>
             </td>
@@ -6920,18 +7264,22 @@ async def expertise_page(_request: Request):
     learning_items = ""
     for learn in recent_learnings:
         content = learn.get("content", {})
-        content_text = content.get("content", str(content))[:100] if isinstance(content, dict) else str(content)[:100]
+        content_text = (
+            content.get("content", str(content))[:100]
+            if isinstance(content, dict)
+            else str(content)[:100]
+        )
         learning_items += f"""
         <div style="padding: 0.5rem; border-bottom: 1px solid #eee;">
             <div style="display: flex; justify-content: space-between; align-items: center;">
-                <span style="font-weight: 500;">{html.escape(learn.get('domain', '')[:30])}</span>
-                <span style="font-size: 0.75rem; color: #6b7280;">{learn.get('type', '')}</span>
+                <span style="font-weight: 500;">{html.escape(learn.get("domain", "")[:30])}</span>
+                <span style="font-size: 0.75rem; color: #6b7280;">{learn.get("type", "")}</span>
             </div>
             <div style="font-size: 0.85rem; color: #4b5563; margin-top: 0.25rem;">
                 {html.escape(content_text)}...
             </div>
             <div style="font-size: 0.7rem; color: #9ca3af; margin-top: 0.25rem;">
-                {learn.get('source_action', '')} | {learn.get('created_at', '')[:10] if learn.get('created_at') else ''}
+                {learn.get("source_action", "")} | {learn.get("created_at", "")[:10] if learn.get("created_at") else ""}
             </div>
         </div>
         """
@@ -6973,19 +7321,19 @@ async def expertise_page(_request: Request):
 
             <div class="stats">
                 <div class="stat">
-                    <div class="stat-value">{stats['total_domains']}</div>
+                    <div class="stat-value">{stats["total_domains"]}</div>
                     <div class="stat-label">Expertise Domains</div>
                 </div>
                 <div class="stat">
-                    <div class="stat-value">{stats['total_learnings']}</div>
+                    <div class="stat-value">{stats["total_learnings"]}</div>
                     <div class="stat-label">Total Learnings</div>
                 </div>
                 <div class="stat">
-                    <div class="stat-value">{stats['project_count']}</div>
+                    <div class="stat-value">{stats["project_count"]}</div>
                     <div class="stat-label">Project Experts</div>
                 </div>
                 <div class="stat">
-                    <div class="stat-value">{stats['skill_count']}</div>
+                    <div class="stat-value">{stats["skill_count"]}</div>
                     <div class="stat-label">Skill Experts</div>
                 </div>
             </div>
@@ -7074,7 +7422,9 @@ async def get_expertise_detail(expertise_id: str):
                         item_text = str(item)
                     content_html += f"<li>{html.escape(str(item_text)[:100])}</li>"
                 if len(value) > 5:
-                    content_html += f"<li style='color: #6b7280;'>... and {len(value) - 5} more</li>"
+                    content_html += (
+                        f"<li style='color: #6b7280;'>... and {len(value) - 5} more</li>"
+                    )
                 content_html += "</ul>"
         else:
             content_html += f"<span style='color: #4b5563;'>{html.escape(str(value)[:200])}</span>"
@@ -7084,11 +7434,11 @@ async def get_expertise_detail(expertise_id: str):
     content_html += "</div>"
 
     return HTMLResponse(f"""
-        <h3 style="margin-top: 0;">{html.escape(full_exp.get('title', full_exp.get('domain', '')))}</h3>
+        <h3 style="margin-top: 0;">{html.escape(full_exp.get("title", full_exp.get("domain", "")))}</h3>
         <p style="font-size: 0.8rem; color: #6b7280;">
-            Domain: {html.escape(full_exp.get('domain', ''))} |
-            Version: {full_exp.get('version', 1)} |
-            Learnings: {full_exp.get('learnings_count', 0)}
+            Domain: {html.escape(full_exp.get("domain", ""))} |
+            Version: {full_exp.get("version", 1)} |
+            Learnings: {full_exp.get("learnings_count", 0)}
         </p>
         {content_html}
     """)
@@ -7097,6 +7447,7 @@ async def get_expertise_detail(expertise_id: str):
 # ========================================================================
 # Phase 5.3: Proactive Task Suggestions
 # ========================================================================
+
 
 @app.get("/api/tasks/insights")
 async def get_task_insights():
@@ -7143,31 +7494,33 @@ async def get_task_insights_html():
             for p in insights["stalled_projects"]:
                 days = p.get("days_stalled", "?")
                 html_parts.append(
-                    f'<li><strong>{html.escape(p.get("title", "Untitled"))}</strong> - '
-                    f'{days} days since last activity</li>'
+                    f"<li><strong>{html.escape(p.get('title', 'Untitled'))}</strong> - "
+                    f"{days} days since last activity</li>"
                 )
-            html_parts.append('</ul></div>')
+            html_parts.append("</ul></div>")
 
         # Large tasks
         if insights.get("large_tasks_needing_breakdown"):
             html_parts.append('<div class="insight-section"><h5>Tasks Needing Breakdown</h5><ul>')
             for t in insights["large_tasks_needing_breakdown"]:
                 html_parts.append(
-                    f'<li><strong>{html.escape(t.get("title", "Untitled")[:40])}</strong> - '
-                    f'{html.escape(t.get("breakdown_reason", "Complex"))}</li>'
+                    f"<li><strong>{html.escape(t.get('title', 'Untitled')[:40])}</strong> - "
+                    f"{html.escape(t.get('breakdown_reason', 'Complex'))}</li>"
                 )
-            html_parts.append('</ul></div>')
+            html_parts.append("</ul></div>")
 
         # Blocking tasks
         if insights.get("blocking_tasks"):
-            html_parts.append('<div class="insight-section"><h5>Blocking Tasks (unblock these first!)</h5><ul>')
+            html_parts.append(
+                '<div class="insight-section"><h5>Blocking Tasks (unblock these first!)</h5><ul>'
+            )
             for t in insights["blocking_tasks"]:
                 count = t.get("blocks_count", 0)
                 html_parts.append(
-                    f'<li><strong>{html.escape(t.get("title", "Untitled")[:40])}</strong> - '
-                    f'blocking {count} other task(s)</li>'
+                    f"<li><strong>{html.escape(t.get('title', 'Untitled')[:40])}</strong> - "
+                    f"blocking {count} other task(s)</li>"
                 )
-            html_parts.append('</ul></div>')
+            html_parts.append("</ul></div>")
 
         # Chronic deferrals
         if insights.get("chronic_deferrals"):
@@ -7175,27 +7528,27 @@ async def get_task_insights_html():
             for t in insights["chronic_deferrals"]:
                 count = t.get("defer_count", 0)
                 html_parts.append(
-                    f'<li><strong>{html.escape(t.get("title", "Untitled")[:40])}</strong> - '
-                    f'deferred {count}x ({html.escape(t.get("suggestion", ""))})</li>'
+                    f"<li><strong>{html.escape(t.get('title', 'Untitled')[:40])}</strong> - "
+                    f"deferred {count}x ({html.escape(t.get('suggestion', ''))})</li>"
                 )
-            html_parts.append('</ul></div>')
+            html_parts.append("</ul></div>")
 
         if not html_parts:
-            return HTMLResponse('''
+            return HTMLResponse("""
                 <div class="alert alert-success">
                     <strong>All clear!</strong> No urgent task issues detected.
                 </div>
-            ''')
+            """)
 
-        return HTMLResponse(f'''
+        return HTMLResponse(f"""
             <style>
                 .insight-section {{ margin-bottom: 1rem; }}
                 .insight-section h5 {{ color: #b45309; margin-bottom: 0.5rem; }}
                 .insight-section ul {{ margin: 0; padding-left: 1.5rem; }}
                 .insight-section li {{ margin-bottom: 0.25rem; }}
             </style>
-            {''.join(html_parts)}
-        ''')
+            {"".join(html_parts)}
+        """)
 
     return HTMLResponse('<div class="alert alert-warning">Failed to load insights</div>')
 
@@ -7215,21 +7568,21 @@ async def extract_email_commitments():
         commitments = await observer.extract_commitments_from_emails(days_back=7, limit=15)
 
         if not commitments:
-            return HTMLResponse('''
+            return HTMLResponse("""
                 <div class="alert alert-info">
                     No commitments found in recent sent emails.
                 </div>
-            ''')
+            """)
 
         # Build HTML for commitments
         commitment_rows = []
         for c in commitments:
             commitment_rows.append(f'''
                 <tr>
-                    <td>{html.escape(c.get('action', 'Unknown')[:50])}</td>
-                    <td>{html.escape(c.get('deadline', 'Not specified')[:20])}</td>
-                    <td>{html.escape(c.get('recipient', 'Unknown')[:30])}</td>
-                    <td>{html.escape(c.get('email_subject', '')[:30])}</td>
+                    <td>{html.escape(c.get("action", "Unknown")[:50])}</td>
+                    <td>{html.escape(c.get("deadline", "Not specified")[:20])}</td>
+                    <td>{html.escape(c.get("recipient", "Unknown")[:30])}</td>
+                    <td>{html.escape(c.get("email_subject", "")[:30])}</td>
                     <td>
                         <button class="btn btn-sm btn-primary"
                             hx-post="/api/tasks/create-from-commitment"
@@ -7242,7 +7595,7 @@ async def extract_email_commitments():
                 </tr>
             ''')
 
-        return HTMLResponse(f'''
+        return HTMLResponse(f"""
             <div class="alert alert-info" style="margin-bottom: 1rem;">
                 Found {len(commitments)} potential commitments in recent emails.
             </div>
@@ -7257,10 +7610,10 @@ async def extract_email_commitments():
                     </tr>
                 </thead>
                 <tbody>
-                    {''.join(commitment_rows)}
+                    {"".join(commitment_rows)}
                 </tbody>
             </table>
-        ''')
+        """)
 
     return HTMLResponse('<div class="alert alert-warning">Failed to extract commitments</div>')
 
@@ -7268,6 +7621,7 @@ async def extract_email_commitments():
 # ========================================================================
 # Phase 5.4: Daily Momentum System
 # ========================================================================
+
 
 @app.get("/api/momentum/today")
 async def get_todays_momentum():
@@ -7327,12 +7681,14 @@ async def get_todays_momentum():
         weekly_momentum = []
         for day, stats in sorted(daily_stats.items()):
             pct = (stats["completed"] / stats["total"] * 100) if stats["total"] > 0 else 0
-            weekly_momentum.append({
-                "date": day,
-                "total": stats["total"],
-                "completed": stats["completed"],
-                "percentage": pct,
-            })
+            weekly_momentum.append(
+                {
+                    "date": day,
+                    "total": stats["total"],
+                    "completed": stats["completed"],
+                    "percentage": pct,
+                }
+            )
 
         return {
             "date": today,
@@ -7377,28 +7733,32 @@ async def get_momentum_html():
     for md in must_dos:
         checked = "checked" if md.get("completed") else ""
         style = "text-decoration: line-through; opacity: 0.7;" if md.get("completed") else ""
-        must_do_items.append(f'''
+        must_do_items.append(f"""
             <div class="must-do-item" style="display: flex; align-items: center; margin-bottom: 0.5rem; {style}">
                 <input type="checkbox" {checked}
-                    hx-post="/api/momentum/toggle/{md['id']}"
+                    hx-post="/api/momentum/toggle/{md["id"]}"
                     hx-target="#momentum-widget"
                     hx-swap="innerHTML"
                     style="margin-right: 0.75rem; width: 1.2rem; height: 1.2rem;">
-                <span>{html.escape(md.get('title', 'Untitled')[:50])}</span>
+                <span>{html.escape(md.get("title", "Untitled")[:50])}</span>
             </div>
-        ''')
+        """)
 
     # Progress bar
     pct = stats.get("percentage", 0)
     bar_color = "#22c55e" if pct >= 100 else "#eab308" if pct >= 50 else "#ef4444"
 
-    streak_badge = f'<span class="badge bg-success" style="margin-left: 1rem;">{streak} day streak!</span>' if streak > 0 else ''
+    streak_badge = (
+        f'<span class="badge bg-success" style="margin-left: 1rem;">{streak} day streak!</span>'
+        if streak > 0
+        else ""
+    )
 
-    return HTMLResponse(f'''
+    return HTMLResponse(f"""
         <div id="momentum-widget">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
                 <h5 style="margin: 0;">Today's Must-Dos</h5>
-                <span>{stats.get('completed', 0)}/{stats.get('total', 0)} complete {streak_badge}</span>
+                <span>{stats.get("completed", 0)}/{stats.get("total", 0)} complete {streak_badge}</span>
             </div>
 
             <div class="progress" style="height: 8px; margin-bottom: 1rem; background: #e5e7eb;">
@@ -7406,7 +7766,7 @@ async def get_momentum_html():
             </div>
 
             <div class="must-do-list">
-                {''.join(must_do_items) if must_do_items else '<p class="text-muted">No must-dos set for today. Add some below!</p>'}
+                {"".join(must_do_items) if must_do_items else '<p class="text-muted">No must-dos set for today. Add some below!</p>'}
             </div>
 
             <form hx-post="/api/momentum/add"
@@ -7418,7 +7778,7 @@ async def get_momentum_html():
                 <button type="submit" class="btn btn-primary btn-sm">Add</button>
             </form>
         </div>
-    ''')
+    """)
 
 
 @app.post("/api/momentum/add")
@@ -7458,12 +7818,15 @@ async def add_must_do(title: Annotated[str, Form()]):
         })
         RETURN md.id as id
         """
-        await session.run(create_query, {
-            "id": must_do_id,
-            "title": title.strip(),
-            "today": today,
-            "priority": priority,
-        })
+        await session.run(
+            create_query,
+            {
+                "id": must_do_id,
+                "title": title.strip(),
+                "today": today,
+                "priority": priority,
+            },
+        )
 
         logger.info("Must-do added", id=must_do_id, title=title[:30])
 
@@ -7561,13 +7924,15 @@ async def get_weekly_momentum():
                     trend = "down"
                 else:
                     trend = "stable"
-            weekly_data.append({
-                "week_start": week,
-                "total": stats["total"],
-                "completed": stats["completed"],
-                "percentage": round(pct, 1),
-                "trend": trend,
-            })
+            weekly_data.append(
+                {
+                    "week_start": week,
+                    "total": stats["total"],
+                    "completed": stats["completed"],
+                    "percentage": round(pct, 1),
+                    "trend": trend,
+                }
+            )
             prev_pct = pct
 
         # Calculate overall momentum score
@@ -7581,7 +7946,9 @@ async def get_weekly_momentum():
             "weeks": weekly_data,
             "momentum_score": momentum_score,
             "total_days_tracked": len({item.get("date") for item in data if item.get("date")}),
-            "current_streak": calculate_streak([{"percentage": w["percentage"]} for w in weekly_data]),
+            "current_streak": calculate_streak(
+                [{"percentage": w["percentage"]} for w in weekly_data]
+            ),
         }
 
     return {"error": "Failed to get weekly momentum"}
@@ -7598,7 +7965,8 @@ async def api_generate_briefing(_request: Request):
     # Convert markdown to HTML safely
     try:
         import markdown
-        briefing_html = markdown.markdown(briefing, extensions=['tables', 'fenced_code'])
+
+        briefing_html = markdown.markdown(briefing, extensions=["tables", "fenced_code"])
     except ImportError:
         # Fallback: escape and wrap in pre tag
         briefing_html = f"<pre style='white-space: pre-wrap;'>{html.escape(briefing)}</pre>"
@@ -7620,40 +7988,69 @@ async def chat_page():
 @app.post("/api/chat")
 async def api_chat(request: Request):
     """Send a message to the agent and get a response."""
+    import asyncio
+
     from cognitex.agent.core import Agent
 
-    data = await request.json()
-    message = data.get("message", "").strip()
+    try:
+        data = await request.json()
+        message = data.get("message", "").strip()
+    except Exception:
+        return JSONResponse({"error": "Invalid request body"}, status_code=400)
 
     if not message:
         return JSONResponse({"error": "Message cannot be empty"}, status_code=400)
 
     # Intercept slash commands before agent
     if message.startswith("/"):
-        from cognitex.agent.slash_commands import get_slash_registry
+        try:
+            from cognitex.agent.slash_commands import get_slash_registry
 
-        registry = get_slash_registry()
-        if not registry._initialized:
-            await registry.initialize()
-        result = await registry.dispatch(message)
-        if result.handled:
-            return JSONResponse({
-                "response": result.response,
-                "approvals": [],
-                "is_command": True,
-            })
+            registry = get_slash_registry()
+            if not registry._initialized:
+                await registry.initialize()
+            result = await registry.dispatch(message)
+            if result.handled:
+                return JSONResponse(
+                    {
+                        "response": result.response,
+                        "approvals": [],
+                        "is_command": True,
+                    }
+                )
+        except Exception as e:
+            return JSONResponse({"error": f"Command error: {e}"}, status_code=500)
 
     try:
         agent = Agent()
         await agent.initialize()
-        response, approval_ids = await agent.chat_with_approvals(message)
+        # 5-minute timeout — browser automation can be slow but shouldn't hang forever
+        response, approval_ids = await asyncio.wait_for(
+            agent.chat_with_approvals(message),
+            timeout=300.0,
+        )
 
-        return JSONResponse({
-            "response": response,
-            "approvals": approval_ids,
-        })
+        return JSONResponse(
+            {
+                "response": response,
+                "approvals": approval_ids,
+            }
+        )
+    except TimeoutError:
+        return JSONResponse(
+            {"error": "Agent timed out after 5 minutes. Try a simpler query."},
+            status_code=504,
+        )
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/chat/progress")
+async def api_chat_progress():
+    """Poll agent progress — returns current ReAct steps."""
+    from cognitex.agent.core import get_agent_progress
+
+    return JSONResponse(get_agent_progress())
 
 
 @app.post("/api/chat/clear")
@@ -7698,12 +8095,13 @@ async def api_chat_history():
             context = json.loads(data)
             interactions = context.get("interactions", [])
             # Return only role + content for rendering
-            return JSONResponse({
-                "interactions": [
-                    {"role": i["role"], "content": i["content"]}
-                    for i in interactions
-                ],
-            })
+            return JSONResponse(
+                {
+                    "interactions": [
+                        {"role": i["role"], "content": i["content"]} for i in interactions
+                    ],
+                }
+            )
         return JSONResponse({"interactions": []})
     except Exception as e:
         return JSONResponse({"interactions": [], "error": str(e)})
@@ -7845,37 +8243,46 @@ async def api_graph_data(
                     END as end_label,
                     type(r[0]) as rel_type
                 """
-                result = await session.run(query, {
-                    "center_id": center_id,
-                    "limit": limit * 2,
-                })
+                result = await session.run(
+                    query,
+                    {
+                        "center_id": center_id,
+                        "limit": limit * 2,
+                    },
+                )
                 data = await result.data()
 
                 for row in data:
                     start_key = f"{row['start_type']}:{row['start_id']}"
-                    if start_key not in seen_nodes and row['start_id']:
+                    if start_key not in seen_nodes and row["start_id"]:
                         seen_nodes.add(start_key)
-                        nodes.append({
-                            "id": start_key,
-                            "type": row["start_type"],
-                            "label": row["start_label"] or row["start_id"] or "Unknown",
-                        })
+                        nodes.append(
+                            {
+                                "id": start_key,
+                                "type": row["start_type"],
+                                "label": row["start_label"] or row["start_id"] or "Unknown",
+                            }
+                        )
 
                     end_key = f"{row['end_type']}:{row['end_id']}"
-                    if end_key not in seen_nodes and row['end_id']:
+                    if end_key not in seen_nodes and row["end_id"]:
                         seen_nodes.add(end_key)
-                        nodes.append({
-                            "id": end_key,
-                            "type": row["end_type"],
-                            "label": row["end_label"] or row["end_id"] or "Unknown",
-                        })
+                        nodes.append(
+                            {
+                                "id": end_key,
+                                "type": row["end_type"],
+                                "label": row["end_label"] or row["end_id"] or "Unknown",
+                            }
+                        )
 
-                    if row['start_id'] and row['end_id']:
-                        links.append({
-                            "source": start_key,
-                            "target": end_key,
-                            "type": row["rel_type"],
-                        })
+                    if row["start_id"] and row["end_id"]:
+                        links.append(
+                            {
+                                "source": start_key,
+                                "target": end_key,
+                                "type": row["rel_type"],
+                            }
+                        )
         else:
             # Overview query - behavior depends on number of types selected
             if len(allowed_types) == 1:
@@ -7884,11 +8291,11 @@ async def api_graph_data(
 
                 # Build completed filter for Task type
                 completed_filter = ""
-                if hide_completed and single_type == 'Task':
+                if hide_completed and single_type == "Task":
                     completed_filter = "AND n.status <> 'completed'"
 
                 # For Topic/Concept, order by connection count
-                if single_type in ('Topic', 'Concept'):
+                if single_type in ("Topic", "Concept"):
                     query = f"""
                     MATCH (n:{single_type})
                     OPTIONAL MATCH (n)-[r]-()
@@ -7939,15 +8346,17 @@ async def api_graph_data(
                 data = await result.data()
 
                 for row in data:
-                    if row['node_id']:
+                    if row["node_id"]:
                         node_key = f"{row['node_type']}:{row['node_id']}"
                         if node_key not in seen_nodes:
                             seen_nodes.add(node_key)
-                            nodes.append({
-                                "id": node_key,
-                                "type": row["node_type"],
-                                "label": row["node_label"] or row["node_id"] or "Unknown",
-                            })
+                            nodes.append(
+                                {
+                                    "id": node_key,
+                                    "type": row["node_type"],
+                                    "label": row["node_label"] or row["node_id"] or "Unknown",
+                                }
+                            )
                 # No links for single type
             else:
                 # Multiple types: get connections between ALL pairs of selected types
@@ -8029,29 +8438,35 @@ async def api_graph_data(
 
                 for row in data:
                     start_key = f"{row['start_type']}:{row['start_id']}"
-                    if start_key not in seen_nodes and row['start_id']:
+                    if start_key not in seen_nodes and row["start_id"]:
                         seen_nodes.add(start_key)
-                        nodes.append({
-                            "id": start_key,
-                            "type": row["start_type"],
-                            "label": row["start_label"] or row["start_id"] or "Unknown",
-                        })
+                        nodes.append(
+                            {
+                                "id": start_key,
+                                "type": row["start_type"],
+                                "label": row["start_label"] or row["start_id"] or "Unknown",
+                            }
+                        )
 
                     end_key = f"{row['end_type']}:{row['end_id']}"
-                    if end_key not in seen_nodes and row['end_id']:
+                    if end_key not in seen_nodes and row["end_id"]:
                         seen_nodes.add(end_key)
-                        nodes.append({
-                            "id": end_key,
-                            "type": row["end_type"],
-                            "label": row["end_label"] or row["end_id"] or "Unknown",
-                        })
+                        nodes.append(
+                            {
+                                "id": end_key,
+                                "type": row["end_type"],
+                                "label": row["end_label"] or row["end_id"] or "Unknown",
+                            }
+                        )
 
-                    if row['start_id'] and row['end_id']:
-                        links.append({
-                            "source": start_key,
-                            "target": end_key,
-                            "type": row["rel_type"],
-                        })
+                    if row["start_id"] and row["end_id"]:
+                        links.append(
+                            {
+                                "source": start_key,
+                                "target": end_key,
+                                "type": row["rel_type"],
+                            }
+                        )
 
         break
 
@@ -8108,11 +8523,13 @@ async def api_graph_search(q: str = "", limit: int = 20):
         result = await session.run(query, {"query": q, "limit": limit})
         data = await result.data()
 
-        return JSONResponse([
-            {"id": f"{row['type']}:{row['id']}", "type": row["type"], "label": row["label"]}
-            for row in data
-            if row["id"]
-        ])
+        return JSONResponse(
+            [
+                {"id": f"{row['type']}:{row['id']}", "type": row["type"], "label": row["label"]}
+                for row in data
+                if row["id"]
+            ]
+        )
 
     return JSONResponse([])
 
@@ -8156,7 +8573,7 @@ async def api_graph_link(
     if link_key not in valid_links:
         return JSONResponse(
             {"success": False, "error": f"Cannot link {source_type} to {target_type}"},
-            status_code=400
+            status_code=400,
         )
 
     rel_type, link_func = valid_links[link_key]
@@ -8176,16 +8593,15 @@ async def api_graph_link(
                 if target_type == "Person":
                     query = query.replace("{id: $target_id}", "{email: $target_id}")
 
-                result = await session.run(query, {
-                    "source_id": source_id,
-                    "target_id": target_id
-                })
+                result = await session.run(query, {"source_id": source_id, "target_id": target_id})
                 data = await result.single()
-                return JSONResponse({
-                    "success": True,
-                    "action": "deleted",
-                    "deleted": data["deleted"] if data else 0
-                })
+                return JSONResponse(
+                    {
+                        "success": True,
+                        "action": "deleted",
+                        "deleted": data["deleted"] if data else 0,
+                    }
+                )
             else:
                 # Create the relationship using the appropriate link function
                 # Person links use email as identifier
@@ -8197,16 +8613,11 @@ async def api_graph_link(
                 else:
                     await link_func(session, source_id, target_id)
 
-                return JSONResponse({
-                    "success": True,
-                    "action": "created",
-                    "relationship": rel_type
-                })
+                return JSONResponse(
+                    {"success": True, "action": "created", "relationship": rel_type}
+                )
         except Exception as e:
-            return JSONResponse(
-                {"success": False, "error": str(e)},
-                status_code=500
-            )
+            return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
     return JSONResponse({"success": False, "error": "No session"}, status_code=500)
 
@@ -8262,16 +8673,18 @@ async def api_graph_link_targets(node_type: str, q: str = "", limit: int = 20):
 
             result = await session.run(query, {"query": q, "limit": limit})
             data = await result.data()
-            targets.extend([
-                {"type": row["type"], "id": row["id"], "label": row["label"]}
-                for row in data if row["id"]
-            ])
+            targets.extend(
+                [
+                    {"type": row["type"], "id": row["id"], "label": row["label"]}
+                    for row in data
+                    if row["id"]
+                ]
+            )
         break
 
-    return JSONResponse({
-        "targets": targets[:limit],
-        "linkable_types": linkable_types.get(node_type, [])
-    })
+    return JSONResponse(
+        {"targets": targets[:limit], "linkable_types": linkable_types.get(node_type, [])}
+    )
 
 
 @app.post("/api/graph/analyze")
@@ -8302,12 +8715,14 @@ async def api_analyze_node(
                 auto_apply_threshold=0.9,
             )
 
-            return JSONResponse({
-                "status": "ok",
-                "suggestions": suggestions,
-                "auto_applied": [s for s in suggestions if s.get("status") == "auto"],
-                "pending": [s for s in suggestions if s.get("status") == "pending"],
-            })
+            return JSONResponse(
+                {
+                    "status": "ok",
+                    "suggestions": suggestions,
+                    "auto_applied": [s for s in suggestions if s.get("status") == "auto"],
+                    "pending": [s for s in suggestions if s.get("status") == "pending"],
+                }
+            )
 
     except Exception as e:
         return JSONResponse(
@@ -8339,13 +8754,14 @@ async def settings_page(request: Request, tab: str = "general"):
     # --- General Tab Data ---
     service = get_model_config_service()
     config = await service.get_config()
-    chat_models = service.get_chat_models_for_provider(config.provider)
+    chat_models = await service.list_chat_models_for_provider(config.provider)
     embedding_models = service.get_embedding_models_for_provider(config.embedding_provider)
     providers = service.get_available_providers()
 
     import redis.asyncio as aioredis
 
     from cognitex.config import get_settings
+
     app_settings = get_settings()
     redis_client = aioredis.from_url(app_settings.redis_url)
     try:
@@ -8375,17 +8791,19 @@ async def settings_page(request: Request, tab: str = "general"):
     except Exception:
         pass
 
-    template_data.update({
-        "config": config,
-        "config_source": config_source,
-        "chat_models": chat_models,
-        "embedding_models": embedding_models,
-        "providers": providers,
-        "sync_api_key": sync_api_key,
-        "sync_session_count": sync_session_count,
-        "sync_machine_count": sync_machine_count,
-        "model_aliases": MODEL_ALIASES,
-    })
+    template_data.update(
+        {
+            "config": config,
+            "config_source": config_source,
+            "chat_models": chat_models,
+            "embedding_models": embedding_models,
+            "providers": providers,
+            "sync_api_key": sync_api_key,
+            "sync_session_count": sync_session_count,
+            "sync_machine_count": sync_machine_count,
+            "model_aliases": MODEL_ALIASES,
+        }
+    )
 
     # --- Agent Tab Data ---
     approved_drafts = 0
@@ -8396,31 +8814,39 @@ async def settings_page(request: Request, tab: str = "general"):
 
     async for session in get_session():
         try:
-            result = await session.execute(text("""
+            result = await session.execute(
+                text("""
                 SELECT COUNT(*) FROM inbox_feedback
                 WHERE item_type = 'email_draft' AND action = 'approved'
-            """))
+            """)
+            )
             row = result.fetchone()
             approved_drafts = row[0] if row else 0
 
-            result = await session.execute(text("""
+            result = await session.execute(
+                text("""
                 SELECT COUNT(*) FROM inbox_feedback
                 WHERE item_type = 'task_proposal' AND action = 'approved'
-            """))
+            """)
+            )
             row = result.fetchone()
             approved_tasks = row[0] if row else 0
 
-            result = await session.execute(text("""
+            result = await session.execute(
+                text("""
                 SELECT COUNT(*) FROM inbox_feedback
-            """))
+            """)
+            )
             row = result.fetchone()
             learning_samples = row[0] if row else 0
 
-            result = await session.execute(text("""
+            result = await session.execute(
+                text("""
                 SELECT preference FROM preference_rules
                 WHERE rule_type = 'twin_settings'
                 LIMIT 1
-            """))
+            """)
+            )
             row = result.fetchone()
             if row and row[0]:
                 twin_settings = row[0] if isinstance(row[0], dict) else json.loads(row[0])
@@ -8443,15 +8869,17 @@ async def settings_page(request: Request, tab: str = "general"):
             pass
         break
 
-    template_data.update({
-        "agent_stats": {
-            "approved_drafts": approved_drafts,
-            "approved_tasks": approved_tasks,
-            "learning_samples": learning_samples,
-        },
-        "twin_settings": twin_settings,
-        "recent_emails": recent_emails,
-    })
+    template_data.update(
+        {
+            "agent_stats": {
+                "approved_drafts": approved_drafts,
+                "approved_tasks": approved_tasks,
+                "learning_samples": learning_samples,
+            },
+            "twin_settings": twin_settings,
+            "recent_emails": recent_emails,
+        }
+    )
 
     # --- State Tab Data ---
     estimator = get_state_estimator()
@@ -8481,43 +8909,50 @@ async def settings_page(request: Request, tab: str = "general"):
         for item in captured_items
     ]
 
-    template_data.update({
-        "state": state,
-        "rules": rules,
-        "mode_description": mode_description,
-        "available_modes": list(OperatingMode),
-        "captured_items": captured_dicts,
-        "switch_stats": switch_stats,
-    })
+    template_data.update(
+        {
+            "state": state,
+            "rules": rules,
+            "mode_description": mode_description,
+            "available_modes": list(OperatingMode),
+            "captured_items": captured_dicts,
+            "switch_stats": switch_stats,
+        }
+    )
 
     # --- Integrations Tab: AgentMail ---
-    template_data.update({
-        "agentmail_enabled": app_settings.agentmail_enabled,
-        "agentmail_inbox_id": app_settings.agentmail_inbox_id,
-        "agentmail_has_key": bool(app_settings.agentmail_api_key.get_secret_value()),
-        "agentmail_has_webhook_secret": bool(
-            app_settings.agentmail_webhook_secret.get_secret_value()
-        ),
-    })
+    template_data.update(
+        {
+            "agentmail_enabled": app_settings.agentmail_enabled,
+            "agentmail_inbox_id": app_settings.agentmail_inbox_id,
+            "agentmail_has_key": bool(app_settings.agentmail_api_key.get_secret_value()),
+            "agentmail_has_webhook_secret": bool(
+                app_settings.agentmail_webhook_secret.get_secret_value()
+            ),
+        }
+    )
 
     # --- Integrations Tab: Clinical Firewall ---
     firewall_pattern_count = 0
     firewall_category_count = 0
     try:
         from cognitex.services.clinical_firewall import get_firewall
+
         fw = get_firewall()
         firewall_category_count = len(fw._compiled)
         firewall_pattern_count = sum(len(v) for v in fw._compiled.values())
     except Exception:
         pass
 
-    template_data.update({
-        "firewall_enabled": app_settings.clinical_firewall_enabled,
-        "firewall_mode": app_settings.clinical_firewall_mode,
-        "firewall_pattern_count": firewall_pattern_count,
-        "firewall_category_count": firewall_category_count,
-        "firewall_patterns_path": app_settings.clinical_firewall_patterns_path,
-    })
+    template_data.update(
+        {
+            "firewall_enabled": app_settings.clinical_firewall_enabled,
+            "firewall_mode": app_settings.clinical_firewall_mode,
+            "firewall_pattern_count": firewall_pattern_count,
+            "firewall_category_count": firewall_category_count,
+            "firewall_patterns_path": app_settings.clinical_firewall_patterns_path,
+        }
+    )
 
     return templates.TemplateResponse("settings.html", template_data)
 
@@ -8682,7 +9117,7 @@ async def api_settings_models_reset(request: Request):
     # Return fresh settings page content
     service = get_model_config_service()
     config = await service.get_config()
-    chat_models = service.get_chat_models_for_provider(config.provider)
+    chat_models = await service.list_chat_models_for_provider(config.provider)
     embedding_models = service.get_embedding_models_for_provider(config.embedding_provider)
     providers = service.get_available_providers()
 
@@ -8701,19 +9136,18 @@ async def api_settings_models_reset(request: Request):
 
 @app.get("/api/settings/models/refresh", response_class=HTMLResponse)
 async def api_settings_models_refresh(request: Request):
-    """Refresh model list from API (Together.ai only)."""
+    """Refresh model list from API (Together.ai and OpenRouter)."""
     from cognitex.services.model_config import get_model_config_service
 
     service = get_model_config_service()
     config = await service.get_config()
 
-    # Refresh Together.ai model list if applicable
-    if config.provider == "together":
-        chat_models = await service.list_chat_models(refresh=True)
-        embedding_models = await service.list_embedding_models(refresh=True)
+    # Live-refresh for providers that support it
+    if config.provider in ("together", "openrouter"):
+        chat_models = await service.list_chat_models_for_provider(config.provider, refresh=True)
     else:
         chat_models = service.get_chat_models_for_provider(config.provider)
-        embedding_models = service.get_embedding_models_for_provider(config.embedding_provider)
+    embedding_models = service.get_embedding_models_for_provider(config.embedding_provider)
 
     providers = service.get_available_providers()
 
@@ -8742,7 +9176,7 @@ async def api_settings_provider_switch(request: Request, provider: str):
     service = get_model_config_service()
 
     # Get default models for the new provider
-    chat_models = service.get_chat_models_for_provider(provider)
+    chat_models = await service.list_chat_models_for_provider(provider)
 
     # Use first model as default for both planner and executor
     default_model = chat_models[0]["id"] if chat_models else ""
@@ -8911,7 +9345,7 @@ async def api_settings_models_preset(request: Request, preset: str):
     await service.set_config(config)
 
     # Get models for the preset's provider
-    chat_models = service.get_chat_models_for_provider(config.provider)
+    chat_models = await service.list_chat_models_for_provider(config.provider)
     embedding_models = service.get_embedding_models_for_provider(config.embedding_provider)
     providers = service.get_available_providers()
 
@@ -8967,13 +9401,13 @@ async def models_page(request: Request):
 
     service = get_model_config_service()
     config = await service.get_config()
-    chat_models = service.get_chat_models_for_provider(config.provider)
+    chat_models = await service.list_chat_models_for_provider(config.provider)
     providers = service.get_available_providers()
 
     # Build all-provider model map for grouped dropdowns
     all_chat_models: dict[str, list[dict]] = {}
     for p_id in ["anthropic", "openai", "google", "together", "openrouter"]:
-        models = service.get_chat_models_for_provider(p_id)
+        models = await service.list_chat_models_for_provider(p_id)
         if models:
             all_chat_models[PROVIDERS.get(p_id, p_id)] = models
 
@@ -9089,9 +9523,7 @@ async def save_subagent(request: Request):
         registry = get_subagent_registry()
         if model:
             await registry.update_builtin_model(name, model)
-        return HTMLResponse(
-            f'<span style="color: #16a34a;">Updated {name} model override</span>'
-        )
+        return HTMLResponse(f'<span style="color: #16a34a;">Updated {name} model override</span>')
 
     allowed = form.getlist("allowed_tools")
     denied = form.getlist("denied_tools")
@@ -9255,9 +9687,7 @@ async def api_sync_status(_auth: bool = Depends(verify_sync_api_key)):
 
     driver = get_driver()
     async with driver.session() as session:
-        result = await session.run(
-            "MATCH (cs:CodingSession) RETURN count(cs) as count"
-        )
+        result = await session.run("MATCH (cs:CodingSession) RETURN count(cs) as count")
         record = await result.single()
         session_count = record["count"] if record else 0
 
@@ -9275,6 +9705,7 @@ async def download_sync_installer(request: Request):
 
     # Get the server URL and API key for the install script
     from cognitex.config import get_settings
+
     settings = get_settings()
     _sync_api_key = settings.sync_api_key.get_secret_value()
 
@@ -9327,7 +9758,7 @@ echo "  cognitex-sync push"
     return PlainTextResponse(
         content=script,
         media_type="text/x-shellscript",
-        headers={"Content-Disposition": "attachment; filename=cognitex-sync-install.sh"}
+        headers={"Content-Disposition": "attachment; filename=cognitex-sync-install.sh"},
     )
 
 
@@ -9355,10 +9786,11 @@ async def download_sync_package():
     buffer.seek(0)
 
     from fastapi.responses import StreamingResponse
+
     return StreamingResponse(
         buffer,
         media_type="application/gzip",
-        headers={"Content-Disposition": "attachment; filename=cognitex-sync.tar.gz"}
+        headers={"Content-Disposition": "attachment; filename=cognitex-sync.tar.gz"},
     )
 
 
@@ -9370,6 +9802,7 @@ async def download_sync_package():
 def _fuzzy_match_score(s1: str, s2: str) -> float:
     """Calculate fuzzy match score between two strings."""
     from difflib import SequenceMatcher
+
     s1_lower = s1.lower()
     s2_lower = s2.lower()
 
@@ -9444,24 +9877,28 @@ async def sessions_link_page(request: Request):
             best_score = max(best_score, full_score)
 
             if best_score >= 0.4:  # Threshold for showing as suggestion
-                matches.append({
-                    "project_id": proj["id"],
-                    "project_title": title,
-                    "score": best_score,
-                    "status": proj.get("status", ""),
-                })
+                matches.append(
+                    {
+                        "project_id": proj["id"],
+                        "project_title": title,
+                        "score": best_score,
+                        "status": proj.get("status", ""),
+                    }
+                )
 
         # Sort by score descending
         matches.sort(key=lambda x: x["score"], reverse=True)
 
-        suggestions.append({
-            "session_id": sess["session_id"],
-            "project_path": path,
-            "summary": sess.get("summary", "")[:200] if sess.get("summary") else "",
-            "ended_at": sess.get("ended_at", ""),
-            "cli_type": sess.get("cli_type", "claude"),
-            "matches": matches[:5],  # Top 5 suggestions
-        })
+        suggestions.append(
+            {
+                "session_id": sess["session_id"],
+                "project_path": path,
+                "summary": sess.get("summary", "")[:200] if sess.get("summary") else "",
+                "ended_at": sess.get("ended_at", ""),
+                "cli_type": sess.get("cli_type", "claude"),
+                "matches": matches[:5],  # Top 5 suggestions
+            }
+        )
 
     return templates.TemplateResponse(
         "sessions_link.html",
@@ -9484,12 +9921,16 @@ async def api_sessions_link(
 
     driver = get_driver()
     async with driver.session() as session:
-        result = await session.run("""
+        result = await session.run(
+            """
             MATCH (cs:CodingSession {session_id: $session_id})
             MATCH (p:Project {id: $project_id})
             MERGE (cs)-[:DEVELOPS]->(p)
             RETURN p.title as project_title
-        """, session_id=session_id, project_id=project_id)
+        """,
+            session_id=session_id,
+            project_id=project_id,
+        )
         record = await result.single()
 
         if record:
@@ -9498,8 +9939,7 @@ async def api_sessions_link(
             )
         else:
             return HTMLResponse(
-                '<span class="badge badge-error">Link failed</span>',
-                status_code=400
+                '<span class="badge badge-error">Link failed</span>', status_code=400
             )
 
 
@@ -9519,11 +9959,15 @@ async def api_sessions_link_bulk(request: Request):
             session_id = link.get("session_id")
             project_id = link.get("project_id")
             if session_id and project_id:
-                await session.run("""
+                await session.run(
+                    """
                     MATCH (cs:CodingSession {session_id: $session_id})
                     MATCH (p:Project {id: $project_id})
                     MERGE (cs)-[:DEVELOPS]->(p)
-                """, session_id=session_id, project_id=project_id)
+                """,
+                    session_id=session_id,
+                    project_id=project_id,
+                )
                 linked += 1
 
     return {"status": "ok", "linked": linked}
@@ -9743,25 +10187,23 @@ async def help_page(request: Request):
     async for session in get_session():
         try:
             # Style profiles count
-            result = await session.execute(text(
-                "SELECT COUNT(*) FROM email_style_profiles"
-            ))
+            result = await session.execute(text("SELECT COUNT(*) FROM email_style_profiles"))
             row = result.fetchone()
             stats["style_profiles"] = row[0] if row else 0
 
             # Response decisions count
-            result = await session.execute(text(
-                "SELECT COUNT(*) FROM email_response_decisions"
-            ))
+            result = await session.execute(text("SELECT COUNT(*) FROM email_response_decisions"))
             row = result.fetchone()
             stats["response_decisions"] = row[0] if row else 0
 
             # Draft tracking stats
-            result = await session.execute(text("""
+            result = await session.execute(
+                text("""
                 SELECT COUNT(*), AVG(edit_ratio)
                 FROM email_draft_lifecycle
                 WHERE status = 'sent'
-            """))
+            """)
+            )
             row = result.fetchone()
             stats["drafts_tracked"] = row[0] if row else 0
             stats["avg_edit_ratio"] = row[1] if row and row[1] else None
@@ -9905,7 +10347,9 @@ async def save_bootstrap_file(
     if not success:
         return HTMLResponse('<div class="alert alert-danger">Failed to save</div>')
 
-    return HTMLResponse(f'<div class="alert alert-success" style="padding: 0.5rem; background: var(--success-bg); border-radius: 6px;">Saved {filename.upper()}.md</div>')
+    return HTMLResponse(
+        f'<div class="alert alert-success" style="padding: 0.5rem; background: var(--success-bg); border-radius: 6px;">Saved {filename.upper()}.md</div>'
+    )
 
 
 @app.post("/api/bootstrap/test-voice", response_class=HTMLResponse)
@@ -10009,7 +10453,9 @@ async def save_skill(
     if not success:
         return HTMLResponse('<div class="alert alert-danger">Failed to save</div>')
 
-    return HTMLResponse(f'<div class="alert alert-success" style="padding: 0.5rem; background: var(--success-bg); border-radius: 6px;">Saved skill: {name}</div>')
+    return HTMLResponse(
+        f'<div class="alert alert-success" style="padding: 0.5rem; background: var(--success-bg); border-radius: 6px;">Saved skill: {name}</div>'
+    )
 
 
 @app.delete("/api/skills/{name}", response_class=HTMLResponse)
@@ -10021,7 +10467,9 @@ async def delete_skill(name: str):
     success = await loader.delete_skill(name)
 
     if not success:
-        return HTMLResponse('<div class="alert alert-warning">Cannot delete (only user skills can be deleted)</div>')
+        return HTMLResponse(
+            '<div class="alert alert-warning">Cannot delete (only user skills can be deleted)</div>'
+        )
 
     return HTMLResponse(f'<div class="alert alert-success">Deleted skill: {name}</div>')
 
@@ -10220,7 +10668,7 @@ async def skill_author_deploy(
     success = await authoring.deploy_skill(draft)
     if success:
         return HTMLResponse(
-            f'<span style="color: var(--success);">Deployed \'{html.escape(name)}\'</span>'
+            f"<span style=\"color: var(--success);\">Deployed '{html.escape(name)}'</span>"
         )
     return HTMLResponse('<span style="color: var(--danger);">Deployment failed</span>')
 
@@ -10297,16 +10745,16 @@ async def evolution_trigger():
         if count:
             return HTMLResponse(
                 f'<div style="color: var(--success); padding: 0.5rem;">'
-                f'Analysis complete: {count} proposal(s) generated. Refresh to see them.</div>'
+                f"Analysis complete: {count} proposal(s) generated. Refresh to see them.</div>"
             )
         return HTMLResponse(
             '<div style="color: var(--text-muted); padding: 0.5rem;">'
-            'Analysis complete: no new patterns detected.</div>'
+            "Analysis complete: no new patterns detected.</div>"
         )
     except Exception as e:
         return HTMLResponse(
             f'<div style="color: var(--danger); padding: 0.5rem;">'
-            f'Error: {html.escape(str(e)[:200])}</div>'
+            f"Error: {html.escape(str(e)[:200])}</div>"
         )
 
 
@@ -10323,17 +10771,17 @@ async def evolution_manual_feedback(
         feedback_id = await submit_manual_feedback(skill_name, feedback_type, description)
         return HTMLResponse(
             f'<div style="color: var(--success); padding: 0.5rem;">'
-            f'Feedback recorded ({feedback_id}). This will be considered in the next evolution cycle.</div>'
+            f"Feedback recorded ({feedback_id}). This will be considered in the next evolution cycle.</div>"
         )
     except ValueError as e:
         return HTMLResponse(
             f'<div style="color: var(--danger); padding: 0.5rem;">'
-            f'Error: {html.escape(str(e))}</div>'
+            f"Error: {html.escape(str(e))}</div>"
         )
     except Exception as e:
         return HTMLResponse(
             f'<div style="color: var(--danger); padding: 0.5rem;">'
-            f'Error: {html.escape(str(e)[:200])}</div>'
+            f"Error: {html.escape(str(e)[:200])}</div>"
         )
 
 
@@ -10470,7 +10918,9 @@ async def save_curated_memory(
     if not success:
         return HTMLResponse('<div class="alert alert-danger">Failed to save</div>')
 
-    return HTMLResponse('<div class="alert alert-success" style="padding: 0.5rem; background: var(--success-bg); border-radius: 6px;">Saved curated memory</div>')
+    return HTMLResponse(
+        '<div class="alert alert-success" style="padding: 0.5rem; background: var(--success-bg); border-radius: 6px;">Saved curated memory</div>'
+    )
 
 
 @app.post("/api/memory/promote/{entry_id}", response_class=HTMLResponse)
@@ -10482,9 +10932,13 @@ async def promote_to_curated(entry_id: str):
     success = await service.promote_to_curated(entry_id)
 
     if not success:
-        return HTMLResponse('<div class="alert alert-warning">Entry not found or promotion failed</div>')
+        return HTMLResponse(
+            '<div class="alert alert-warning">Entry not found or promotion failed</div>'
+        )
 
-    return HTMLResponse('<div class="alert alert-success" style="padding: 0.5rem; background: var(--success-bg); border-radius: 6px;">Promoted to long-term memory</div>')
+    return HTMLResponse(
+        '<div class="alert alert-success" style="padding: 0.5rem; background: var(--success-bg); border-radius: 6px;">Promoted to long-term memory</div>'
+    )
 
 
 @app.get("/api/memory/search", response_class=JSONResponse)
@@ -10516,4 +10970,5 @@ async def search_memory(
 def run_server(host: str = "127.0.0.1", port: int = 8080):
     """Run the web server."""
     import uvicorn
+
     uvicorn.run(app, host=host, port=port)

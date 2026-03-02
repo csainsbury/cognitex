@@ -6,18 +6,77 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 import structlog
-from together import Together
+from together import AsyncTogether
 
+from cognitex.agent.context_recovery import (
+    compact_conversation,
+    is_context_overflow_error,
+    truncate_last_observation,
+)
 from cognitex.agent.decision_memory import DecisionMemory, init_decision_memory
 from cognitex.agent.memory import Memory, init_memory
 from cognitex.agent.tool_filter import get_tool_filter
 from cognitex.agent.tools import ToolRisk, get_tool_registry
+from cognitex.agent.truncation import get_max_result_chars, truncate_tool_result
 from cognitex.config import get_settings
 
 logger = structlog.get_logger()
 
+# JSON Schema type → Gemini proto Type mapping (used by _build_gemini_param_schema)
+_GEMINI_TYPE_MAP: dict[str, str] = {
+    "string": "STRING",
+    "integer": "INTEGER",
+    "number": "NUMBER",
+    "boolean": "BOOLEAN",
+    "array": "ARRAY",
+    "object": "OBJECT",
+}
+
+
+def _build_gemini_param_schema(pdef: dict, genai_module: object) -> object:
+    """Build a ``genai.protos.Schema`` from a JSON-Schema-style parameter definition.
+
+    Handles type mapping, enum pass-through, nested arrays (items), and
+    nested objects (properties).  Falls back to STRING for unknown types.
+    """
+    protos = genai_module.protos  # type: ignore[attr-defined]
+    json_type = pdef.get("type", "string")
+    proto_type_name = _GEMINI_TYPE_MAP.get(json_type, "STRING")
+    proto_type = getattr(protos.Type, proto_type_name, protos.Type.STRING)
+
+    kwargs: dict = {
+        "type": proto_type,
+        "description": pdef.get("description", ""),
+    }
+
+    # Pass through enum values
+    if "enum" in pdef:
+        kwargs["enum"] = list(pdef["enum"])
+
+    # Recurse into array items
+    if json_type == "array" and "items" in pdef and isinstance(pdef["items"], dict):
+        kwargs["items"] = _build_gemini_param_schema(pdef["items"], genai_module)
+
+    # Recurse into object properties
+    if json_type == "object" and "properties" in pdef and isinstance(pdef["properties"], dict):
+        kwargs["properties"] = {
+            name: _build_gemini_param_schema(sub, genai_module)
+            for name, sub in pdef["properties"].items()
+        }
+
+    return protos.Schema(**kwargs)
+
+
 # Maximum iterations to prevent infinite loops
 MAX_REACT_ITERATIONS = 8
+
+# Module-level agent progress — polled by the chat UI
+_agent_progress: dict[str, object] = {"active": False, "steps": []}
+
+
+def get_agent_progress() -> dict:
+    """Return current agent progress for the polling endpoint."""
+    return dict(_agent_progress)
 
 
 @dataclass
@@ -60,6 +119,7 @@ class Agent:
         self._client = None
         self._model = None
         self._provider = None
+        self._max_result_chars: int = 100_000
         # Cache for filtered tools (set during _build_system_prompt)
         self._current_mode = None
         self._filtered_tools: list[str] = []
@@ -76,10 +136,13 @@ class Agent:
         # Load model config from Redis (runtime overrides), falling back to env settings
         try:
             from cognitex.services.model_config import get_model_config_service
+
             model_config = await get_model_config_service().get_config()
             self._provider = model_config.provider
             self._model = model_config.planner_model
-            logger.info("Loaded model config from Redis", provider=self._provider, model=self._model)
+            logger.info(
+                "Loaded model config from Redis", provider=self._provider, model=self._model
+            )
         except Exception as e:
             logger.warning("Failed to load model config from Redis, using env", error=str(e))
             self._provider = settings.llm_provider
@@ -97,30 +160,30 @@ class Agent:
             self._model = self._model or settings.google_model_planner
             logger.info("Using Google Gemini", model=self._model)
         elif self._provider == "anthropic":
-            from anthropic import Anthropic
+            from anthropic import AsyncAnthropic
 
             api_key = settings.anthropic_api_key.get_secret_value()
             if not api_key:
                 raise ValueError("ANTHROPIC_API_KEY not configured")
-            self._client = Anthropic(api_key=api_key)
+            self._client = AsyncAnthropic(api_key=api_key)
             self._model = self._model or settings.anthropic_model_planner
             logger.info("Using Anthropic Claude", model=self._model)
         elif self._provider == "openai":
-            from openai import OpenAI
+            from openai import AsyncOpenAI
 
             api_key = settings.openai_api_key.get_secret_value()
             if not api_key:
                 raise ValueError("OPENAI_API_KEY not configured")
-            self._client = OpenAI(api_key=api_key)
+            self._client = AsyncOpenAI(api_key=api_key)
             self._model = self._model or settings.openai_model_planner
             logger.info("Using OpenAI", model=self._model)
         elif self._provider == "openrouter":
-            from openai import OpenAI
+            from openai import AsyncOpenAI
 
             api_key = settings.openrouter_api_key.get_secret_value()
             if not api_key:
                 raise ValueError("OPENROUTER_API_KEY not configured")
-            self._client = OpenAI(
+            self._client = AsyncOpenAI(
                 api_key=api_key,
                 base_url="https://openrouter.ai/api/v1",
             )
@@ -130,7 +193,7 @@ class Agent:
             api_key = settings.together_api_key.get_secret_value()
             if not api_key:
                 raise ValueError("TOGETHER_API_KEY not configured")
-            self._client = Together(api_key=api_key)
+            self._client = AsyncTogether(api_key=api_key)
             self._model = self._model or settings.together_model_planner
             self._provider = "together"
             logger.info("Using Together.ai", model=self._model)
@@ -141,6 +204,13 @@ class Agent:
         # Initialize decision memory for behavioral learning
         self.decision_memory = await init_decision_memory()
 
+        # Configure tool result truncation limit
+        settings = get_settings()
+        if settings.tool_result_max_chars > 0:
+            self._max_result_chars = settings.tool_result_max_chars
+        else:
+            self._max_result_chars = get_max_result_chars(self._model, self._provider)
+
         self._initialized = True
         logger.info("Agent initialized", provider=self._provider, model=self._model)
 
@@ -149,16 +219,28 @@ class Agent:
         if not self._initialized:
             raise RuntimeError("Agent not initialized. Call initialize() first.")
 
-    def _llm_chat(
-        self, messages: list[dict], max_tokens: int = 2048, temperature: float = 0.3
-    ) -> str:
-        """Call the LLM with provider-specific API handling."""
+    async def _llm_chat(
+        self,
+        messages: list[dict],
+        max_tokens: int = 2048,
+        temperature: float = 0.3,
+        tools: list[dict] | None = None,
+    ) -> str | object:
+        """Call the LLM with provider-specific API handling (async).
+
+        When tools are provided and the provider is Anthropic, returns the full
+        Anthropic response object (with .content blocks) instead of a plain string.
+        """
         if self._provider == "google":
-            # Gemini API format with fallback to Together.ai
-            model = self._client.GenerativeModel(self._model)
+            # Gemini API format with native function calling and system_instruction
+            import google.generativeai as genai
+
+            # Build model kwargs — use system_instruction instead of stuffing prompt
+            model_kwargs: dict = {}
+            system_prompt = None
+
             # Convert OpenAI format to Gemini format
             gemini_messages = []
-            system_prompt = None
             for msg in messages:
                 role = msg["role"]
                 content = msg["content"]
@@ -169,22 +251,50 @@ class Agent:
                 else:
                     gemini_messages.append({"role": "user", "parts": [content]})
 
-            # Prepend system prompt to first user message if present
-            if system_prompt and gemini_messages:
-                first_content = gemini_messages[0]["parts"][0]
-                gemini_messages[0]["parts"][0] = f"{system_prompt}\n\n{first_content}"
+            if system_prompt:
+                model_kwargs["system_instruction"] = system_prompt
 
-            use_fallback = False
-            fallback_reason = None
+            # Add native tools if provided
+            if tools:
+                gemini_tools = [
+                    genai.protos.Tool(
+                        function_declarations=[
+                            genai.protos.FunctionDeclaration(
+                                name=t["name"],
+                                description=t["description"],
+                                parameters=genai.protos.Schema(
+                                    type=genai.protos.Type.OBJECT,
+                                    properties={
+                                        pname: _build_gemini_param_schema(pdef, genai)
+                                        for pname, pdef in t.get("parameters", {})
+                                        .get("properties", {})
+                                        .items()
+                                    },
+                                    required=t.get("parameters", {}).get("required", []),
+                                ),
+                            )
+                            for t in tools
+                        ]
+                    )
+                ]
+                model_kwargs["tools"] = gemini_tools
+                logger.debug(
+                    "Gemini tool schemas built",
+                    tool_count=len(tools),
+                    tool_names=[t["name"] for t in tools],
+                )
+
+            model = self._client.GenerativeModel(self._model, **model_kwargs)
+
+            safety_settings = [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ]
 
             try:
-                safety_settings = [
-                    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-                ]
-                response = model.generate_content(
+                response = await model.generate_content_async(
                     gemini_messages,
                     generation_config={
                         "max_output_tokens": max_tokens,
@@ -192,37 +302,57 @@ class Agent:
                     },
                     safety_settings=safety_settings,
                 )
+                if tools:
+                    # Log whether a function_call was returned
+                    has_fc = any(
+                        hasattr(p, "function_call") and p.function_call
+                        for p in response.candidates[0].content.parts
+                    )
+                    logger.debug(
+                        "Gemini response received",
+                        has_function_call=has_fc,
+                        parts_count=len(response.candidates[0].content.parts),
+                    )
+                    return response
                 # Try to get text - can fail even with response
                 try:
                     return response.text
                 except Exception as text_err:
-                    use_fallback = True
-                    fallback_reason = f"response.text failed: {text_err}"
-            except Exception as e:
-                use_fallback = True
-                fallback_reason = str(e)
-
-            # Fallback to Together.ai if Gemini failed
-            if use_fallback:
-                logger.warning("Gemini failed, using Together.ai fallback", reason=fallback_reason)
-                from together import Together
-
-                settings = get_settings()
-                api_key = settings.together_api_key
-                # Handle SecretStr
-                if hasattr(api_key, "get_secret_value"):
-                    api_key = api_key.get_secret_value()
-                if api_key:
-                    fallback_client = Together(api_key=api_key)
-                    fallback_response = fallback_client.chat.completions.create(
-                        model="meta-llama/Llama-3.3-70B-Instruct-Turbo",
-                        messages=messages,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
+                    # Text-only call failed — fall through to Together.ai fallback
+                    logger.warning(
+                        "Gemini response.text failed, falling back to Together.ai",
+                        error=str(text_err),
                     )
-                    return fallback_response.choices[0].message.content
-                else:
-                    raise ValueError(f"Gemini failed and no fallback: {fallback_reason}")
+            except Exception as e:
+                if tools:
+                    # Tool call failed — re-raise so the ReAct loop's except
+                    # block handles it (it has retry + context recovery logic).
+                    # Do NOT silently fall back to a toolless completion.
+                    logger.warning(
+                        "Gemini tool call failed, re-raising for ReAct error handling",
+                        error=str(e),
+                    )
+                    raise
+                logger.warning("Gemini failed, falling back to Together.ai", error=str(e))
+
+            # Fallback to Together.ai — only for NON-tool calls (summaries, text gen)
+            from together import AsyncTogether as _AsyncTogetherFallback
+
+            settings = get_settings()
+            api_key = settings.together_api_key
+            if hasattr(api_key, "get_secret_value"):
+                api_key = api_key.get_secret_value()
+            if api_key:
+                fallback_client = _AsyncTogetherFallback(api_key=api_key)
+                fallback_response = await fallback_client.chat.completions.create(
+                    model="meta-llama/Llama-3.3-70B-Instruct-Turbo",
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                return fallback_response.choices[0].message.content
+            else:
+                raise ValueError("Gemini failed and no Together.ai API key for fallback")
 
         elif self._provider == "anthropic":
             # Anthropic API format
@@ -234,26 +364,122 @@ class Agent:
                 else:
                     anthropic_messages.append(msg)
 
-            response = self._client.messages.create(
+            kwargs: dict = {
+                "model": self._model,
+                "max_tokens": max_tokens,
+                "system": system_prompt or "",
+                "messages": anthropic_messages,
+            }
+
+            if tools:
+                # Native tool use — return full response object
+                kwargs["tools"] = tools
+                response = await self._client.messages.create(**kwargs)
+                return response
+            else:
+                # No tools — plain text completion (summaries, etc.)
+                # Prefill with '{' for JSON-in-prompt fallback
+                anthropic_messages.append({"role": "assistant", "content": "{"})
+                response = await self._client.messages.create(**kwargs)
+                return "{" + response.content[0].text
+
+        else:
+            # OpenAI/Together/OpenRouter format (async)
+            kwargs: dict = {
+                "model": self._model,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            if tools:
+                kwargs["tools"] = tools
+            response = await self._client.chat.completions.create(**kwargs)
+            if tools:
+                # Return full response for native tool_use parsing
+                return response
+            return response.choices[0].message.content
+
+    async def _llm_stream(
+        self,
+        messages: list[dict],
+        max_tokens: int = 2048,
+        temperature: float = 0.3,
+    ):
+        """Async generator that yields text chunks from the LLM.
+
+        Used for the final response in each ReAct loop to stream tokens to the
+        chat UI in real-time.  Does NOT support tool calling — use _llm_chat()
+        for tool interactions.
+        """
+        if self._provider == "google":
+            model_kwargs: dict = {}
+            system_prompt = None
+            gemini_messages = []
+            for msg in messages:
+                role = msg["role"]
+                content = msg["content"]
+                if role == "system":
+                    system_prompt = content
+                elif role == "assistant":
+                    gemini_messages.append({"role": "model", "parts": [content]})
+                else:
+                    gemini_messages.append({"role": "user", "parts": [content]})
+            if system_prompt:
+                model_kwargs["system_instruction"] = system_prompt
+
+            model = self._client.GenerativeModel(self._model, **model_kwargs)
+            response = await model.generate_content_async(
+                gemini_messages,
+                generation_config={
+                    "max_output_tokens": max_tokens,
+                    "temperature": temperature,
+                },
+                stream=True,
+            )
+            async for chunk in response:
+                if chunk.text:
+                    yield chunk.text
+
+        elif self._provider == "anthropic":
+            system_prompt = None
+            anthropic_messages = []
+            for msg in messages:
+                if msg["role"] == "system":
+                    system_prompt = msg["content"]
+                else:
+                    anthropic_messages.append(msg)
+
+            async with self._client.messages.stream(
                 model=self._model,
                 max_tokens=max_tokens,
                 system=system_prompt or "",
                 messages=anthropic_messages,
-            )
-            return response.content[0].text
+            ) as stream:
+                async for text in stream.text_stream:
+                    yield text
 
         else:
-            # OpenAI/Together format
-            response = self._client.chat.completions.create(
+            # OpenAI / Together / OpenRouter
+            response = await self._client.chat.completions.create(
                 model=self._model,
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                stream=True,
             )
-            return response.choices[0].message.content
+            async for chunk in response:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta and delta.content:
+                    yield delta.content
 
-    async def _build_system_prompt(self) -> str:
-        """Build the system prompt with available tools, filtered by operating mode."""
+    async def _build_system_prompt(self, include_tool_instructions: bool = True) -> str:
+        """Build the system prompt, optionally including tool descriptions.
+
+        Args:
+            include_tool_instructions: When True (default), embed tool descriptions
+                and JSON format instructions for the JSON-in-prompt path.  When False
+                (native tool_use mode), omit them — tools are passed via the API.
+        """
         # Filter tools based on current operating mode
         all_tools = self.tool_registry.all()
         eligible_tools, filtered_tools, current_mode = await self.tool_filter.get_eligible_tools(
@@ -264,24 +490,71 @@ class Agent:
         self._current_mode = current_mode
         self._filtered_tools = filtered_tools
 
-        tool_descriptions = []
-        for tool in eligible_tools:
-            risk_label = {
-                ToolRisk.READONLY: "(read-only)",
-                ToolRisk.AUTO: "(auto-execute)",
-                ToolRisk.APPROVAL: "(requires approval)",
-            }[tool.risk]
+        # Build concise tool summary — included in ALL paths (OpenClaw pattern)
+        tool_lines = [f"- {t.name}: {t.description.split('.')[0].strip()}" for t in eligible_tools]
+        tool_summary = "## Available Tools\n" + "\n".join(tool_lines)
 
-            params = ", ".join(
-                f"{k}: {v.get('type', 'any')}" + (" [optional]" if v.get("optional") else "")
-                for k, v in tool.parameters.items()
+        # Tool call style guidance (OpenClaw pattern)
+        eligible_names = {t.name for t in eligible_tools}
+        search_tools = [n for n in ("web_search", "research") if n in eligible_names]
+        search_guidance = ""
+        if search_tools:
+            tool_list = " or ".join(f"`{n}`" for n in search_tools)
+            search_guidance = (
+                f"\n- When the user asks about current facts, prices, events, or anything "
+                f"time-sensitive: use {tool_list} immediately."
             )
 
-            tool_descriptions.append(
-                f"- {tool.name} {risk_label}: {tool.description}\n  Parameters: {params}"
-            )
+        tool_style = f"""
+## Tool Call Style
+- Call tools directly without narrating — just use them.{search_guidance}
+- When a tool exists for the task, use it directly. Never say "I can't access that" if a relevant tool is available.
+- For simple greetings or general chat, respond without tools.
+- Keep thoughts brief; focus on action."""
 
-        tools_text = "\n".join(tool_descriptions)
+        # JSON-in-prompt path: include full tool descriptions + response format
+        tools_section = ""
+        if include_tool_instructions:
+            tool_descriptions = []
+            for tool in eligible_tools:
+                risk_label = {
+                    ToolRisk.READONLY: "(read-only)",
+                    ToolRisk.AUTO: "(auto-execute)",
+                    ToolRisk.APPROVAL: "(requires approval)",
+                }[tool.risk]
+
+                params = ", ".join(
+                    f"{k}: {v.get('type', 'any')}" + (" [optional]" if v.get("optional") else "")
+                    for k, v in tool.parameters.items()
+                )
+
+                tool_descriptions.append(
+                    f"- {tool.name} {risk_label}: {tool.description}\n  Parameters: {params}"
+                )
+
+            tools_text = "\n".join(tool_descriptions)
+            tools_section = f"""
+
+## Available Tools (detailed)
+{tools_text}
+
+## How to Respond
+
+You use a Thought → Action → Observation loop. For each step:
+
+1. **Thought**: Reason about what you know and what you need to find out
+2. **Action**: Call a tool to get information or take an action (or respond if ready)
+3. **Observation**: See the result and continue reasoning
+
+Output your response as JSON:
+```json
+{{
+  "thought": "Your reasoning about the current state and what to do next",
+  "action": "tool_name or null if ready to give final response",
+  "action_input": {{}},
+  "response": "Your final response to the user (only if action is null)"
+}}
+```"""
 
         # Add filter notice if tools were filtered
         filter_notice = ""
@@ -306,26 +579,9 @@ class Agent:
 
 Your job is to help the user by reasoning through their request, gathering information, and taking actions when needed.
 
-## Available Tools
-{tools_text}
-
-## How to Respond
-
-You use a Thought → Action → Observation loop. For each step:
-
-1. **Thought**: Reason about what you know and what you need to find out
-2. **Action**: Call a tool to get information or take an action (or respond if ready)
-3. **Observation**: See the result and continue reasoning
-
-Output your response as JSON:
-```json
-{{
-  "thought": "Your reasoning about the current state and what to do next",
-  "action": "tool_name or null if ready to give final response",
-  "action_input": {{}},
-  "response": "Your final response to the user (only if action is null)"
-}}
-```
+{tool_summary}
+{tool_style}
+{tools_section}
 
 ## Guidelines
 
@@ -335,8 +591,7 @@ Output your response as JSON:
 - **Chain queries**: Use results from one query to inform the next
 - **Take action when asked**: Update tasks, draft emails, create events as requested
 - **Be honest**: If you can't find something, say so
-- **Respond promptly**: Once you have enough information, respond. For simple queries, 2-4 tool calls is usually enough.
-- **Research deeply**: For questions requiring web research (travel, prices, comparisons, current events, finding specific information), use the `research` tool. Break the question into specific, independent sub-questions. The tool handles parallel execution and iterative refinement automatically. Never give generic advice like "check Google" or "try Skyscanner" — actually find the information. If the research tool reports it hit its cycle limit, tell the user the results may be incomplete.
+- **Respond promptly**: For simple conversational messages (greetings, simple questions about your capabilities, general chat), respond directly without using any tools. Not every message needs tool use.
 
 ## Graph Query Tips (for graph_query tool)
 
@@ -470,6 +725,50 @@ Example queries:
             return "\n\n".join(sections)
         return None
 
+    @staticmethod
+    async def _broadcast_react_step(iteration: int, thought: str, action: str | None) -> None:
+        """Broadcast a ReAct step via the hook system."""
+        from cognitex.agent.hooks import emit
+
+        await emit(
+            "react_step",
+            {
+                "type": "react_step",
+                "iteration": iteration,
+                "thought": thought[:150],
+                "action": action,
+            },
+        )
+
+    @staticmethod
+    async def _broadcast_text_chunk(content: str) -> None:
+        """Broadcast a text chunk for streaming to the chat UI."""
+        from cognitex.agent.hooks import emit
+
+        await emit(
+            "text_chunk",
+            {"type": "text_chunk", "content": content},
+        )
+
+    async def _stream_final_response(self, conversation: list[dict]) -> str:
+        """Stream the final response to the UI via text_chunk events.
+
+        Returns the full concatenated text for storage in the trace.
+        """
+        full_text = ""
+        try:
+            async for chunk in self._llm_stream(conversation, max_tokens=4096, temperature=0.1):
+                full_text += chunk
+                await self._broadcast_text_chunk(chunk)
+        except Exception as e:
+            logger.warning("Streaming failed, using non-streaming response", error=str(e))
+            if not full_text:
+                # Fall back to non-streaming call
+                result = await self._llm_chat(conversation, 4096, 0.1)
+                full_text = result if isinstance(result, str) else str(result)
+                await self._broadcast_text_chunk(full_text)
+        return full_text or "I processed your request but couldn't generate a response."
+
     async def chat(self, message: str) -> str:
         """
         Handle a conversational message using ReAct loop.
@@ -497,11 +796,19 @@ Example queries:
 
         logger.info("ReAct chat starting", message=message[:100])
 
+        # Reset progress tracking
+        _agent_progress["active"] = True
+        _agent_progress["steps"] = []
+        _agent_progress["message"] = message[:80]
+
         # Record user message
         await self.memory.working.add_interaction(role="user", content=message)
 
         # Run ReAct loop
         trace = await self._react_loop(message)
+
+        # Mark progress complete
+        _agent_progress["active"] = False
 
         # Record response
         await self.memory.working.add_interaction(role="agent", content=trace.final_response)
@@ -516,9 +823,13 @@ Example queries:
     async def _react_loop(self, message: str) -> ReactTrace:
         """Execute the ReAct reasoning loop."""
         trace = ReactTrace()
+        # Use native tool_use for all providers that support it
+        use_native = self._provider in ("anthropic", "openai", "together", "openrouter", "google")
 
-        # Build conversation for the LLM
-        system_prompt = await self._build_system_prompt()
+        # Build conversation for the LLM — omit JSON format instructions for native mode
+        system_prompt = await self._build_system_prompt(
+            include_tool_instructions=not use_native,
+        )
 
         # Add learned context from past decisions
         learned_context = await self._get_learned_context(message)
@@ -526,7 +837,7 @@ Example queries:
             system_prompt += f"\n\n{learned_context}"
 
         # Start with system prompt
-        conversation = [
+        conversation: list[dict] = [
             {"role": "system", "content": system_prompt},
         ]
 
@@ -581,12 +892,412 @@ Example queries:
         # Add current message
         conversation.append({"role": "user", "content": f"User message: {message}"})
 
-        for iteration in range(MAX_REACT_ITERATIONS):
-            logger.debug("ReAct iteration", iteration=iteration)
+        if use_native:
+            if self._provider == "anthropic":
+                await self._react_loop_native(message, conversation, trace)
+            elif self._provider == "google":
+                await self._react_loop_gemini_native(message, conversation, trace)
+            else:
+                await self._react_loop_openai_native(message, conversation, trace)
+        else:
+            await self._react_loop_json(message, conversation, trace)
 
-            # Get next thought/action from LLM
+        logger.info(
+            "ReAct complete",
+            iterations=len(trace.steps),
+            approvals=len(trace.pending_approvals),
+        )
+
+        return trace
+
+    @staticmethod
+    def _recover_from_overflow(
+        conversation: list[dict],
+        iteration: int,
+    ) -> list[dict]:
+        """Attempt to recover from a context overflow error.
+
+        First tries truncating the last observation; if the conversation is
+        still too large on a subsequent call the caller should invoke
+        ``compact_conversation`` as a last resort.
+        """
+        logger.warning("Context overflow, attempting recovery", iteration=iteration)
+        return truncate_last_observation(conversation)
+
+    # ------------------------------------------------------------------
+    # Anthropic native tool_use path
+    # ------------------------------------------------------------------
+
+    async def _react_loop_native(
+        self, message: str, conversation: list[dict], trace: ReactTrace
+    ) -> None:
+        """ReAct loop using Anthropic's native tool_use API."""
+        # Get eligible tools and build schemas once
+        all_tools = self.tool_registry.all()
+        eligible_tools, _, _ = await self.tool_filter.get_eligible_tools(all_tools)
+        tool_schemas = [t.to_anthropic_schema() for t in eligible_tools]
+        logger.debug(
+            "Anthropic native tools ready",
+            tool_count=len(tool_schemas),
+            tool_names=[t.name for t in eligible_tools],
+        )
+
+        for iteration in range(MAX_REACT_ITERATIONS):
+            logger.debug("ReAct iteration (native)", iteration=iteration)
+
             try:
-                content = self._llm_chat(conversation, max_tokens=2048, temperature=0.3)
+                response = await self._llm_chat(conversation, 4096, 0.1, tools=tool_schemas)
+
+                # Extract thought text and tool_use blocks from response.content
+                thought_text = ""
+                tool_use_block = None
+                for block in response.content:
+                    if block.type == "text":
+                        thought_text += block.text
+                    elif block.type == "tool_use":
+                        tool_use_block = block
+
+                step = ThoughtAction(
+                    thought=thought_text,
+                    action=tool_use_block.name if tool_use_block else None,
+                    action_input=tool_use_block.input if tool_use_block else {},
+                )
+
+                logger.info(
+                    "ReAct step",
+                    iteration=iteration,
+                    thought=step.thought[:100],
+                    action=step.action,
+                )
+
+                # Broadcast step to chat UI via SSE
+                await self._broadcast_react_step(iteration, step.thought, step.action)
+
+                # Update polling-based progress
+                _agent_progress["steps"].append(
+                    {
+                        "i": iteration,
+                        "action": step.action,
+                        "thought": step.thought[:150],
+                    }
+                )
+
+                # No tool call — final response (stream to UI)
+                if tool_use_block is None:
+                    final = (
+                        thought_text or "I processed your request but couldn't generate a response."
+                    )
+                    await self._broadcast_text_chunk(final)
+                    trace.final_response = final
+                    trace.steps.append(step)
+                    break
+
+                # Execute the tool
+                observation, approval_id, trace_id = await self._execute_action(
+                    step.action,
+                    step.action_input,
+                    thought=step.thought,
+                    message_context=message,
+                )
+                step.observation = observation
+
+                if approval_id:
+                    trace.pending_approvals.append(approval_id)
+                if trace_id:
+                    trace.decision_trace_ids.append(trace_id)
+
+                trace.steps.append(step)
+
+                # Append assistant turn with the full content blocks
+                conversation.append({"role": "assistant", "content": response.content})
+                # Append tool result in Anthropic's format
+                conversation.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool_use_block.id,
+                                "content": observation,
+                            }
+                        ],
+                    }
+                )
+
+            except Exception as e:
+                if is_context_overflow_error(e):
+                    conversation = self._recover_from_overflow(conversation, iteration)
+                    try:
+                        response = await self._llm_chat(conversation, 4096, 0.1, tools=tool_schemas)
+                        continue
+                    except Exception as retry_err:
+                        if is_context_overflow_error(retry_err):
+                            conversation = compact_conversation(conversation, keep_last=4)
+                            continue
+                        # Non-overflow error on retry — fall through
+                logger.error("ReAct iteration failed", error=str(e), iteration=iteration)
+                trace.final_response = (
+                    f"I encountered an error while processing your request: {str(e)[:100]}"
+                )
+                break
+
+        else:
+            # Hit max iterations
+            logger.warning("ReAct hit max iterations", iterations=MAX_REACT_ITERATIONS)
+            trace.final_response = await self._generate_summary(message, trace)
+
+    # ------------------------------------------------------------------
+    # Gemini native tool_use path
+    # ------------------------------------------------------------------
+
+    async def _react_loop_gemini_native(
+        self, message: str, conversation: list[dict], trace: ReactTrace
+    ) -> None:
+        """ReAct loop using Gemini's native function calling."""
+        all_tools = self.tool_registry.all()
+        eligible_tools, _, _ = await self.tool_filter.get_eligible_tools(all_tools)
+        tool_schemas = [t.to_gemini_schema() for t in eligible_tools]
+        logger.debug(
+            "Gemini native tools ready",
+            tool_count=len(tool_schemas),
+            tool_names=[t.name for t in eligible_tools],
+        )
+
+        for iteration in range(MAX_REACT_ITERATIONS):
+            logger.debug("ReAct iteration (gemini-native)", iteration=iteration)
+
+            try:
+                response = await self._llm_chat(conversation, 4096, 0.1, tools=tool_schemas)
+
+                # Parse Gemini response — check for function_call parts
+                thought_text = ""
+                function_call = None
+                for part in response.candidates[0].content.parts:
+                    if hasattr(part, "text") and part.text:
+                        thought_text += part.text
+                    elif hasattr(part, "function_call") and part.function_call:
+                        function_call = part.function_call
+
+                step = ThoughtAction(
+                    thought=thought_text,
+                    action=function_call.name if function_call else None,
+                    action_input=(dict(function_call.args) if function_call else {}),
+                )
+
+                logger.info(
+                    "ReAct step",
+                    iteration=iteration,
+                    thought=step.thought[:100],
+                    action=step.action,
+                )
+
+                await self._broadcast_react_step(iteration, step.thought, step.action)
+
+                _agent_progress["steps"].append(
+                    {
+                        "i": iteration,
+                        "action": step.action,
+                        "thought": step.thought[:150],
+                    }
+                )
+
+                # No function call — final response (stream to UI)
+                if function_call is None:
+                    final = (
+                        thought_text or "I processed your request but couldn't generate a response."
+                    )
+                    await self._broadcast_text_chunk(final)
+                    trace.final_response = final
+                    trace.steps.append(step)
+                    break
+
+                # Execute the tool
+                observation, approval_id, trace_id = await self._execute_action(
+                    step.action,
+                    step.action_input,
+                    thought=step.thought,
+                    message_context=message,
+                )
+                step.observation = observation
+
+                if approval_id:
+                    trace.pending_approvals.append(approval_id)
+                if trace_id:
+                    trace.decision_trace_ids.append(trace_id)
+
+                trace.steps.append(step)
+
+                # Append model response + function response in Gemini format
+                conversation.append({"role": "model", "parts": [{"text": thought_text}]})
+                conversation.append(
+                    {
+                        "role": "user",
+                        "parts": [
+                            {
+                                "function_response": {
+                                    "name": function_call.name,
+                                    "response": {"result": observation},
+                                }
+                            }
+                        ],
+                    }
+                )
+
+            except Exception as e:
+                if is_context_overflow_error(e):
+                    conversation = self._recover_from_overflow(conversation, iteration)
+                    try:
+                        await self._llm_chat(conversation, 4096, 0.1, tools=tool_schemas)
+                        continue
+                    except Exception as retry_err:
+                        if is_context_overflow_error(retry_err):
+                            conversation = compact_conversation(conversation, keep_last=4)
+                            continue
+                logger.error("ReAct iteration failed", error=str(e), iteration=iteration)
+                trace.final_response = (
+                    f"I encountered an error while processing your request: {str(e)[:100]}"
+                )
+                break
+
+        else:
+            logger.warning("ReAct hit max iterations", iterations=MAX_REACT_ITERATIONS)
+            trace.final_response = await self._generate_summary(message, trace)
+
+    # ------------------------------------------------------------------
+    # OpenAI-compatible native tool_use path (OpenAI, Together, OpenRouter)
+    # ------------------------------------------------------------------
+
+    async def _react_loop_openai_native(
+        self, message: str, conversation: list[dict], trace: ReactTrace
+    ) -> None:
+        """ReAct loop using OpenAI-style native function calling."""
+        all_tools = self.tool_registry.all()
+        eligible_tools, _, _ = await self.tool_filter.get_eligible_tools(all_tools)
+        tool_schemas = [t.to_openai_schema() for t in eligible_tools]
+        logger.debug(
+            "OpenAI-compatible native tools ready",
+            tool_count=len(tool_schemas),
+            tool_names=[t.name for t in eligible_tools],
+        )
+
+        for iteration in range(MAX_REACT_ITERATIONS):
+            logger.debug("ReAct iteration (openai-native)", iteration=iteration)
+
+            try:
+                response = await self._llm_chat(conversation, 4096, 0.1, tools=tool_schemas)
+
+                message_obj = response.choices[0].message
+                thought_text = message_obj.content or ""
+                tool_calls = message_obj.tool_calls
+
+                step = ThoughtAction(
+                    thought=thought_text,
+                    action=tool_calls[0].function.name if tool_calls else None,
+                    action_input=(
+                        json.loads(tool_calls[0].function.arguments) if tool_calls else {}
+                    ),
+                )
+
+                logger.info(
+                    "ReAct step",
+                    iteration=iteration,
+                    thought=step.thought[:100],
+                    action=step.action,
+                )
+
+                await self._broadcast_react_step(iteration, step.thought, step.action)
+
+                _agent_progress["steps"].append(
+                    {
+                        "i": iteration,
+                        "action": step.action,
+                        "thought": step.thought[:150],
+                    }
+                )
+
+                # No tool call — final response (stream to UI)
+                if not tool_calls:
+                    final = (
+                        thought_text or "I processed your request but couldn't generate a response."
+                    )
+                    await self._broadcast_text_chunk(final)
+                    trace.final_response = final
+                    trace.steps.append(step)
+                    break
+
+                # Execute the tool
+                observation, approval_id, trace_id = await self._execute_action(
+                    step.action,
+                    step.action_input,
+                    thought=step.thought,
+                    message_context=message,
+                )
+                step.observation = observation
+
+                if approval_id:
+                    trace.pending_approvals.append(approval_id)
+                if trace_id:
+                    trace.decision_trace_ids.append(trace_id)
+
+                trace.steps.append(step)
+
+                # Append assistant message with tool calls
+                assistant_msg: dict = {"role": "assistant", "content": thought_text}
+                assistant_msg["tool_calls"] = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in tool_calls
+                ]
+                conversation.append(assistant_msg)
+
+                # Append tool result
+                conversation.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_calls[0].id,
+                        "content": observation,
+                    }
+                )
+
+            except Exception as e:
+                if is_context_overflow_error(e):
+                    conversation = self._recover_from_overflow(conversation, iteration)
+                    try:
+                        await self._llm_chat(conversation, 4096, 0.1, tools=tool_schemas)
+                        continue
+                    except Exception as retry_err:
+                        if is_context_overflow_error(retry_err):
+                            conversation = compact_conversation(conversation, keep_last=4)
+                            continue
+                logger.error("ReAct iteration failed", error=str(e), iteration=iteration)
+                trace.final_response = (
+                    f"I encountered an error while processing your request: {str(e)[:100]}"
+                )
+                break
+
+        else:
+            logger.warning("ReAct hit max iterations", iterations=MAX_REACT_ITERATIONS)
+            trace.final_response = await self._generate_summary(message, trace)
+
+    # ------------------------------------------------------------------
+    # JSON-in-prompt path (fallback for providers without native tool support)
+    # ------------------------------------------------------------------
+
+    async def _react_loop_json(
+        self, message: str, conversation: list[dict], trace: ReactTrace
+    ) -> None:
+        """ReAct loop using JSON-in-prompt for providers without native tool support."""
+        for iteration in range(MAX_REACT_ITERATIONS):
+            logger.debug("ReAct iteration (json)", iteration=iteration)
+
+            try:
+                content = await self._llm_chat(conversation, 4096, 0.1)
                 content = content.strip()
 
                 # Parse JSON response
@@ -598,15 +1309,37 @@ Example queries:
                     action_input=parsed.get("action_input", {}),
                 )
 
-                logger.debug(
+                logger.info(
                     "ReAct step",
+                    iteration=iteration,
                     thought=step.thought[:100],
                     action=step.action,
                 )
 
-                # If no action, we have the final response
+                # Broadcast step to chat UI via SSE
+                await self._broadcast_react_step(iteration, step.thought, step.action)
+
+                # Update polling-based progress
+                _agent_progress["steps"].append(
+                    {
+                        "i": iteration,
+                        "action": step.action,
+                        "thought": step.thought[:150],
+                    }
+                )
+
+                # If no action, we have the final response (stream to UI)
                 if step.action is None:
-                    trace.final_response = parsed.get("response", step.thought)
+                    raw_response = parsed.get("response") or step.thought
+                    # Clean up: strip any JSON wrapper that leaked through
+                    cleaned = self._clean_response(raw_response)
+                    final = (
+                        cleaned
+                        or step.thought
+                        or "I processed your request but couldn't generate a response."
+                    )
+                    await self._broadcast_text_chunk(final)
+                    trace.final_response = final
                     trace.steps.append(step)
                     break
 
@@ -642,6 +1375,15 @@ Example queries:
                 )
 
             except Exception as e:
+                if is_context_overflow_error(e):
+                    conversation = self._recover_from_overflow(conversation, iteration)
+                    try:
+                        content = await self._llm_chat(conversation, 4096, 0.1)
+                        continue
+                    except Exception as retry_err:
+                        if is_context_overflow_error(retry_err):
+                            conversation = compact_conversation(conversation, keep_last=4)
+                            continue
                 logger.error("ReAct iteration failed", error=str(e), iteration=iteration)
                 trace.final_response = (
                     f"I encountered an error while processing your request: {str(e)[:100]}"
@@ -653,35 +1395,102 @@ Example queries:
             logger.warning("ReAct hit max iterations", iterations=MAX_REACT_ITERATIONS)
             trace.final_response = await self._generate_summary(message, trace)
 
-        logger.info(
-            "ReAct complete",
-            iterations=len(trace.steps),
-            approvals=len(trace.pending_approvals),
-        )
-
-        return trace
-
     def _parse_react_response(self, content: str) -> dict:
-        """Parse the LLM's JSON response."""
-        # Handle markdown code blocks
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0]
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0]
+        """Parse the LLM's JSON response, with robust fallback extraction."""
+        import re
 
+        # Try 1: markdown code blocks
+        if "```json" in content:
+            block = content.split("```json")[1].split("```")[0]
+            try:
+                return json.loads(block.strip())
+            except json.JSONDecodeError:
+                pass
+        elif "```" in content:
+            block = content.split("```")[1].split("```")[0]
+            try:
+                return json.loads(block.strip())
+            except json.JSONDecodeError:
+                pass
+
+        # Try 2: raw JSON parse
         try:
             return json.loads(content.strip())
         except json.JSONDecodeError:
-            # Try to extract key fields manually
-            logger.warning("Failed to parse ReAct JSON, attempting manual extraction")
-            result = {"thought": content}
+            pass
 
-            # Look for response patterns
-            if "final response" in content.lower() or "my response" in content.lower():
-                result["action"] = None
-                result["response"] = content
+        # Try 3: find JSON object anywhere in the text
+        brace_match = re.search(r'\{[^{}]*"(thought|action|response)"[^{}]*\}', content, re.DOTALL)
+        if brace_match:
+            try:
+                return json.loads(brace_match.group())
+            except json.JSONDecodeError:
+                pass
 
-            return result
+        # Try 4: find nested JSON (with action_input containing {})
+        deep_match = re.search(r'\{.*"action"\s*:.*\}', content, re.DOTALL)
+        if deep_match:
+            text = deep_match.group()
+            depth = 0
+            end = 0
+            for i, c in enumerate(text):
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+            if end:
+                try:
+                    return json.loads(text[:end])
+                except json.JSONDecodeError:
+                    pass
+
+        # Try 5: truncated JSON — extract fields via regex
+        # This handles when max_tokens cuts off the response before closing }
+        thought_match = re.search(r'"thought"\s*:\s*"((?:[^"\\]|\\.)*)"', content)
+        action_match = re.search(r'"action"\s*:\s*(null|"([^"]*)")', content)
+        response_match = re.search(r'"response"\s*:\s*"((?:[^"\\]|\\.)*)', content)
+
+        if thought_match and action_match:
+            action_val = action_match.group(2) if action_match.group(2) else None
+            response_val = response_match.group(1) if response_match else ""
+            # Unescape JSON string escapes
+            try:
+                response_val = json.loads(f'"{response_val}"')
+            except json.JSONDecodeError:
+                response_val = response_val.replace("\\n", "\n").replace('\\"', '"')
+            logger.info("Extracted ReAct fields from truncated JSON", action=action_val)
+            return {
+                "thought": thought_match.group(1),
+                "action": action_val,
+                "response": response_val,
+            }
+
+        # Fallback: treat entire content as final response
+        logger.warning(
+            "Failed to parse ReAct JSON, treating as final response",
+            content_preview=content[:200],
+        )
+        return {"thought": content, "action": None, "response": content}
+
+    @staticmethod
+    def _clean_response(response: str) -> str:
+        """Strip any JSON wrapper that leaked into the final response text."""
+        s = response.strip()
+        # If it looks like raw JSON, try to extract just the response field
+        if s.startswith("{") and '"response"' in s:
+            import re
+
+            m = re.search(r'"response"\s*:\s*"((?:[^"\\]|\\.)*)', s)
+            if m:
+                val = m.group(1)
+                try:
+                    return json.loads(f'"{val}"')
+                except json.JSONDecodeError:
+                    return val.replace("\\n", "\n").replace('\\"', '"')
+        return s
 
     async def _execute_action(
         self,
@@ -704,11 +1513,19 @@ Example queries:
         """
         tool = self.tool_registry.get(action)
         if not tool:
+            logger.warning("Unknown tool requested", tool=action)
             return (
                 f"Error: Unknown tool '{action}'. Available tools: {[t.name for t in self.tool_registry.all()]}",
                 None,
                 None,
             )
+
+        logger.debug(
+            "Executing tool",
+            tool=action,
+            param_keys=list(action_input.keys()),
+            param_types={k: type(v).__name__ for k, v in action_input.items()},
+        )
 
         # Determine if this action should be traced
         # Trace: approval-required actions, task/event creation, email drafting
@@ -793,15 +1610,17 @@ Example queries:
                     obs = f"Found {len(result.data)} results:\n" + "\n".join(items)
                     if len(result.data) > 15:
                         obs += f"\n  ... and {len(result.data) - 15} more"
-                    return obs, None, trace_id
+                    return truncate_tool_result(obs, self._max_result_chars), None, trace_id
                 elif isinstance(result.data, dict):
+                    obs = f"Result: {json.dumps(result.data, indent=2, default=str)}"
                     return (
-                        f"Result: {json.dumps(result.data, indent=2, default=str)}",
+                        truncate_tool_result(obs, self._max_result_chars),
                         None,
                         trace_id,
                     )
                 else:
-                    return f"Result: {result.data}", None, trace_id
+                    obs = f"Result: {result.data}"
+                    return truncate_tool_result(obs, self._max_result_chars), None, trace_id
             else:
                 return f"Error: {result.error}", None, None
 
@@ -836,10 +1655,10 @@ Instructions:
 Your response:"""
 
         try:
-            response = self._llm_chat(
+            response = await self._llm_chat(
                 [{"role": "user", "content": prompt}],
-                max_tokens=1024,
-                temperature=0.4,
+                1024,
+                0.4,
             )
             return response.strip()
         except Exception as e:
